@@ -1,5 +1,5 @@
 # Production stack for Mercury — /opt/stacks/shopify-reviews/
-# Additional services (cloudflared, backup) are added in their respective build steps.
+# Uncomment ports for direct local dev exposure; leave hidden behind cloudflared in prod.
 
 services:
   reviews-app:
@@ -16,6 +16,32 @@ services:
     #   - "8080:8080"
     networks:
       - reviews-net
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: reviews-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
+    networks:
+      - reviews-net
+    depends_on:
+      - reviews-app
+
+  backup:
+    image: alpine:latest
+    container_name: reviews-backup
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./scripts:/scripts:ro
+      - /root/.ssh:/root/.ssh:ro
+    environment:
+      TZ: America/New_York
+    # Install rsync/openssh/sqlite, then run a tiny crond schedule (3 AM daily).
+    command: >
+      sh -c "apk add --no-cache rsync openssh-client sqlite tzdata &&
+             echo '0 3 * * * sh /scripts/backup.sh >> /data/backup.log 2>&1' > /etc/crontabs/root &&
+             crond -f -d 8"
 
 networks:
   reviews-net:

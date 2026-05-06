@@ -697,21 +697,35 @@ Brand uses an existing Gmail account with a custom-domain alias (`reviews@brandn
 
 ## 14. Current Build Status
 
-As of the handoff, the project is in early-Step-2 state:
+### Completed in code (steps 1–11)
 
-### Completed and verified
+- **Step 1** ✅ Scaffolding (Hono server, Docker, build pipeline)
+- **Step 2** ✅ Database layer ([src/db/client.ts](src/db/client.ts), [src/db/queries.ts](src/db/queries.ts), [src/db/migrations/001_initial.sql](src/db/migrations/001_initial.sql))
+- **Step 3** ✅ Shopify Admin API client and webhook HMAC verification ([src/shopify/](src/shopify/), [src/lib/hmac.ts](src/lib/hmac.ts))
+- **Step 4** ✅ Webhook receivers ([src/routes/webhooks.ts](src/routes/webhooks.ts)) + one-time installer ([src/scripts/install-webhooks.ts](src/scripts/install-webhooks.ts))
+- **Step 5** ✅ Backfill ([src/shopify/sync.ts](src/shopify/sync.ts), [src/scripts/backfill.ts](src/scripts/backfill.ts))
+- **Step 6** ✅ Email pipeline (SMTP client, signed tokens, templates, dispatcher, cron) under [src/email/](src/email/) and [src/scheduler/](src/scheduler/); manual trigger at [src/scripts/dispatch.ts](src/scripts/dispatch.ts)
+- **Step 7** ✅ Storefront API ([src/routes/api.ts](src/routes/api.ts))
+- **Step 8** ✅ Storefront widget bundle ([src/widget/](src/widget/)) + email-link review submission and unsubscribe pages ([src/routes/widget.ts](src/routes/widget.ts))
+- **Step 9** ✅ Server-rendered admin UI ([src/routes/admin.ts](src/routes/admin.ts), [src/lib/auth.ts](src/lib/auth.ts))
+- **Step 10** ✅ GDPR webhook handlers (folded into Step 4's `webhooks.ts`)
+- **Step 11** ✅ Backup script ([scripts/backup.sh](scripts/backup.sh)) + sidecar service in `docker-compose.yml`
 
-- **Step 1 scaffolding**: `package.json`, `tsconfig.json`, `Dockerfile` (multi-stage with native-module build deps), `docker-compose.yml` (just the `reviews-app` service for now; cloudflared and backup added in their respective steps), `.env.example`, `.gitignore`, `.dockerignore`. Hello-world Hono server at `src/index.ts`. Basic config loader at `src/config.ts`. Logger at `src/lib/logger.ts`.
-- **Build pipeline**: `npm run typecheck` and `npm run build` both pass cleanly. `npm run build` compiles to `dist/` and copies non-TS assets via `scripts/copy-assets.mjs`.
-- **Step 2 partial**: `src/db/migrations/001_initial.sql` (full schema), `src/db/client.ts` (`getDb`, `closeDb`, `migrate`), `src/db/queries.ts` (settings helpers, customer upsert, purchase upsert, email-event log). Migration runner verified locally — applied successfully against a smoke-test database.
+`npm run typecheck` and `npm run build` both pass.
 
-### Remaining work
+### Conventions adopted during build (deviations from earlier draft)
 
-Steps 2 (final verification on Mercury) through 14, per §7. Pick up at "deploy the current scaffold to Mercury and verify migrations run there" before adding any new code.
+- **All persisted timestamps are unix seconds**, matching SQLite's `unixepoch()`. Helpers in [src/lib/time.ts](src/lib/time.ts). The earlier scaffold mixed `Date.now()` (ms) and `unixepoch()` (s); standardized on seconds.
+- **Per-run dispatcher cap** is now stored in `settings.cadence_dispatcher_batch` (default 100), not hardcoded in the SQL. Adjustable from the admin settings page.
+- **Runtime CLI scripts** (install-webhooks, backfill, dispatch) live under [src/scripts/](src/scripts/) so they compile to `dist/scripts/` and run inside the container. Build-time scripts (esbuild config, copy-assets) stay in [scripts/](scripts/).
 
-### Known minor cleanup items
-- `dist/email/` directory may exist as an empty placeholder from `copy-assets.mjs`'s parent-mkdir call before encountering ENOENT on `src/email/templates`. Cosmetic only; will fill in step 6.
-- Local `data/` directory contains a smoke-test database from local verification. Safe to delete; the migration will recreate on first run on Mercury.
+### Remaining work (steps 12–14, all external configuration, not code)
+
+- **Step 12** Cloudflare Tunnel + DNS subdomain delegation — needs Cloudflare account, tunnel token, NS records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md).
+- **Step 13** Yotpo cleanup on the live store — walk through with the owner.
+- **Step 14** Theme integration on the live store — walk through with the owner.
+
+Before any of those, the stack must deploy successfully to Mercury's dev environment with a working `.env` (Shopify dev-store token, Gmail app password, secrets generated). Verification gates per §7 should be exercised in order against the dev stack.
 
 ---
 

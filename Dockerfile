@@ -10,7 +10,7 @@ RUN npm ci
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json package-lock.json tsconfig.json ./
+COPY package.json package-lock.json tsconfig.json esbuild.config.mjs ./
 COPY src ./src
 COPY scripts ./scripts
 RUN npm run build
@@ -28,5 +28,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/public ./public
 EXPOSE 8080
 CMD ["node", "dist/index.js"]

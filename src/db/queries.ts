@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { getDb } from './client.js';
+import { nowSec } from '../lib/time.js';
 
 // --- Settings (key/value config in DB) ---
 
@@ -41,7 +43,7 @@ export const upsertCustomer = (input: {
   firstName: string | null;
   lastName: string | null;
 }): CustomerRow => {
-  const now = Date.now();
+  const now = nowSec();
   const db = getDb();
 
   db.prepare(`
@@ -66,6 +68,12 @@ export const findCustomerByEmail = (email: string): CustomerRow | null => {
   return (getDb()
     .prepare('SELECT * FROM customers WHERE email = ?')
     .get(email.toLowerCase()) as CustomerRow | undefined) ?? null;
+};
+
+export const findCustomerById = (id: number): CustomerRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM customers WHERE id = ?')
+    .get(id) as CustomerRow | undefined) ?? null;
 };
 
 // --- Purchases ---
@@ -104,7 +112,7 @@ export const upsertPurchase = (input: {
     input.shopifyProductId,
     input.fulfilledAt,
     input.dueAt,
-    Date.now(),
+    nowSec(),
   );
 };
 
@@ -119,6 +127,422 @@ export const markPurchaseFulfilled = (input: {
        SET fulfilled_at = ?, due_at = ?
      WHERE shopify_order_id = ? AND shopify_product_id = ?
   `).run(input.fulfilledAt, input.dueAt, input.shopifyOrderId, input.shopifyProductId);
+};
+
+// Mark every purchase line for the order as fulfilled in one shot.
+// Only updates rows that are not already fulfilled, so re-deliveries of the
+// orders/fulfilled webhook don't reset due_at and inflate the cadence.
+export const markOrderFulfilled = (input: {
+  shopifyOrderId: string;
+  fulfilledAt: number;
+  dueAt: number;
+}): number => {
+  const result = getDb().prepare(`
+    UPDATE purchases
+       SET fulfilled_at = ?, due_at = ?
+     WHERE shopify_order_id = ?
+       AND fulfilled_at IS NULL
+  `).run(input.fulfilledAt, input.dueAt, input.shopifyOrderId);
+  return result.changes;
+};
+
+export const findPurchasesByOrder = (shopifyOrderId: string): PurchaseRow[] => {
+  return getDb()
+    .prepare('SELECT * FROM purchases WHERE shopify_order_id = ?')
+    .all(shopifyOrderId) as PurchaseRow[];
+};
+
+export const findPurchaseById = (id: number): PurchaseRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM purchases WHERE id = ?')
+    .get(id) as PurchaseRow | undefined) ?? null;
+};
+
+// --- Customer redaction (GDPR) ---
+
+export const anonymizeCustomer = (customerId: number): void => {
+  const db = getDb();
+  const row = db.prepare('SELECT email FROM customers WHERE id = ?').get(customerId) as { email: string } | undefined;
+  if (!row) return;
+  // Deterministic redaction: keep the row keyed by a hash so the unique-email constraint stays satisfied.
+  const hash = crypto.createHash('sha256').update(row.email).digest('hex').slice(0, 16);
+  const redactedEmail = `redacted-${hash}@invalid.local`;
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE customers
+         SET email = ?, first_name = NULL, last_name = NULL,
+             shopify_customer_id = NULL, global_opt_out = 1
+       WHERE id = ?
+    `).run(redactedEmail, customerId);
+    db.prepare(`
+      UPDATE reviews
+         SET reviewer_email = ?, reviewer_name = NULL
+       WHERE customer_id = ?
+    `).run(redactedEmail, customerId);
+  })();
+};
+
+export const findCustomerByShopifyId = (shopifyCustomerId: string): CustomerRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM customers WHERE shopify_customer_id = ?')
+    .get(shopifyCustomerId) as CustomerRow | undefined) ?? null;
+};
+
+// --- Dispatcher: eligibility + recording ---
+
+export interface EligibleRow {
+  // purchase fields
+  p_id: number;
+  p_shopify_order_id: string;
+  p_shopify_product_id: string;
+  p_request_count: number;
+  p_due_at: number | null;
+  // customer fields
+  c_id: number;
+  c_email: string;
+  c_first_name: string | null;
+  c_last_name: string | null;
+}
+
+// Canonical eligibility query — every suppression rule is an AND clause here.
+// Adding new suppression rules: add another AND, do not filter in TypeScript.
+// Returns at most `batchSize` rows; orders by oldest due_at first so the
+// longest-waited purchases get attention first.
+export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
+  return getDb().prepare(`
+    SELECT
+      p.id                  AS p_id,
+      p.shopify_order_id    AS p_shopify_order_id,
+      p.shopify_product_id  AS p_shopify_product_id,
+      p.request_count       AS p_request_count,
+      p.due_at              AS p_due_at,
+      c.id                  AS c_id,
+      c.email               AS c_email,
+      c.first_name          AS c_first_name,
+      c.last_name           AS c_last_name
+    FROM purchases p
+    JOIN customers c ON c.id = p.customer_id
+    WHERE p.due_at IS NOT NULL
+      AND p.due_at <= unixepoch()
+      AND p.reviewed_at IS NULL
+      AND p.product_opt_out = 0
+      AND c.global_opt_out = 0
+      AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
+      AND (c.last_request_sent_at IS NULL
+           OR c.last_request_sent_at < unixepoch()
+              - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400)
+      AND NOT EXISTS (
+        SELECT 1 FROM reviews r
+         WHERE r.customer_id = c.id
+           AND r.shopify_product_id = p.shopify_product_id
+      )
+    ORDER BY p.due_at ASC
+    LIMIT ?
+  `).all(batchSize) as EligibleRow[];
+};
+
+export const customerHasAnyReviews = (customerId: number): boolean => {
+  const row = getDb()
+    .prepare('SELECT 1 AS x FROM reviews WHERE customer_id = ? LIMIT 1')
+    .get(customerId) as { x: 1 } | undefined;
+  return row !== undefined;
+};
+
+// Transactional: bump counters, advance or null due_at, and log the event.
+// Pass the row that was returned by findEligiblePurchases — this function
+// reads the current cadence settings to decide whether to null due_at.
+export const recordRequestSent = (input: {
+  purchaseId: number;
+  customerId: number;
+  metadata?: Record<string, unknown>;
+}): void => {
+  const db = getDb();
+  const now = nowSec();
+  const minBetweenDays = getSettingNumber('cadence_min_days_between', 7);
+  const maxRequests = getSettingNumber('cadence_max_requests', 3);
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE purchases
+         SET request_count = request_count + 1,
+             last_request_at = ?,
+             due_at = CASE
+               WHEN request_count + 1 >= ? THEN NULL
+               ELSE ? + ? * 86400
+             END
+       WHERE id = ?
+    `).run(now, maxRequests, now, minBetweenDays, input.purchaseId);
+
+    db.prepare(`
+      UPDATE customers
+         SET unanswered_request_count = unanswered_request_count + 1,
+             last_request_sent_at = ?
+       WHERE id = ?
+    `).run(now, input.customerId);
+
+    db.prepare(`
+      INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
+      VALUES (?, ?, 'request_sent', ?, ?)
+    `).run(
+      input.customerId,
+      input.purchaseId,
+      input.metadata ? JSON.stringify(input.metadata) : null,
+      now,
+    );
+  })();
+};
+
+// --- Reviews ---
+
+export interface ReviewRow {
+  id: number;
+  shopify_product_id: string;
+  customer_id: number | null;
+  reviewer_email: string;
+  reviewer_name: string | null;
+  rating: number;
+  title: string | null;
+  body: string;
+  verified_purchase: number;
+  status: string;
+  merchant_reply: string | null;
+  merchant_reply_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export const insertReview = (input: {
+  shopifyProductId: string;
+  customerId: number | null;
+  reviewerEmail: string;
+  reviewerName: string | null;
+  rating: number;
+  title: string | null;
+  body: string;
+  verifiedPurchase: boolean;
+  status: 'pending' | 'published' | 'rejected';
+}): number => {
+  const now = nowSec();
+  const result = getDb().prepare(`
+    INSERT INTO reviews
+      (shopify_product_id, customer_id, reviewer_email, reviewer_name,
+       rating, title, body, verified_purchase, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.shopifyProductId,
+    input.customerId,
+    input.reviewerEmail.toLowerCase(),
+    input.reviewerName,
+    input.rating,
+    input.title,
+    input.body,
+    input.verifiedPurchase ? 1 : 0,
+    input.status,
+    now,
+    now,
+  );
+  return Number(result.lastInsertRowid);
+};
+
+// On review submission: stop further requests for this purchase and reset the
+// customer's unanswered counter (they engaged).
+export const recordReviewSubmitted = (input: { purchaseId: number; customerId: number | null }): void => {
+  const db = getDb();
+  const now = nowSec();
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE purchases
+         SET reviewed_at = ?, due_at = NULL
+       WHERE id = ?
+    `).run(now, input.purchaseId);
+    if (input.customerId !== null) {
+      db.prepare(`
+        UPDATE customers
+           SET unanswered_request_count = 0
+         WHERE id = ?
+      `).run(input.customerId);
+    }
+    db.prepare(`
+      INSERT INTO email_events (customer_id, purchase_id, kind, created_at)
+      VALUES (?, ?, 'review_submitted', ?)
+    `).run(input.customerId, input.purchaseId, now);
+  })();
+};
+
+export const listPublishedReviewsForProduct = (
+  shopifyProductId: string,
+  page: number,
+  size: number,
+): ReviewRow[] => {
+  const offset = Math.max(0, (page - 1) * size);
+  return getDb().prepare(`
+    SELECT * FROM reviews
+     WHERE shopify_product_id = ?
+       AND status = 'published'
+     ORDER BY created_at DESC
+     LIMIT ? OFFSET ?
+  `).all(shopifyProductId, size, offset) as ReviewRow[];
+};
+
+export const getProductAggregate = (shopifyProductId: string): { avg: number | null; count: number } => {
+  const row = getDb().prepare(`
+    SELECT AVG(rating) AS avg, COUNT(*) AS count
+      FROM reviews
+     WHERE shopify_product_id = ?
+       AND status = 'published'
+  `).get(shopifyProductId) as { avg: number | null; count: number };
+  return { avg: row.avg, count: row.count };
+};
+
+// --- Opt-outs ---
+
+export const setGlobalOptOut = (customerId: number): void => {
+  const now = nowSec();
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare('UPDATE customers SET global_opt_out = 1 WHERE id = ?').run(customerId);
+    db.prepare(`
+      INSERT INTO email_events (customer_id, purchase_id, kind, created_at)
+      VALUES (?, NULL, 'unsubscribed', ?)
+    `).run(customerId, now);
+  })();
+};
+
+export const setProductOptOut = (purchaseId: number, customerId: number | null): void => {
+  const now = nowSec();
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare('UPDATE purchases SET product_opt_out = 1, due_at = NULL WHERE id = ?').run(purchaseId);
+    db.prepare(`
+      INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
+      VALUES (?, ?, 'unsubscribed', '{"scope":"product"}', ?)
+    `).run(customerId, purchaseId, now);
+  })();
+};
+
+// --- Email-event recording for failures ---
+
+export const logEmailFailure = (input: {
+  customerId: number;
+  purchaseId: number;
+  error: string;
+}): void => {
+  getDb().prepare(`
+    INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
+    VALUES (?, ?, 'send_failed', ?, ?)
+  `).run(
+    input.customerId,
+    input.purchaseId,
+    JSON.stringify({ error: input.error.slice(0, 500) }),
+    nowSec(),
+  );
+};
+
+// --- Admin moderation ---
+
+export const listReviews = (input: { status?: string; limit: number; offset: number }): ReviewRow[] => {
+  if (input.status) {
+    return getDb().prepare(`
+      SELECT * FROM reviews
+       WHERE status = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?
+    `).all(input.status, input.limit, input.offset) as ReviewRow[];
+  }
+  return getDb().prepare(`
+    SELECT * FROM reviews
+     ORDER BY created_at DESC
+     LIMIT ? OFFSET ?
+  `).all(input.limit, input.offset) as ReviewRow[];
+};
+
+export const countReviewsByStatus = (): Record<string, number> => {
+  const rows = getDb().prepare(`
+    SELECT status, COUNT(*) AS n FROM reviews GROUP BY status
+  `).all() as Array<{ status: string; n: number }>;
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.status] = r.n;
+  return out;
+};
+
+export const findReviewById = (id: number): ReviewRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM reviews WHERE id = ?')
+    .get(id) as ReviewRow | undefined) ?? null;
+};
+
+export const updateReviewStatus = (id: number, status: 'published' | 'pending' | 'rejected'): void => {
+  getDb().prepare(`
+    UPDATE reviews SET status = ?, updated_at = ? WHERE id = ?
+  `).run(status, nowSec(), id);
+};
+
+export const setMerchantReply = (id: number, reply: string | null): void => {
+  getDb().prepare(`
+    UPDATE reviews
+       SET merchant_reply = ?, merchant_reply_at = ?, updated_at = ?
+     WHERE id = ?
+  `).run(reply, reply ? nowSec() : null, nowSec(), id);
+};
+
+export interface CustomerWithPurchases extends CustomerRow {
+  purchases: PurchaseRow[];
+}
+
+export const getCustomerDetail = (email: string): CustomerWithPurchases | null => {
+  const customer = findCustomerByEmail(email);
+  if (!customer) return null;
+  const purchases = getDb()
+    .prepare('SELECT * FROM purchases WHERE customer_id = ? ORDER BY created_at DESC')
+    .all(customer.id) as PurchaseRow[];
+  return { ...customer, purchases };
+};
+
+// Send-rate stats: counts of email_events grouped by kind in last N days.
+export const emailEventStats = (sinceSec: number): Record<string, number> => {
+  const rows = getDb().prepare(`
+    SELECT kind, COUNT(*) AS n FROM email_events
+     WHERE created_at >= ?
+     GROUP BY kind
+  `).all(sinceSec) as Array<{ kind: string; n: number }>;
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.kind] = r.n;
+  return out;
+};
+
+// --- Product cache (for email rendering and storefront fallbacks) ---
+
+export interface ProductCacheRow {
+  id: number;
+  shopify_product_id: string;
+  handle: string;
+  title: string;
+  featured_image_url: string | null;
+  updated_at: number;
+}
+
+export const upsertProductCache = (input: {
+  shopifyProductId: string;
+  handle: string;
+  title: string;
+  featuredImageUrl: string | null;
+}): void => {
+  getDb().prepare(`
+    INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(shopify_product_id) DO UPDATE SET
+      handle = excluded.handle,
+      title = excluded.title,
+      featured_image_url = excluded.featured_image_url,
+      updated_at = excluded.updated_at
+  `).run(input.shopifyProductId, input.handle, input.title, input.featuredImageUrl, nowSec());
+};
+
+export const findProductCache = (shopifyProductId: string): ProductCacheRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM products_cache WHERE shopify_product_id = ?')
+    .get(shopifyProductId) as ProductCacheRow | undefined) ?? null;
 };
 
 // --- Email events ---
@@ -137,6 +561,6 @@ export const logEmailEvent = (input: {
     input.purchaseId,
     input.kind,
     input.metadata ? JSON.stringify(input.metadata) : null,
-    Date.now(),
+    nowSec(),
   );
 };

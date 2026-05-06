@@ -10,18 +10,31 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node scripts/copy-assets.mjs",
+    "build": "tsc && node esbuild.config.mjs && node scripts/copy-assets.mjs",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "install-webhooks": "node dist/scripts/install-webhooks.js",
+    "install-webhooks:dev": "tsx src/scripts/install-webhooks.ts",
+    "backfill": "node dist/scripts/backfill.js",
+    "backfill:dev": "tsx src/scripts/backfill.ts",
+    "dispatch": "node dist/scripts/dispatch.js",
+    "dispatch:dev": "tsx src/scripts/dispatch.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
+    "bcrypt": "^6.0.0",
     "better-sqlite3": "^11.7.0",
-    "hono": "^4.6.14"
+    "hono": "^4.6.14",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.7"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^8.0.0",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

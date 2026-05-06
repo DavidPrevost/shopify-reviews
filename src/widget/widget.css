@@ -1,0 +1,112 @@
+/* Storefront widget styles — designed to inherit from the host theme.
+   Uses currentColor and inherit so the widget visually adapts. The single
+   accent (--reviews-star-color) can be overridden per-store. */
+
+.rv-widget {
+  font-family: inherit;
+  color: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+  margin: 1rem 0;
+}
+
+.rv-loading,
+.rv-empty,
+.rv-error {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.rv-stars {
+  display: inline-flex;
+  gap: 1px;
+  color: var(--reviews-star-color, #f5a623);
+  letter-spacing: 1px;
+  font-size: 1em;
+}
+
+.rv-star {
+  opacity: 0.25;
+}
+.rv-star-on {
+  opacity: 1;
+}
+
+.rv-aggregate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rv-aggregate-text {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
+.rv-aggregate-empty {
+  opacity: 0.6;
+  font-size: 0.9em;
+}
+
+.rv-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid currentColor;
+  border-color: rgba(127, 127, 127, 0.25);
+}
+
+.rv-write-link {
+  color: inherit;
+  text-decoration: underline;
+  font-size: 0.95em;
+}
+
+.rv-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.rv-review {
+  padding: 1rem 0;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+}
+.rv-review:last-child {
+  border-bottom: none;
+}
+
+.rv-review-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.rv-review-title {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.rv-review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.85em;
+  opacity: 0.75;
+  margin-bottom: 0.5rem;
+}
+
+.rv-review-verified {
+  font-weight: 500;
+}
+
+.rv-review-body {
+  font-size: 0.95em;
+  line-height: 1.55;
+  white-space: normal;
+}

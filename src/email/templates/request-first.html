@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>How was your {{ productTitle }}?</title>
+</head>
+<body style="margin:0; padding:0; background:#f6f6f6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#222;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px; background:#ffffff; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+        <tr><td style="padding:32px 32px 16px;">
+          <h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+          <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+            Thanks for your recent order from {{ brandName }}. We hope you're enjoying your <strong>{{ productTitle }}</strong>.
+          </p>
+          <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+            We'd love to hear what you think — your honest feedback helps us improve and helps other customers decide.
+          </p>
+        </td></tr>
+
+        <tr><td align="center" style="padding:8px 32px 24px;">
+          <a href="{{ reviewUrl }}"
+             style="display:inline-block; background:#222; color:#ffffff; text-decoration:none; padding:14px 28px; border-radius:6px; font-size:16px; font-weight:600;">
+            Write a quick review
+          </a>
+        </td></tr>
+
+        <tr><td style="padding:0 32px 32px;">
+          <p style="margin:0 0 8px; font-size:14px; color:#666; line-height:1.55;">
+            It takes about a minute. Thank you for being part of our story.
+          </p>
+        </td></tr>
+
+        <tr><td style="padding:16px 32px; border-top:1px solid #eaeaea; background:#fafafa; border-radius:0 0 8px 8px;">
+          <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
+            You're receiving this because you bought a product from {{ brandName }}.
+            <a href="{{ unsubProductUrl }}" style="color:#888; text-decoration:underline;">Don't ask about this product</a>
+            &middot;
+            <a href="{{ unsubGlobalUrl }}" style="color:#888; text-decoration:underline;">Unsubscribe from all review requests</a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

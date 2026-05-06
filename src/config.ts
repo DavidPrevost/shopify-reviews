@@ -23,9 +23,12 @@ export const config = {
       pass: process.env.SMTP_PASS ?? '',
       from: process.env.SMTP_FROM ?? '',
     },
+    brandName: process.env.BRAND_NAME ?? 'the brand',
   },
   admin: {
     passwordHash: process.env.ADMIN_PASSWORD_HASH ?? '',
+    sessionSecret: process.env.ADMIN_SESSION_SECRET ?? '',
+    sessionTtlDays: Number(process.env.ADMIN_SESSION_TTL_DAYS ?? 14),
   },
 };
 
