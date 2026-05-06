@@ -16,7 +16,7 @@ This project replaces Yotpo with a **self-hosted, owner-controlled reviews appli
 
 ### Goals
 
-- **$0/month recurring cost.** Use existing hardware, existing Gmail account, free Cloudflare tier.
+- **$0/month recurring cost.** Use existing hardware, existing Gmail account, Oracle Cloud Always-Free tier.
 - **Reliable review-request emails** with sophisticated suppression logic so customers are asked at the right moment and never spammed.
 - **Visual integration with the current legacy theme** (Trademark 1.7.3) without tight coupling to it — the widget must survive a future theme redesign without rework.
 - **Maintainable by an owner with basic coding skills** (Python, SQL, HTML — no fluency in any language). Favor convention, boring code, clear naming. No clever abstractions.
@@ -79,7 +79,7 @@ The owner is a co-owner of the brand, not an engineer. Adapt accordingly.
 
 1. **Never use the AskUserQuestion tool.** Ask clarifying questions in plain prose, embedded in your response. The owner finds multi-choice option boxes restrictive and counter to the back-and-forth they prefer. This applies in all modes, including plan mode — direct user feedback overrides default workflow rules.
 
-2. **Explain platform features in plain language before relying on their proper names.** When introducing tooling jargon (Shopify App Proxy, Cloudflare Tunnel, Docker Compose concepts, etc.), give a one-line everyday-terms description first. The owner will push back on jargon-dense responses.
+2. **Explain platform features in plain language before relying on their proper names.** When introducing tooling jargon (Shopify App Proxy, Tailscale, Docker Compose concepts, etc.), give a one-line everyday-terms description first. The owner will push back on jargon-dense responses.
 
 3. **When you have a clear best answer, lead with the decision.** Don't enumerate alternatives you've already rejected unless the owner explicitly asks for a comparison or the tradeoff is genuinely open. Walking through rejected options reads as filler when the recommendation is unambiguous.
 
@@ -91,38 +91,45 @@ The owner is a co-owner of the brand, not an engineer. Adapt accordingly.
 
 ## 5. Architecture Overview
 
-One Node.js application, deployed as a Docker stack on **Mercury** (the brand's home-lab mini-PC), exposed to the public internet via **Cloudflare Tunnel** at `reviews.<brand-domain>`. Storefront integration is a single `<script>` tag plus placeholder `<div>` in the legacy theme.
+One Node.js application, deployed as a Docker stack on **Mercury** (the brand's home-lab mini-PC), exposed to the public internet via a tiny **Oracle Cloud Always-Free relay VM** running Caddy. The relay terminates HTTPS at `reviews.<brand-domain>` and proxies traffic to Mercury over Tailscale. Storefront integration is a single `<script>` tag plus placeholder `<div>` in the legacy theme.
 
 ```
-                        ┌──────────────────────────────┐
-                        │   Cloudflare (DNS + Tunnel)  │
-                        │ reviews.brandname.com (HTTPS)│
-                        └──────────────┬───────────────┘
-                                       │ outbound tunnel
-        ┌──────────────────────────────┴──────────────────────────────┐
-        │              Mercury (Ubuntu 24.04 + Docker)                │
-        │   /opt/stacks/shopify-reviews/docker-compose.yml            │
-        │                                                             │
-        │   ┌──────────────────────┐     ┌──────────────────────────┐ │
-        │   │ cloudflared          │────▶│ reviews-app (Node/Hono)  │ │
-        │   │ (CF Tunnel daemon)   │     │  - Admin UI  (/admin)    │ │
-        │   └──────────────────────┘     │  - Storefront API (/api) │ │
-        │                                │  - Webhooks (/webhooks)  │ │
-        │                                │  - Widget JS (/widget.js)│ │
-        │                                │  - node-cron scheduler   │ │
-        │                                └────────┬─────────────────┘ │
-        │                                         │ volume mount      │
-        │                                ┌────────▼─────────┐         │
-        │                                │ /data/reviews.db │         │
-        │                                │   (SQLite file)  │         │
-        │                                └──────────────────┘         │
-        └─────────────────────────────────────────────────────────────┘
-                       │ nightly rsync over Tailscale
-                       ▼
-              Pebbles: /opt/backups/shopify-reviews/
+   Customer browser ───► reviews.brandname.com  (Squarespace A record → Oracle public IP)
+                                  │
+                                  ▼
+            ┌──────────────────────────────────────────────────┐
+            │   Oracle Cloud Always-Free ARM VM (Ubuntu 24.04) │
+            │   ─ Caddy: HTTPS termination + Let's Encrypt     │
+            │   ─ Tailscale: joined to brand tailnet           │
+            │   ─ Reverse-proxies to mercury:8080 (prod) or    │
+            │                       mercury:8081 (dev)         │
+            └──────────────────────┬───────────────────────────┘
+                                   │ Tailscale (encrypted overlay,
+                                   │ no inbound ports on home network)
+                                   ▼
+       ┌────────────────────────────────────────────────────────┐
+       │              Mercury (Ubuntu 24.04 + Docker)           │
+       │   /opt/stacks/shopify-reviews-{dev,prod}/              │
+       │                                                        │
+       │   ┌──────────────────────────────┐                     │
+       │   │ reviews-app (Node/Hono)      │                     │
+       │   │  - Admin UI  (/admin)        │                     │
+       │   │  - Storefront API (/api)     │                     │
+       │   │  - Webhooks (/webhooks)      │                     │
+       │   │  - Widget JS (/widget.js)    │                     │
+       │   │  - node-cron scheduler       │                     │
+       │   │  bound to Tailscale IP only  │                     │
+       │   └────────┬─────────────────────┘                     │
+       │            │ volume mount                              │
+       │   ┌────────▼─────────┐                                 │
+       │   │ /data/reviews.db │ ──► nightly rsync ──► Pebbles   │
+       │   │   (SQLite file)  │     (/opt/backups/shopify-      │
+       │   └──────────────────┘      reviews/)                  │
+       └────────────────────────────────────────────────────────┘
 
       Outbound mail → smtp.gmail.com (existing brand alias)
-      Inbound webhooks ← Shopify; widget reads ← customer browsers
+      Inbound webhooks ← Shopify (via Oracle relay → Mercury)
+      Widget reads     ← customer browsers (via Oracle relay → Mercury)
 ```
 
 ### Key technical choices
@@ -133,13 +140,14 @@ One Node.js application, deployed as a Docker stack on **Mercury** (the brand's 
 - **node-cron** — in-process cron scheduler.
 - **esbuild** — single-config-file bundler for the storefront widget JS.
 - **Docker Compose** — matches the existing `/opt/stacks/[service]/` pattern on Mercury.
+- **Oracle Cloud Always-Free + Caddy + Tailscale** for public ingress. Replaces the originally-planned Cloudflare Tunnel because Cloudflare's free tier no longer permits subdomain zones — and migrating brandname.com's DNS to Cloudflare wholesale is too risky for a live storefront. The relay model isolates all public traffic to a separate machine; Mercury never opens a port to the internet.
 - **Static Shopify Admin API token** (no OAuth) — single-store custom apps don't need OAuth. Token is generated once in Shopify admin and stored in the app's `.env`.
 - **Password-protected admin UI** at `reviews.<brand-domain>/admin` — no Shopify embedded admin, no App Bridge, no session-token JWTs. The admin is a plain server-rendered HTML interface accessed in any browser tab.
 - **Direct CORS-allowed storefront API** — not Shopify App Proxy. The widget JS calls our backend directly from the storefront origin. App Proxy is unavailable to single-store custom apps anyway.
 
 ### Explicitly avoided
 
-Remix, Next.js, Drizzle, Prisma, React for admin UI, OAuth flow, Shopify App Bridge, Shopify Theme App Extensions, Cloudflare Workers, D1, transactional email services (Resend/SES), VPS hosting. Each was considered; each was rejected for the reasoning captured in `~/.claude/plans/okay-claude-i-co-own-a-logical-wilkes.md` (the approved plan).
+Remix, Next.js, Drizzle, Prisma, React for admin UI, OAuth flow, Shopify App Bridge, Shopify Theme App Extensions, Cloudflare Workers, D1, transactional email services (Resend/SES), self-hosted SMTP, full Cloudflare DNS migration, opening inbound ports on the home network. Each was considered; each was rejected.
 
 ---
 
@@ -151,7 +159,7 @@ Remix, Next.js, Drizzle, Prisma, React for admin UI, OAuth flow, Shopify App Bri
 
 Code is **written** on the Windows desktop at `D:\AI\shopify-reviews\`. The local machine is for editing files, running typecheck (`npm run typecheck`), and reviewing diffs. **It is not used for running the application.**
 
-Do not assume the application can be tested locally with `npm run dev` or `docker compose up`. The owner does not want to install Docker on Windows for this project, and several runtime dependencies (Tailscale-routed backups, Cloudflare Tunnel, Gmail SMTP from a server identity) are easier to validate in the actual deployment environment.
+Do not assume the application can be tested locally with `npm run dev` or `docker compose up`. The owner does not want to install Docker on Windows for this project, and several runtime dependencies (Tailscale-routed backups, Oracle relay HTTPS, Gmail SMTP from a server identity) are easier to validate in the actual deployment environment.
 
 ### The execution machine — Mercury
 
@@ -180,7 +188,7 @@ To test against a Shopify development store without endangering the live brand s
 - `/opt/stacks/shopify-reviews-dev/` — points at a free Shopify development store (the owner will create one via Shopify Partners during step 12). Public hostname: `reviews-dev.brandname.com`.
 - `/opt/stacks/shopify-reviews/` — points at the live brand store. Public hostname: `reviews.brandname.com`.
 
-Each stack has its own `.env` with its own Shopify token, webhook secret, and Cloudflare Tunnel token. The application code is identical between the two.
+Each stack has its own `.env` with its own Shopify token, webhook secret, and host port (8080 prod, 8081 dev). The application code is identical between the two; the Oracle relay's Caddy config maps each public hostname to the right port on Mercury.
 
 ### The development loop
 
@@ -306,7 +314,7 @@ Files:
 - `src/widget/widget.ts` — vanilla TypeScript, no framework. Reads `data-product-id` and `data-reviews-widget` mode from each placeholder `<div>` on the page. Calls `/api/...` and renders inline.
 - `src/widget/widget.css` — uses `currentColor`, `inherit`, and theme CSS custom properties for visual integration. One overridable accent via `--reviews-star-color`.
 - `esbuild.config.mjs` — builds `src/widget/widget.ts` to `public/widget.js` (single file, IIFE format, minified). Also copies `src/widget/widget.css` to `public/widget.css`.
-- `src/routes/widget.ts` — serves `/widget.js` and `/widget.css` with long cache headers (Cloudflare edge will cache). Also serves `/r/:token` — the review-submission landing page (token-gated form).
+- `src/routes/widget.ts` — serves `/widget.js` and `/widget.css` with long cache headers. Also serves `/r/:token` — the review-submission landing page (token-gated form).
 
 Update `package.json`:
 - `"build": "tsc && node esbuild.config.mjs && node scripts/copy-assets.mjs"`
@@ -373,31 +381,23 @@ Cron entry inside the container (set up at first run): `0 3 * * * /scripts/backu
 
 Verification gate: on Mercury dev stack, `docker compose exec backup /scripts/backup.sh`. Confirm a snapshot file appears in `/opt/backups/shopify-reviews/` on Pebbles.
 
-### Step 12 — Cloudflare Tunnel + DNS subdomain delegation
+### Step 12 — Public ingress via Oracle relay (Caddy + Tailscale)
 
-Performed via Cloudflare dashboard and Squarespace DNS panel — no code changes.
+Replaces the originally-planned Cloudflare Tunnel. Performed via Oracle Cloud, Squarespace DNS, and SSH — no application code changes. Full step-by-step instructions for the owner are in [external-accounts-setup.md](external-accounts-setup.md), Part 3. Summary:
 
-1. Owner signs up for free Cloudflare account.
-2. Add a new zone for `reviews.brandname.com` (Cloudflare supports subdomain-level zones — choose this rather than the full apex).
-3. Cloudflare assigns four nameservers for the new subdomain zone.
-4. In Squarespace's DNS panel for `brandname.com`, add **NS records** for the host `reviews` pointing to those four Cloudflare nameservers. (Apex zone stays at Squarespace; only the subdomain is delegated.)
-5. In Cloudflare → Zero Trust → Networks → Tunnels → Create Tunnel → name `reviews-mercury` → Docker → copy connector token into `CLOUDFLARED_TOKEN` env var on Mercury.
-6. Public Hostnames tab: `reviews.brandname.com` → HTTP → `reviews-app:8080`. Repeat for `reviews-dev.brandname.com` → the dev stack's reviews-app.
-7. Add the `cloudflared` service to `docker-compose.yml` (already in the plan):
+1. Owner signs up for Oracle Cloud Free Tier and creates an Always-Free ARM compute instance ("VM.Standard.A1.Flex"). Public IPv4 assigned at create time.
+2. Open the Oracle security list to allow inbound TCP/80 and TCP/443. Open Ubuntu's host firewall to match.
+3. Install Tailscale on the relay VM and join it to the brand tailnet so it can reach Mercury privately.
+4. Install Caddy. Configure `/etc/caddy/Caddyfile` with two server blocks:
+   ```
+   reviews-dev.brandname.com { reverse_proxy 100.117.6.18:8081 }
+   reviews.brandname.com     { reverse_proxy 100.117.6.18:8080 }
+   ```
+   (Substitute Mercury's actual Tailscale IP.) Caddy auto-issues Let's Encrypt certs on first request.
+5. At Squarespace → DNS, add **two A records**: host `reviews` → Oracle public IP, host `reviews-dev` → same Oracle public IP. Apex zone otherwise untouched.
+6. On Mercury, each `docker-compose.yml` (dev and prod) binds the app's port to the Tailscale interface only via `${HOST_BIND_IP}:${HOST_PORT}:8080`. Prod uses host port 8080; dev uses 8081.
 
-```yaml
-cloudflared:
-  image: cloudflare/cloudflared:latest
-  container_name: reviews-cloudflared
-  restart: unless-stopped
-  command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
-  networks:
-    - reviews-net
-  depends_on:
-    - reviews-app
-```
-
-Verification gate: `curl https://reviews.brandname.com/health` (and the dev variant) from any internet-connected machine returns `{"status":"ok"}`.
+Verification gate: `curl https://reviews-dev.brandname.com/health` from any internet-connected machine returns `{"status":"ok"}` once the dev stack is deployed. Before that point, Caddy will return 502 (which still confirms the ingress chain is working).
 
 ### Step 13 — Yotpo cleanup (live store)
 
@@ -683,11 +683,11 @@ Two always-on Intel N100 mini-PCs running Ubuntu Server 24.04 LTS, each with 16G
 
 ### Network
 
-Devices are on a Tailscale mesh. Neither was publicly exposed before this project. The reviews app introduces the **first public-internet ingress**, via Cloudflare Tunnel.
+Devices are on a Tailscale mesh. Neither was publicly exposed before this project. The reviews app introduces public-internet exposure via an **Oracle Cloud Always-Free relay VM** that joins the same tailnet — Mercury and Pebbles continue to have zero inbound ports open to the internet.
 
 ### Domain
 
-Brand domain (`brandname.com`) is held at **Squarespace**. The apex zone stays at Squarespace; only the `reviews` and `reviews-dev` subdomains delegate to Cloudflare via NS records.
+Brand domain (`brandname.com`) is held at **Squarespace**, which also hosts DNS. We add two A records — `reviews` and `reviews-dev` — pointing at the Oracle relay's public IP. Nothing else about the apex zone changes. Squarespace stays the sole authoritative DNS for the brand domain.
 
 ### Email
 
@@ -721,7 +721,7 @@ Brand uses an existing Gmail account with a custom-domain alias (`reviews@brandn
 
 ### Remaining work (steps 12–14, all external configuration, not code)
 
-- **Step 12** Cloudflare Tunnel + DNS subdomain delegation — needs Cloudflare account, tunnel token, NS records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md).
+- **Step 12** Oracle Cloud relay (Caddy + Tailscale) — needs Oracle Cloud Free Tier account, ARM compute instance, A records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md). Replaces the originally-planned Cloudflare Tunnel after Cloudflare's free-tier subdomain zone path was found to no longer be available.
 - **Step 13** Yotpo cleanup on the live store — walk through with the owner.
 - **Step 14** Theme integration on the live store — walk through with the owner.
 

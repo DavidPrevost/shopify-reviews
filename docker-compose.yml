@@ -1,5 +1,8 @@
-# Production stack for Mercury — /opt/stacks/shopify-reviews/
-# Uncomment ports for direct local dev exposure; leave hidden behind cloudflared in prod.
+# Stack for Mercury — /opt/stacks/shopify-reviews-{dev,prod}/
+# Public ingress is handled by an Oracle Cloud relay (Caddy + Tailscale)
+# rather than cloudflared inside this compose. The relay reaches Mercury via
+# its Tailscale IP, so we bind the app's port to that interface specifically
+# (not 0.0.0.0) — keeps the app off Mercury's LAN-facing interfaces.
 
 services:
   reviews-app:
@@ -9,23 +12,12 @@ services:
     env_file: .env
     volumes:
       - ./data:/data
-    expose:
-      - "8080"
-    # During local development, uncomment to publish the port:
-    # ports:
-    #   - "8080:8080"
+    ports:
+      # HOST_BIND_IP should be Mercury's Tailscale IP (100.x.y.z).
+      # HOST_PORT is 8080 for prod, 8081 for dev.
+      - "${HOST_BIND_IP}:${HOST_PORT}:8080"
     networks:
       - reviews-net
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: reviews-cloudflared
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
-    networks:
-      - reviews-net
-    depends_on:
-      - reviews-app
 
   backup:
     image: alpine:latest
@@ -37,7 +29,6 @@ services:
       - /root/.ssh:/root/.ssh:ro
     environment:
       TZ: America/New_York
-    # Install rsync/openssh/sqlite, then run a tiny crond schedule (3 AM daily).
     command: >
       sh -c "apk add --no-cache rsync openssh-client sqlite tzdata &&
              echo '0 3 * * * sh /scripts/backup.sh >> /data/backup.log 2>&1' > /etc/crontabs/root &&

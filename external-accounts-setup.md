@@ -121,81 +121,179 @@ For `.env` setup, we'll need:
 
 ---
 
-## Part 3 — Cloudflare (≈20 minutes active + several hours DNS propagation)
+## Part 3 — Public ingress: Oracle Cloud + Caddy + Tailscale (≈45 minutes)
 
-We need a free Cloudflare account, plus DNS for the `reviews` and `reviews-dev` subdomains delegated from Squarespace to Cloudflare.
+The plan changed: instead of Cloudflare Tunnel (which would have required moving brandname.com's DNS to Cloudflare — too risky for a live storefront), we'll use a tiny always-free virtual machine on Oracle Cloud as a doorway from the public internet to Mercury. The reviews app stays on Mercury; the VPS just relays traffic.
 
-### 3.1 — Sign up
+In plain terms:
+- A small Linux machine in Oracle's data center is given the public DNS name `reviews.brandname.com`.
+- That machine joins your Tailscale network (so it can reach Mercury privately, the same way your laptop can).
+- A piece of software called **Caddy** runs on the machine; it auto-fetches HTTPS certificates and forwards every request to Mercury.
+- At Squarespace, we add **one A record** (a single new line) for `reviews` pointing at the VPS's IP. Nothing else about your DNS changes.
 
-1. Go to **dash.cloudflare.com/sign-up**.
-2. Use the brand's Gmail.
-3. Confirm email.
+Cost: $0/month (Oracle's "Always Free" tier is genuinely free, not a trial).
 
-Stay on the **Free** plan throughout — everything we need is on free.
+### 3.1 — Sign up for Oracle Cloud
 
-### 3.2 — Add the subdomain as a zone
+1. Go to **oracle.com/cloud/free** → **Start for free**.
+2. Use the brand's Gmail address.
+3. Sign-up will ask for:
+   - **Country** — pick yours
+   - **Home region** — *this matters and can't easily be changed later.* Pick the data center geographically closest to your customers. For a US brand, "US East (Ashburn)" or "US West (Phoenix/San Jose)" are good defaults.
+   - **Phone verification** — they SMS you a code
+   - **Credit/debit card** — they will *not* charge it on the Always Free tier, but they verify it. Prepaid cards sometimes get rejected; use a regular credit card if you can.
+4. Sign-up takes 5–10 minutes from email confirmation through account activation. There may be a delay before the account is fully active.
 
-This is the unusual part. We're not handing the whole `brandname.com` to Cloudflare — only `reviews.brandname.com`. Squarespace stays in charge of the apex zone (your storefront, MX records, etc.).
+A few quirks worth knowing:
+- Oracle is bureaucratic compared to AWS/Cloudflare. Don't be alarmed if their UI feels enterprise-y.
+- If your card gets rejected and signup fails, **Hetzner Cloud** (~€4.50/month) is the cleanest alternative — same architecture, much smoother signup. Tell me if you hit this and we'll pivot.
 
-1. Cloudflare dashboard → **Add a domain** (or "Add site") in the top nav.
-2. In the input box, type **`reviews.brandname.com`** (the full subdomain, not the apex).
-3. Click **Continue**.
-4. Plan: **Free**. Click **Continue**.
-5. Cloudflare offers to scan existing DNS — there will be nothing to import for a brand-new subdomain. Skip / Continue.
-6. Cloudflare shows you **two nameservers** (sometimes four) like `xxx.ns.cloudflare.com` and `yyy.ns.cloudflare.com`. **Copy these.**
+### 3.2 — Create an Always Free ARM compute instance
 
-Some accounts get prompted that adding a subdomain zone requires a higher plan. If that happens, tell me — there's a workaround using a CNAME from Squarespace to a Cloudflare-hosted hostname, but it changes the Tunnel setup. Free-tier subdomain zones do work for most accounts, just not all.
+Oracle's Always Free tier includes up to four small ARM-based virtual machines (technically "Ampere A1" instances). One is plenty for our purpose.
 
-### 3.3 — Delegate the subdomain at Squarespace
+1. Once logged in, go to **Compute → Instances → Create instance**.
+2. Settings:
+   - **Name**: `reviews-relay`
+   - **Image**: click "Change image" → choose **Canonical Ubuntu 24.04** (Minimal is fine).
+   - **Shape**: click "Change shape" → "Ampere" tab → **VM.Standard.A1.Flex**, 1 OCPU, 6 GB memory. (You can give it more — the free pool allows up to 4 OCPU / 24 GB across all your A1 instances combined.)
+   - **Networking**: leave the defaults (Oracle creates a VCN and public subnet automatically). Make sure **"Assign a public IPv4 address"** is checked.
+   - **SSH keys**: choose **"Generate a key pair"**. Click "Save private key" — this downloads a `ssh-key-XXXX.key` file. **Move it somewhere safe immediately**; you cannot re-download it. (On Windows, save it to `C:\Users\you\.ssh\oracle-reviews-relay.key`.)
+3. Click **Create**. Provisioning takes 1–3 minutes.
 
-1. Log in to **Squarespace → Settings → Domains** for `brandname.com`.
-2. Open **DNS settings** (the panel that shows A, CNAME, MX records).
-3. **Add a new record**:
-   - Type: **NS**
-   - Host: `reviews` (just the word "reviews" — Squarespace will append `.brandname.com`)
-   - Data/Value: the first Cloudflare nameserver, e.g. `xxx.ns.cloudflare.com`
-4. **Add another NS record** for the same host `reviews`, value: the second Cloudflare nameserver.
-5. (If Cloudflare gave 4, add all 4 — repeat the same `reviews` host with each value.)
-6. Repeat the entire set with host `reviews-dev` so we have both subdomains delegated. (Saves a future trip back to Squarespace.)
-7. Save changes.
+Once running, the instance details page shows a **Public IP address** (something like `141.148.xx.xx`). **Save this IP** — you'll need it for DNS and SSH.
 
-### 3.4 — Wait for DNS propagation
+### 3.3 — Configure Oracle's network firewall
 
-DNS changes can take anywhere from minutes to several hours. While you wait:
+Oracle puts a firewall in front of every instance ("security list" in their terminology). By default it only allows SSH inbound. We need to also allow HTTP (80) and HTTPS (443).
 
-1. Go to **dnschecker.org**.
-2. Look up `reviews.brandname.com` with type **NS**.
-3. You should eventually see green checkmarks worldwide showing the Cloudflare nameservers. Once that happens, Cloudflare's dashboard will also show the zone as **Active**.
+1. From the instance detail page, click on the **Subnet** name under "Primary VNIC".
+2. Click on the **Default Security List** for that subnet.
+3. Under "Ingress Rules", click **Add Ingress Rules** and add two rules:
+   - Source: `0.0.0.0/0`, IP Protocol: `TCP`, Destination Port Range: `80` — Description: `HTTP for Let's Encrypt + redirects`
+   - Source: `0.0.0.0/0`, IP Protocol: `TCP`, Destination Port Range: `443` — Description: `HTTPS public traffic`
+4. Save.
 
-You don't have to babysit this — move on to other tasks and check back in a few hours.
+(There is *also* a host-level firewall inside Ubuntu that we'll handle in the next section.)
 
-### 3.5 — Create the Cloudflare Tunnel (after the zone is Active)
+### 3.4 — SSH into the new instance
 
-Once Cloudflare shows your zone as Active, come back and:
+From your Windows machine, open PowerShell or Git Bash and:
 
-1. Cloudflare dashboard → **Zero Trust** (left sidebar, lower section).
-2. **Networks → Tunnels → Create a tunnel**.
-3. Connector type: **Cloudflared**.
-4. Tunnel name: **`reviews-mercury`**.
-5. Click **Save tunnel**.
-6. On the next screen ("Install and run a connector"), choose **Docker** as the environment.
-7. Cloudflare shows a `docker run` command — inside that command is a `--token eyJ...` value. **Copy the entire token string** (the long base64-ish blob).
-8. Save as `CLOUDFLARED_TOKEN=eyJ...` in your notes.
-9. **Don't actually run** the docker command Cloudflare shows you — we'll integrate it into the project's docker-compose instead.
+```
+ssh -i C:\Users\you\.ssh\oracle-reviews-relay.key ubuntu@141.148.xx.xx
+```
 
-### 3.6 — Add public hostnames to the tunnel
+(Replace the path and IP with yours. Username is always `ubuntu` for Ubuntu images.)
 
-Same Tunnels page → click the `reviews-mercury` tunnel → **Public Hostname** tab → **Add a public hostname**:
+If SSH refuses with a permissions error about the key file, on Windows run:
+```
+icacls C:\Users\you\.ssh\oracle-reviews-relay.key /inheritance:r /grant:r "$($env:UserName):(R)"
+```
 
-1. **First hostname** (dev):
-   - Subdomain: `reviews-dev`
-   - Domain: `brandname.com` (should be selectable from a dropdown once the zone is Active)
-   - Type: **HTTP**
-   - URL: `reviews-app:8080`
-   - Save.
-2. **Second hostname** (prod) — repeat with subdomain `reviews`, same URL `reviews-app:8080`.
+### 3.5 — Install Tailscale on the relay
 
-The `reviews-app:8080` is the internal Docker service name + port. Both hostnames will point at this same string; the Tunnel runs inside the same Docker network as the app and resolves the name. Each environment (dev vs. prod) has its own Docker stack, so each has its own `reviews-app` container — they don't conflict.
+This makes the relay part of your private Tailscale network, so it can reach Mercury without opening any ports on your home router.
+
+```
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+The second command prints a URL. Open it in a browser (any device — your laptop is fine), sign in with the same Tailscale account that owns your tailnet, and approve. The relay will appear in your tailnet.
+
+In your Tailscale admin console (`login.tailscale.com/admin/machines`), give the new machine a memorable name like `reviews-relay`. Note its Tailscale IP (something like `100.x.y.z`).
+
+Test that the relay can reach Mercury:
+```
+ping -c 3 100.117.6.18
+```
+
+(Replace with Mercury's actual Tailscale IP.) You should see ping replies.
+
+### 3.6 — Open the host firewall for HTTP/HTTPS
+
+Ubuntu's `iptables` rules ship locked down on Oracle images. Run:
+
+```
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+(If `netfilter-persistent` isn't installed: `sudo apt install -y iptables-persistent` first; it'll prompt to save current rules — say yes.)
+
+### 3.7 — Install Caddy
+
+Caddy is the reverse-proxy. It handles HTTPS automatically by talking to Let's Encrypt; you do not need to manage certificates yourself.
+
+```
+sudo apt update
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install -y caddy
+```
+
+Verify Caddy is running:
+```
+sudo systemctl status caddy
+```
+
+### 3.8 — Add the DNS A record at Squarespace
+
+1. Squarespace → Settings → Domains → `brandname.com` → **DNS settings**.
+2. Add a new record:
+   - **Type**: `A`
+   - **Host**: `reviews`
+   - **Data/Value**: the Oracle public IP (e.g., `141.148.xx.xx`)
+   - **TTL**: 1 hour (or whatever's default)
+3. Add a second A record:
+   - **Type**: `A`
+   - **Host**: `reviews-dev`
+   - **Data/Value**: the same Oracle public IP
+4. Save.
+
+Both subdomains point to the same VPS; Caddy will route them to different ports on Mercury. Propagation usually takes 5–30 minutes via Squarespace.
+
+### 3.9 — Configure Caddy
+
+Edit `/etc/caddy/Caddyfile` (replace the existing contents):
+
+```
+sudo nano /etc/caddy/Caddyfile
+```
+
+Paste in (replacing `brandname.com` with your real domain and `100.117.6.18` with Mercury's actual Tailscale IP):
+
+```
+reviews-dev.brandname.com {
+    reverse_proxy 100.117.6.18:8081
+}
+
+reviews.brandname.com {
+    reverse_proxy 100.117.6.18:8080
+}
+```
+
+Save (Ctrl+O, Enter, Ctrl+X) and reload Caddy:
+
+```
+sudo systemctl reload caddy
+```
+
+Caddy will automatically request Let's Encrypt certificates the first time someone visits each subdomain. The first request takes ~5 seconds while the cert is issued; after that it's cached.
+
+### 3.10 — Verify
+
+From any machine on the public internet (your phone on cellular, or your laptop):
+
+```
+curl https://reviews-dev.brandname.com/health
+```
+
+Once the dev stack is deployed on Mercury this should return `{"status":"ok"}`. Until then, you'll get a 502 from Caddy — that's expected and confirms ingress is working end-to-end (it's reaching Mercury but Mercury isn't running anything yet on port 8081).
 
 ---
 
@@ -219,7 +317,11 @@ SHOPIFY_ADMIN_TOKEN_PROD=shpat_...
 SHOPIFY_API_KEY_PROD=...
 SHOPIFY_API_SECRET_PROD=...
 
-CLOUDFLARED_TOKEN=eyJ...
+ORACLE_RELAY_PUBLIC_IP=141.148.xx.xx
+ORACLE_RELAY_TAILSCALE_IP=100.x.y.z
+ORACLE_RELAY_SSH_KEY_PATH=C:\Users\you\.ssh\oracle-reviews-relay.key
 ```
 
-Tell me when you have all three parts done (or when one is blocking you) and we'll move into deployment. Plus tell me about anything that didn't match the steps above — Shopify and Cloudflare both occasionally rearrange their UI, and the steps above reflect what they look like as of early 2026.
+(There's no `CLOUDFLARED_TOKEN` anymore — we replaced Cloudflare Tunnel with the Oracle/Caddy relay.)
+
+Tell me when you have all three parts done (or when one is blocking you) and we'll move into deployment. Plus tell me about anything that didn't match the steps above — Oracle and Shopify both occasionally rearrange their UI, and the steps above reflect what they look like as of early 2026.
