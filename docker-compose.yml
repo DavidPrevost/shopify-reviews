@@ -1,0 +1,22 @@
+# Production stack for Mercury — /opt/stacks/shopify-reviews/
+# Additional services (cloudflared, backup) are added in their respective build steps.
+
+services:
+  reviews-app:
+    build: .
+    container_name: reviews-app
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+    # During local development, uncomment to publish the port:
+    # ports:
+    #   - "8080:8080"
+    networks:
+      - reviews-net
+
+networks:
+  reviews-net:
+    driver: bridge
