@@ -1,6 +1,6 @@
-# External Accounts Setup — Shopify, Cloudflare, Gmail
+# External Accounts Setup — Shopify, Google Cloud, Gmail
 
-You can work through these in any order, but the **Gmail app password** is the fastest, **Shopify** has the most steps, and **Cloudflare** has DNS propagation delays so kicking it off early is helpful.
+You can work through these in any order, but the **Gmail app password** is the fastest, **Shopify** has the most steps, and the **Google Cloud** signup can have a verification delay so it's worth kicking off early.
 
 When something asks you to copy a value (token, password, etc.), paste it into a temporary plain-text note. We'll move them all into proper `.env` files together later. Don't email these values to yourself or save them in cloud-synced docs — local plaintext is fine for the next few days.
 
@@ -38,162 +38,236 @@ If it's not there or shows a warning, this is the first thing to fix — the res
 
 ---
 
-## Part 2 — Shopify (≈30 minutes)
+## Part 2 — Shopify (≈45 minutes)
 
-You already have the live brand store. We need three things:
+> **Important — Shopify's app development structure changed in late 2025 / early 2026.** The old "store admin → Apps → Develop apps" flow that produced static Admin API tokens for single-store custom apps was **deprecated for merchant-owned stores effective January 1, 2026.** New apps now go through Shopify's **Dev Dashboard** at `dev.shopify.com`, and obtaining an Admin API access token requires a one-time install via OAuth. The token is still permanent once obtained — only the *path to it* is different.
 
-1. A free **Partners account** (lets you spin up a sandbox dev store).
-2. A **dev store** for testing without touching the live one.
-3. **Admin API tokens** for both the dev store and the live store, so the reviews app can read products / customers / orders.
+The pieces we need:
 
-### 2.1 — Create a Shopify Partners account
+1. A **Dev Dashboard account** (org-level — replaces the old "Partners account").
+2. A **development store** for testing without touching the live brand store.
+3. The **Reviews app** itself, created at the org level in the Dev Dashboard.
+4. **Admin API access tokens** for both the dev store and the live store (one per install).
 
-1. Go to **partners.shopify.com**.
-2. Click **"Join now"** (or "Sign up").
-3. Use the brand's primary Gmail address.
-4. Account type: **Merchant** is fine, or **Other** if asked.
-5. Confirm the email Shopify sends you.
+If you've already started this setup before reading this doc, sections 2.1, 2.2, and possibly 2.4 may already be done — skim and skip ahead.
+
+### 2.1 — Sign up for the Shopify Dev Dashboard
+
+1. Go to **dev.shopify.com** → sign in (or create a free account).
+2. Use the brand's primary Gmail address.
+3. The dashboard is one consolidated UI: **Apps**, **Stores**, **Catalogs**, **Organization**. There's no separate "Partners" account anymore.
+4. Note your **organization ID** from the URL — it appears in every dashboard path as `/dashboard/<org-id>/...`.
 
 ### 2.2 — Create a development store
 
-1. In the Partners dashboard left sidebar: **Stores → Add store**.
-2. Store type: **Development store** (free, no time limit, but **cannot** be transferred to a real merchant later — that's fine, we just need it for testing).
-3. Purpose: **"Build a new app or theme"** or **"Create a store to test or build for myself"** — either works.
-4. Store name: something like **`brandname-dev`** (this becomes `brandname-dev.myshopify.com`).
-5. Login email: same as your Partners account.
-6. Skip data import questions; defaults are fine.
-7. After creation: **log in to the dev store admin** (it's at `brandname-dev.myshopify.com/admin`).
+1. Sidebar → **Stores** → top-right **Create store**.
+2. Pick **Development store** (free, no time limit; can't be transferred to a real merchant — fine for our purposes).
+3. Store name: something like **`<brand>-dev`** (becomes `<brand>-dev.myshopify.com`).
+4. Skip data-import prompts; defaults are fine.
+5. Once created, the store appears in the Stores tab. Click it to open the dev-store admin in a new tab.
 
 ### 2.3 — Add a few test products to the dev store
 
-1. Dev store admin → **Products → Add product**.
-2. Create 2 or 3 simple products. Title, description, price — anything. Add one image each so the widget has something to render.
-3. Make sure each is set to **Active** and **Online Store** is in the sales channels.
+1. Dev-store admin → **Products → Add product**.
+2. Create 2–3 simple products. Title, description, price — anything. Add one image each so the storefront widget has something to render.
+3. Set each to **Active** with **Online Store** in the sales channels.
 4. We'll use these later to test the full review flow without ever touching the live store.
 
-### 2.4 — Get an Admin API token (DEV STORE)
+### 2.4 — Create the "Reviews" app
 
-This is the long part — Shopify hides it under "Develop apps" which is itself behind a setting that's off by default.
+1. Dev Dashboard → sidebar → **Apps** → top-right **Create app**.
+2. You'll see two paths. Pick **"Start from Dev Dashboard"** (the right-hand panel labeled *"Add scopes to quickly generate API credentials"*) — *not* the Shopify CLI option, which scaffolds a distributable app with embedded admin.
+3. App name: **`Reviews`** → click **Create**.
+4. You'll land on a "Create version" page. Submitting that form would create the app *and* immediately release a default version with `https://example.com` as the App URL, embedded admin enabled, and no scopes — none of which is right for our use case. **Don't fill out and submit that form yet.** Instead, navigate away (e.g., click your app name in the sidebar to go to the overview) — the app already exists at this point. You may see an initial `reviews-1` version with default settings; we'll override it in the next step.
 
-1. Dev store admin → **Apps** (left sidebar) → top of page, click **"Develop apps"**.
-2. If you see a **"Allow custom app development"** prompt: click it, accept the warning, click **Allow**. (You only do this once per store.)
-3. Click **"Create an app"** in the top-right.
-4. Name: **`Reviews`**. App developer: your account. Click **Create app**.
-5. On the new app's page → **Configuration** tab → **Admin API integration → Configure**.
-6. Check these scopes (use the search box):
-   - `read_products`
-   - `read_product_listings`
-   - `read_customers`
-   - `read_orders`
-   - `read_fulfillments`
-   - `read_inventory` (only if needed later — skip for now)
-7. Click **Save**.
-8. Switch to the **API credentials** tab.
-9. Click **Install app** → **Install** to confirm.
-10. After install, the page shows:
-    - **Admin API access token** — click "Reveal token once". **Copy immediately.** Save as `SHOPIFY_ADMIN_TOKEN_DEV=...`. Starts with `shpat_`.
-    - **API key** — visible normally. Save as `SHOPIFY_API_KEY_DEV=...`.
-    - **API secret key** — click "Reveal" to see. Save as `SHOPIFY_API_SECRET_DEV=...`.
+### 2.5 — Configure and release a proper app version
 
-The API secret is what we'll use for HMAC-verifying webhooks later. The Admin API token is what authenticates our outbound calls to Shopify.
+Versions in the Dev Dashboard are immutable — every config change is a new released version. We'll create `reviews-2` with the right config.
 
-### 2.5 — Get an Admin API token (LIVE BRAND STORE)
+1. Reviews app sidebar → **Versions** → top-right **Create version**.
+2. Fill in:
+   - **App URL**: `https://example.com` (cosmetic placeholder — only used by Shopify when merchants click into an embedded admin, which we're disabling)
+   - **Embed app in Shopify admin**: **UNCHECK** ← critical (we have our own admin UI at `reviews.<brand>.com/admin`, not embedded in Shopify)
+   - **Webhooks API version**: `2026-04` (latest, default)
+   - **Scopes** (required, comma-separated): `read_orders, read_customers, read_products`
+     - *The old `read_fulfillments` scope is gone; `read_orders` covers fulfillment data.*
+     - *`read_customers` is "protected customer data." It validates fine on dev stores; for the live store install it may show an extra consent screen.*
+     - *`write_metafields` (for v2 merchant replies) gets added in a later version — not needed for MVP.*
+   - **Optional scopes**: leave blank
+   - **Use legacy install flow**: **CHECK** ← critical (the default "Token Exchange" install flow requires App Bridge and embedded admin, which we don't use; legacy flow is the standard OAuth grant flow)
+   - **Redirect URLs**: `http://localhost:3456/auth/callback`
+     - *This is where Shopify sends the OAuth callback during install. We'll capture the token there with a one-shot local listener — see 2.6.*
+3. Click **Release** (top-right). Confirm in the modal (you can skip the optional version name/message).
+4. Version list should now show `reviews-2 Active`.
 
-Same procedure, on the live store admin (`brandname.myshopify.com/admin` or your custom admin URL):
+### 2.6 — Note the app's Client ID and Client Secret
 
-1. **Apps → Develop apps → Allow custom app development** (one time).
-2. **Create an app** named `Reviews`.
-3. Same scopes as above.
-4. Install → reveal Admin API token, API key, API secret.
-5. Save as:
-   - `SHOPIFY_ADMIN_TOKEN_PROD=shpat_...`
-   - `SHOPIFY_API_KEY_PROD=...`
-   - `SHOPIFY_API_SECRET_PROD=...`
+These are app-level credentials shared across all installs. The secret is also the **webhook signing secret** — same value, dual purpose.
 
-**Important:** The live store token gives the reviews app real access to your real customers and orders. Keep these notes private and we'll move them straight into the `.env` file once we deploy.
+1. Reviews app sidebar → **Settings** → **Credentials** section.
+2. Copy **Client ID** (visible by default).
+3. Click **Reveal client secret** → copy it.
+4. Save to your temp note:
+   ```
+   SHOPIFY_CLIENT_ID=...
+   SHOPIFY_CLIENT_SECRET=...           # also used as SHOPIFY_WEBHOOK_SECRET
+   ```
 
-### 2.6 — Take note of your store domains
+### 2.7 — Install on the dev store, capture the Admin API access token
 
-For `.env` setup, we'll need:
-- Dev myshopify domain: `brandname-dev.myshopify.com` (whatever you actually named it)
-- Live myshopify domain: `brandname.myshopify.com` (the underlying Shopify hostname, **not** your custom storefront domain)
-- Live custom storefront origin: the URL your customers actually visit, e.g. `https://www.brandname.com` (this becomes the CORS allowlist)
+This is the modern equivalent of the old "reveal token once" button. The install kicks off an OAuth grant flow; the access token is returned in the callback. We capture it with a tiny local script.
+
+**The dev team will provide a `scripts/install-shopify.ts` helper** that does the full dance:
+
+- Opens a local HTTP listener on `http://localhost:3456/auth/callback`
+- Opens your browser to:
+  `https://<shop>.myshopify.com/admin/oauth/authorize?client_id=<id>&scope=read_orders,read_customers,read_products&redirect_uri=http://localhost:3456/auth/callback&state=<nonce>`
+- After you click Install on Shopify's consent screen, Shopify redirects to `localhost:3456/auth/callback?code=...`
+- The script exchanges the `code` for an access token by POSTing to `https://<shop>.myshopify.com/admin/oauth/access_token` with the client ID + secret
+- The script prints the access token; you paste it into your temp note
+
+> Status note for the dev: the `install-shopify` script doesn't exist yet — it's part of project setup. It runs once per store, then is never needed again unless you add a new store. Reference: Shopify's "Authorization code grant" flow, https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/authorization-code-grant.
+
+Run:
+```
+npm run install-shopify -- --shop <brand>-dev
+```
+
+Save:
+```
+SHOPIFY_DEV_DOMAIN=<brand>-dev.myshopify.com
+SHOPIFY_ADMIN_TOKEN_DEV=shpat_...                    # starts with shpat_
+```
+
+> **Alternative if the install-shopify script isn't ready yet:** the Reviews app overview page in the Dev Dashboard has an **"Install app"** button (top-right of the Installs section). Clicking it triggers a special `redirect_from_developer_dashboard` flow that may bypass the redirect URL entirely and complete the install via Shopify's UI. After install, the Installs section of the app should expose the per-install Admin API access token. **This path is unverified at the time of writing — try it once on the dev store and let us know what you see.**
+
+### 2.8 — Repeat the install for the live brand store
+
+Same flow as 2.7, with the install target swapped to the live store (`<brand>.myshopify.com`):
+
+```
+npm run install-shopify -- --shop <brand>
+```
+
+The OAuth consent screen on the live store will tell you exactly what data the Reviews app can access. **Read it before clicking Install** — granting these scopes gives the app real read access to your live customers and orders.
+
+Save:
+```
+SHOPIFY_PROD_DOMAIN=<brand>.myshopify.com
+SHOPIFY_ADMIN_TOKEN_PROD=shpat_...
+```
+
+### 2.9 — Note your storefront origin
+
+For `.env` setup, the dev/prod stacks need to know the URL customers actually visit (becomes the storefront-API CORS allowlist):
+
+```
+SHOPIFY_STOREFRONT_ORIGIN=https://www.<brand>.com
+```
+
+This is your custom storefront domain, *not* the `.myshopify.com` admin domain.
+
+### 2.10 — Things to verify with us
+
+This doc makes a couple of educated guesses about parts of the install flow that weren't end-to-end tested while it was being written. Tell us if reality differs:
+
+1. **What appears in the Installs section of the app after a successful install** — specifically, whether the Admin API access token is visible there as a fallback if the OAuth callback capture fails.
+2. **Whether `read_customers` validates and grants normally during the live-store install** — it's classified as "protected customer data" and may trigger an extra approval prompt or require us to fill out a "Request access" form.
+3. **Whether the "Install app" button's `redirect_from_developer_dashboard` flow can be used instead of the OAuth-with-localhost-listener path.** If yes, we simplify 2.7 considerably.
 
 ---
 
-## Part 3 — Public ingress: Oracle Cloud + Caddy + Tailscale (≈45 minutes)
+## Part 3 — Public ingress: Google Cloud + Caddy + Tailscale (≈45 minutes)
 
-The plan changed: instead of Cloudflare Tunnel (which would have required moving brandname.com's DNS to Cloudflare — too risky for a live storefront), we'll use a tiny always-free virtual machine on Oracle Cloud as a doorway from the public internet to Mercury. The reviews app stays on Mercury; the VPS just relays traffic.
+We'll use a tiny always-free virtual machine on Google Cloud Platform (GCP) as a doorway from the public internet to Mercury. The reviews app stays on Mercury; the VM just relays traffic.
 
 In plain terms:
-- A small Linux machine in Oracle's data center is given the public DNS name `reviews.brandname.com`.
+- A small Linux machine in Google's data center is given the public DNS name `reviews.brandname.com`.
 - That machine joins your Tailscale network (so it can reach Mercury privately, the same way your laptop can).
 - A piece of software called **Caddy** runs on the machine; it auto-fetches HTTPS certificates and forwards every request to Mercury.
-- At Squarespace, we add **one A record** (a single new line) for `reviews` pointing at the VPS's IP. Nothing else about your DNS changes.
+- At Squarespace, we add **two A records** (one each for `reviews` and `reviews-dev`) pointing at the VM's IP. Nothing else about your DNS changes.
 
-Cost: $0/month (Oracle's "Always Free" tier is genuinely free, not a trial).
+Cost: **$0/month** for typical small-brand traffic. GCP's Always Free tier covers an `e2-micro` VM in a US region, plus 1 GB of internet egress per month. If traffic exceeds 1 GB egress, overage is billed at ~$0.12/GB — predictable and metered. We'll set up billing alerts so you'll never get a surprise.
 
-### 3.1 — Sign up for Oracle Cloud
+### 3.1 — Sign up for Google Cloud
 
-1. Go to **oracle.com/cloud/free** → **Start for free**.
-2. Use the brand's Gmail address.
+1. Go to **cloud.google.com** → click **Get started for free** (or **Sign in** if you already have a Google account associated with the brand Gmail).
+2. Sign in with the brand's Gmail address. Google may ask for a few profile details.
 3. Sign-up will ask for:
    - **Country** — pick yours
-   - **Home region** — *this matters and can't easily be changed later.* Pick the data center geographically closest to your customers. For a US brand, "US East (Ashburn)" or "US West (Phoenix/San Jose)" are good defaults.
-   - **Phone verification** — they SMS you a code
-   - **Credit/debit card** — they will *not* charge it on the Always Free tier, but they verify it. Prepaid cards sometimes get rejected; use a regular credit card if you can.
-4. Sign-up takes 5–10 minutes from email confirmation through account activation. There may be a delay before the account is fully active.
+   - **Account type** — *Individual* is correct for our use
+   - **Credit/debit card** — Google will *not* charge it as long as you stay in always-free configuration. They use it to deter abuse and to handle overages if any. New accounts get $300 in free credits valid for 90 days, but those credits are **separate from** the always-free tier we'll be using.
+4. Activation usually completes within a few minutes; occasionally there's a verification delay of a few hours.
 
-A few quirks worth knowing:
-- Oracle is bureaucratic compared to AWS/Cloudflare. Don't be alarmed if their UI feels enterprise-y.
-- If your card gets rejected and signup fails, **Hetzner Cloud** (~€4.50/month) is the cleanest alternative — same architecture, much smoother signup. Tell me if you hit this and we'll pivot.
+If your card gets declined or activation hangs for more than half a day, tell me and we'll pivot to **DigitalOcean** ($6/month, US-based) — same architecture, much smoother signup.
 
-### 3.2 — Create an Always Free ARM compute instance
+### 3.2 — Create a project
 
-Oracle's Always Free tier includes up to four small ARM-based virtual machines (technically "Ampere A1" instances). One is plenty for our purpose.
+GCP organizes everything under "projects." Each project is isolated and has its own billing, resources, and permissions. We'll make one just for the reviews relay.
 
-1. Once logged in, go to **Compute → Instances → Create instance**.
-2. Settings:
+1. Top of the GCP console, click the **project dropdown** (next to the "Google Cloud" logo) → **New Project**.
+2. **Project name**: `shopify-reviews-relay` (or anything memorable).
+3. **Organization/location**: leave default ("No organization" is fine for an individual account).
+4. Click **Create**. After ~30 seconds, switch into the new project via the same dropdown.
+
+### 3.3 — Set up billing alerts (do this before creating any resources)
+
+This is the safety net that ensures you never get a surprise bill. Set it up *first*, before anything is running.
+
+1. Top-left hamburger menu → **Billing**.
+2. If prompted, **link your billing account** to the new project.
+3. Once linked, click **Budgets & alerts** in the Billing sidebar → **Create budget**.
+4. Settings:
+   - **Name**: `reviews-relay-budget`
+   - **Scope**: select the `shopify-reviews-relay` project (uncheck "All projects")
+   - **Time range**: Monthly
+   - **Target amount**: `5` (USD) — this is *not* a hard cap; it's the spending threshold above which alerts fire. $5/month is generous; you'd have to send roughly 35 GB of overage traffic to reach it.
+   - **Alert thresholds**: leave the defaults at 50%, 90%, 100% — Google will email you when each threshold is crossed.
+5. Click **Finish**.
+
+You can come back later and lower the alert amount once you have a sense of normal traffic — say, $1 or $2 — so you get notified the moment anything looks unusual.
+
+### 3.4 — Create the e2-micro VM
+
+The `e2-micro` shape is the always-free compute instance — small but plenty for a reverse proxy.
+
+1. Hamburger menu → **Compute Engine** → **VM instances**. If this is your first time, click **Enable** when prompted to enable the Compute Engine API (~30 seconds).
+2. Click **Create instance**.
+3. Settings:
    - **Name**: `reviews-relay`
-   - **Image**: click "Change image" → choose **Canonical Ubuntu 24.04** (Minimal is fine).
-   - **Shape**: click "Change shape" → "Ampere" tab → **VM.Standard.A1.Flex**, 1 OCPU, 6 GB memory. (You can give it more — the free pool allows up to 4 OCPU / 24 GB across all your A1 instances combined.)
-   - **Networking**: leave the defaults (Oracle creates a VCN and public subnet automatically). Make sure **"Assign a public IPv4 address"** is checked.
-   - **SSH keys**: choose **"Generate a key pair"**. Click "Save private key" — this downloads a `ssh-key-XXXX.key` file. **Move it somewhere safe immediately**; you cannot re-download it. (On Windows, save it to `C:\Users\you\.ssh\oracle-reviews-relay.key`.)
-3. Click **Create**. Provisioning takes 1–3 minutes.
+   - **Region**: must be one of `us-west1`, `us-central1`, or `us-east1` for always-free eligibility. Pick the one closest to your customers. For a US East Coast brand: `us-east1` (South Carolina). For West Coast: `us-west1` (Oregon).
+   - **Zone**: any sub-zone (e.g., `us-east1-b`) is fine
+   - **Machine configuration** → **Series**: `E2` → **Machine type**: `e2-micro` (2 vCPU shared, 1 GB memory). *Look for the "Free tier eligible" tag next to it — that's the always-free shape.*
+   - **Boot disk**: click **Change** → select **Ubuntu** → **Ubuntu 24.04 LTS** (x86/64, amd64). Size: leave at default (10 GB is fine; always-free covers up to 30 GB).
+   - **Firewall**: ✅ check both **Allow HTTP traffic** and **Allow HTTPS traffic**. (These add the right firewall rules automatically.)
+4. Click **Create**. Provisioning takes about 30 seconds.
 
-Once running, the instance details page shows a **Public IP address** (something like `141.148.xx.xx`). **Save this IP** — you'll need it for DNS and SSH.
+Once the instance shows up in the VM list with a green check, copy the **External IP** column — that's your relay's public IP (e.g., `35.231.xx.xx`). **Save this IP.**
 
-### 3.3 — Configure Oracle's network firewall
+### 3.5 — Reserve a static external IP (so the IP doesn't change)
 
-Oracle puts a firewall in front of every instance ("security list" in their terminology). By default it only allows SSH inbound. We need to also allow HTTP (80) and HTTPS (443).
+By default, GCP gives the VM an *ephemeral* IP that changes if the VM is ever stopped. For a customer-facing service, we want a static IP that stays the same.
 
-1. From the instance detail page, click on the **Subnet** name under "Primary VNIC".
-2. Click on the **Default Security List** for that subnet.
-3. Under "Ingress Rules", click **Add Ingress Rules** and add two rules:
-   - Source: `0.0.0.0/0`, IP Protocol: `TCP`, Destination Port Range: `80` — Description: `HTTP for Let's Encrypt + redirects`
-   - Source: `0.0.0.0/0`, IP Protocol: `TCP`, Destination Port Range: `443` — Description: `HTTPS public traffic`
-4. Save.
+1. Hamburger menu → **VPC network** → **IP addresses**.
+2. The current ephemeral IP shows up in the list with type "Ephemeral." Click the **three-dots menu** at the right → **Promote to static**.
+3. Give it a name like `reviews-relay-ip`. Click **Reserve**.
 
-(There is *also* a host-level firewall inside Ubuntu that we'll handle in the next section.)
+A static external IP is **free as long as it's attached to a running VM**. If you ever delete the VM without releasing the IP, Google starts billing for the unattached IP — so if you decommission, release the IP afterward.
 
-### 3.4 — SSH into the new instance
+### 3.6 — SSH into the VM
 
-From your Windows machine, open PowerShell or Git Bash and:
+The easiest path on Windows is GCP's built-in browser SSH:
 
-```
-ssh -i C:\Users\you\.ssh\oracle-reviews-relay.key ubuntu@141.148.xx.xx
-```
+1. **Compute Engine** → **VM instances**.
+2. Click the **SSH** button to the right of `reviews-relay`. A new tab opens with a fully-functional terminal.
 
-(Replace the path and IP with yours. Username is always `ubuntu` for Ubuntu images.)
+This avoids the need to manage SSH keys yourself. (If you'd rather use your own SSH client, the GCP console can also generate keys and add them to instance metadata — let me know and I'll walk through it.)
 
-If SSH refuses with a permissions error about the key file, on Windows run:
-```
-icacls C:\Users\you\.ssh\oracle-reviews-relay.key /inheritance:r /grant:r "$($env:UserName):(R)"
-```
-
-### 3.5 — Install Tailscale on the relay
+### 3.7 — Install Tailscale on the relay
 
 This makes the relay part of your private Tailscale network, so it can reach Mercury without opening any ports on your home router.
+
+In the SSH session:
 
 ```
 curl -fsSL https://tailscale.com/install.sh | sh
@@ -211,19 +285,7 @@ ping -c 3 100.117.6.18
 
 (Replace with Mercury's actual Tailscale IP.) You should see ping replies.
 
-### 3.6 — Open the host firewall for HTTP/HTTPS
-
-Ubuntu's `iptables` rules ship locked down on Oracle images. Run:
-
-```
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-sudo netfilter-persistent save
-```
-
-(If `netfilter-persistent` isn't installed: `sudo apt install -y iptables-persistent` first; it'll prompt to save current rules — say yes.)
-
-### 3.7 — Install Caddy
+### 3.8 — Install Caddy
 
 Caddy is the reverse-proxy. It handles HTTPS automatically by talking to Let's Encrypt; you do not need to manage certificates yourself.
 
@@ -241,31 +303,33 @@ Verify Caddy is running:
 sudo systemctl status caddy
 ```
 
-### 3.8 — Add the DNS A record at Squarespace
+(GCP's Ubuntu images don't ship with locked-down host firewalls the way some other clouds do — UFW is inactive by default — so no extra firewall config is needed inside the VM. The `Allow HTTP/HTTPS traffic` checkboxes from step 3.4 handled the GCP-level firewall.)
+
+### 3.9 — Add the DNS A records at Squarespace
 
 1. Squarespace → Settings → Domains → `brandname.com` → **DNS settings**.
 2. Add a new record:
    - **Type**: `A`
    - **Host**: `reviews`
-   - **Data/Value**: the Oracle public IP (e.g., `141.148.xx.xx`)
-   - **TTL**: 1 hour (or whatever's default)
+   - **Data/Value**: the GCP static IP from 3.5 (e.g., `35.231.xx.xx`)
+   - **TTL**: 5 minutes if possible (lower TTL = faster propagation if you ever need to migrate). 1 hour is fine if Squarespace doesn't expose TTL controls.
 3. Add a second A record:
    - **Type**: `A`
    - **Host**: `reviews-dev`
-   - **Data/Value**: the same Oracle public IP
+   - **Data/Value**: the same GCP IP
 4. Save.
 
-Both subdomains point to the same VPS; Caddy will route them to different ports on Mercury. Propagation usually takes 5–30 minutes via Squarespace.
+Both subdomains point to the same VM; Caddy will route them to different ports on Mercury. Propagation usually takes 5–30 minutes via Squarespace.
 
-### 3.9 — Configure Caddy
+### 3.10 — Configure Caddy
 
-Edit `/etc/caddy/Caddyfile` (replace the existing contents):
+Back in the SSH session, edit `/etc/caddy/Caddyfile`:
 
 ```
 sudo nano /etc/caddy/Caddyfile
 ```
 
-Paste in (replacing `brandname.com` with your real domain and `100.117.6.18` with Mercury's actual Tailscale IP):
+Replace the existing contents with (substituting your real domain for `brandname.com` and Mercury's actual Tailscale IP for `100.117.6.18`):
 
 ```
 reviews-dev.brandname.com {
@@ -285,7 +349,7 @@ sudo systemctl reload caddy
 
 Caddy will automatically request Let's Encrypt certificates the first time someone visits each subdomain. The first request takes ~5 seconds while the cert is issued; after that it's cached.
 
-### 3.10 — Verify
+### 3.11 — Verify
 
 From any machine on the public internet (your phone on cellular, or your laptop):
 
@@ -306,20 +370,20 @@ GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_SEND_AS_ADDRESS=reviews@brandname.com
 GMAIL_SMTP_USERNAME=brandname.gmail.address@gmail.com
 
-SHOPIFY_DEV_DOMAIN=brandname-dev.myshopify.com
-SHOPIFY_ADMIN_TOKEN_DEV=shpat_...
-SHOPIFY_API_KEY_DEV=...
-SHOPIFY_API_SECRET_DEV=...
+SHOPIFY_CLIENT_ID=...                    # app-level, shared across dev + prod
+SHOPIFY_CLIENT_SECRET=...                # app-level; also SHOPIFY_WEBHOOK_SECRET
+
+SHOPIFY_DEV_DOMAIN=teraclay-dev.myshopify.com
+SHOPIFY_ADMIN_TOKEN_DEV=shpat_...        # per-install; from 2.7
 
 SHOPIFY_PROD_DOMAIN=brandname.myshopify.com
+SHOPIFY_ADMIN_TOKEN_PROD=shpat_...       # per-install; from 2.8
 SHOPIFY_STOREFRONT_ORIGIN=https://www.brandname.com
-SHOPIFY_ADMIN_TOKEN_PROD=shpat_...
-SHOPIFY_API_KEY_PROD=...
-SHOPIFY_API_SECRET_PROD=...
 
-ORACLE_RELAY_PUBLIC_IP=141.148.xx.xx
-ORACLE_RELAY_TAILSCALE_IP=100.x.y.z
-ORACLE_RELAY_SSH_KEY_PATH=C:\Users\you\.ssh\oracle-reviews-relay.key
+GCP_RELAY_PUBLIC_IP=35.231.xx.xx
+GCP_RELAY_TAILSCALE_IP=100.x.y.z
+GCP_RELAY_PROJECT=shopify-reviews-relay
+GCP_RELAY_REGION=us-east1
 ```
 
 (There's no `CLOUDFLARED_TOKEN` anymore — we replaced Cloudflare Tunnel with the Oracle/Caddy relay.)

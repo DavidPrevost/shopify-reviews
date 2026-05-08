@@ -16,7 +16,7 @@ This project replaces Yotpo with a **self-hosted, owner-controlled reviews appli
 
 ### Goals
 
-- **$0/month recurring cost.** Use existing hardware, existing Gmail account, Oracle Cloud Always-Free tier.
+- **$0/month baseline.** Use existing hardware, existing Gmail account, Google Cloud Always-Free tier (e2-micro VM in a US region, with 1 GB egress/month included). Overage on egress is metered at ~$0.12/GB; budget alerts ensure no surprise bills.
 - **Reliable review-request emails** with sophisticated suppression logic so customers are asked at the right moment and never spammed.
 - **Visual integration with the current legacy theme** (Trademark 1.7.3) without tight coupling to it — the widget must survive a future theme redesign without rework.
 - **Maintainable by an owner with basic coding skills** (Python, SQL, HTML — no fluency in any language). Favor convention, boring code, clear naming. No clever abstractions.
@@ -91,14 +91,14 @@ The owner is a co-owner of the brand, not an engineer. Adapt accordingly.
 
 ## 5. Architecture Overview
 
-One Node.js application, deployed as a Docker stack on **Mercury** (the brand's home-lab mini-PC), exposed to the public internet via a tiny **Oracle Cloud Always-Free relay VM** running Caddy. The relay terminates HTTPS at `reviews.<brand-domain>` and proxies traffic to Mercury over Tailscale. Storefront integration is a single `<script>` tag plus placeholder `<div>` in the legacy theme.
+One Node.js application, deployed as a Docker stack on **Mercury** (the brand's home-lab mini-PC), exposed to the public internet via a tiny **Google Cloud Always-Free e2-micro VM** running Caddy. The relay terminates HTTPS at `reviews.<brand-domain>` and proxies traffic to Mercury over Tailscale. Storefront integration is a single `<script>` tag plus placeholder `<div>` in the legacy theme.
 
 ```
-   Customer browser ───► reviews.brandname.com  (Squarespace A record → Oracle public IP)
+   Customer browser ───► reviews.brandname.com  (Squarespace A record → GCP public IP)
                                   │
                                   ▼
             ┌──────────────────────────────────────────────────┐
-            │   Oracle Cloud Always-Free ARM VM (Ubuntu 24.04) │
+            │   Google Cloud e2-micro VM (Ubuntu 24.04)        │
             │   ─ Caddy: HTTPS termination + Let's Encrypt     │
             │   ─ Tailscale: joined to brand tailnet           │
             │   ─ Reverse-proxies to mercury:8080 (prod) or    │
@@ -128,8 +128,8 @@ One Node.js application, deployed as a Docker stack on **Mercury** (the brand's 
        └────────────────────────────────────────────────────────┘
 
       Outbound mail → smtp.gmail.com (existing brand alias)
-      Inbound webhooks ← Shopify (via Oracle relay → Mercury)
-      Widget reads     ← customer browsers (via Oracle relay → Mercury)
+      Inbound webhooks ← Shopify (via GCP relay → Mercury)
+      Widget reads     ← customer browsers (via GCP relay → Mercury)
 ```
 
 ### Key technical choices
@@ -140,7 +140,7 @@ One Node.js application, deployed as a Docker stack on **Mercury** (the brand's 
 - **node-cron** — in-process cron scheduler.
 - **esbuild** — single-config-file bundler for the storefront widget JS.
 - **Docker Compose** — matches the existing `/opt/stacks/[service]/` pattern on Mercury.
-- **Oracle Cloud Always-Free + Caddy + Tailscale** for public ingress. Replaces the originally-planned Cloudflare Tunnel because Cloudflare's free tier no longer permits subdomain zones — and migrating brandname.com's DNS to Cloudflare wholesale is too risky for a live storefront. The relay model isolates all public traffic to a separate machine; Mercury never opens a port to the internet.
+- **Google Cloud e2-micro (Always Free) + Caddy + Tailscale** for public ingress. Replaces the originally-planned Cloudflare Tunnel (Cloudflare's free tier no longer permits subdomain zones, and migrating brandname.com's DNS wholesale was too risky for a live storefront). Oracle Cloud was attempted first but its UI failed to populate the platform-image catalog. The relay model isolates all public traffic to a separate machine; Mercury never opens a port to the internet. The 1 GB/month egress ceiling is comfortable for typical small-brand traffic; overage is metered at $0.12/GB with billing alerts as the safety net.
 - **Static Shopify Admin API token** (no OAuth) — single-store custom apps don't need OAuth. Token is generated once in Shopify admin and stored in the app's `.env`.
 - **Password-protected admin UI** at `reviews.<brand-domain>/admin` — no Shopify embedded admin, no App Bridge, no session-token JWTs. The admin is a plain server-rendered HTML interface accessed in any browser tab.
 - **Direct CORS-allowed storefront API** — not Shopify App Proxy. The widget JS calls our backend directly from the storefront origin. App Proxy is unavailable to single-store custom apps anyway.
@@ -159,7 +159,7 @@ Remix, Next.js, Drizzle, Prisma, React for admin UI, OAuth flow, Shopify App Bri
 
 Code is **written** on the Windows desktop at `D:\AI\shopify-reviews\`. The local machine is for editing files, running typecheck (`npm run typecheck`), and reviewing diffs. **It is not used for running the application.**
 
-Do not assume the application can be tested locally with `npm run dev` or `docker compose up`. The owner does not want to install Docker on Windows for this project, and several runtime dependencies (Tailscale-routed backups, Oracle relay HTTPS, Gmail SMTP from a server identity) are easier to validate in the actual deployment environment.
+Do not assume the application can be tested locally with `npm run dev` or `docker compose up`. The owner does not want to install Docker on Windows for this project, and several runtime dependencies (Tailscale-routed backups, GCP relay HTTPS, Gmail SMTP from a server identity) are easier to validate in the actual deployment environment.
 
 ### The execution machine — Mercury
 
@@ -188,7 +188,7 @@ To test against a Shopify development store without endangering the live brand s
 - `/opt/stacks/shopify-reviews-dev/` — points at a free Shopify development store (the owner will create one via Shopify Partners during step 12). Public hostname: `reviews-dev.brandname.com`.
 - `/opt/stacks/shopify-reviews/` — points at the live brand store. Public hostname: `reviews.brandname.com`.
 
-Each stack has its own `.env` with its own Shopify token, webhook secret, and host port (8080 prod, 8081 dev). The application code is identical between the two; the Oracle relay's Caddy config maps each public hostname to the right port on Mercury.
+Each stack has its own `.env` with its own Shopify token, webhook secret, and host port (8080 prod, 8081 dev). The application code is identical between the two; the GCP relay's Caddy config maps each public hostname to the right port on Mercury.
 
 ### The development loop
 
@@ -381,12 +381,12 @@ Cron entry inside the container (set up at first run): `0 3 * * * /scripts/backu
 
 Verification gate: on Mercury dev stack, `docker compose exec backup /scripts/backup.sh`. Confirm a snapshot file appears in `/opt/backups/shopify-reviews/` on Pebbles.
 
-### Step 12 — Public ingress via Oracle relay (Caddy + Tailscale)
+### Step 12 — Public ingress via Google Cloud relay (Caddy + Tailscale)
 
-Replaces the originally-planned Cloudflare Tunnel. Performed via Oracle Cloud, Squarespace DNS, and SSH — no application code changes. Full step-by-step instructions for the owner are in [external-accounts-setup.md](external-accounts-setup.md), Part 3. Summary:
+Replaces the originally-planned Cloudflare Tunnel. Performed via Google Cloud, Squarespace DNS, and SSH — no application code changes. Full step-by-step instructions for the owner are in [external-accounts-setup.md](external-accounts-setup.md), Part 3. Summary:
 
-1. Owner signs up for Oracle Cloud Free Tier and creates an Always-Free ARM compute instance ("VM.Standard.A1.Flex"). Public IPv4 assigned at create time.
-2. Open the Oracle security list to allow inbound TCP/80 and TCP/443. Open Ubuntu's host firewall to match.
+1. Owner signs up for Google Cloud (free trial credits + Always-Free e2-micro tier), creates a project, and sets up billing budget alerts before provisioning anything.
+2. Create an `e2-micro` VM in `us-east1`/`us-central1`/`us-west1` (the only always-free regions) running Ubuntu 24.04 LTS. Check both "Allow HTTP traffic" and "Allow HTTPS traffic" during creation to populate the GCP firewall rules. Promote the ephemeral external IP to static.
 3. Install Tailscale on the relay VM and join it to the brand tailnet so it can reach Mercury privately.
 4. Install Caddy. Configure `/etc/caddy/Caddyfile` with two server blocks:
    ```
@@ -394,7 +394,7 @@ Replaces the originally-planned Cloudflare Tunnel. Performed via Oracle Cloud, S
    reviews.brandname.com     { reverse_proxy 100.117.6.18:8080 }
    ```
    (Substitute Mercury's actual Tailscale IP.) Caddy auto-issues Let's Encrypt certs on first request.
-5. At Squarespace → DNS, add **two A records**: host `reviews` → Oracle public IP, host `reviews-dev` → same Oracle public IP. Apex zone otherwise untouched.
+5. At Squarespace → DNS, add **two A records**: host `reviews` → GCP static IP, host `reviews-dev` → same GCP static IP. Apex zone otherwise untouched. Set TTL to 5 minutes if Squarespace allows it, so any future migration propagates fast.
 6. On Mercury, each `docker-compose.yml` (dev and prod) binds the app's port to the Tailscale interface only via `${HOST_BIND_IP}:${HOST_PORT}:8080`. Prod uses host port 8080; dev uses 8081.
 
 Verification gate: `curl https://reviews-dev.brandname.com/health` from any internet-connected machine returns `{"status":"ok"}` once the dev stack is deployed. Before that point, Caddy will return 502 (which still confirms the ingress chain is working).
@@ -683,11 +683,11 @@ Two always-on Intel N100 mini-PCs running Ubuntu Server 24.04 LTS, each with 16G
 
 ### Network
 
-Devices are on a Tailscale mesh. Neither was publicly exposed before this project. The reviews app introduces public-internet exposure via an **Oracle Cloud Always-Free relay VM** that joins the same tailnet — Mercury and Pebbles continue to have zero inbound ports open to the internet.
+Devices are on a Tailscale mesh. Neither was publicly exposed before this project. The reviews app introduces public-internet exposure via a **Google Cloud e2-micro (Always-Free) relay VM** that joins the same tailnet — Mercury and Pebbles continue to have zero inbound ports open to the internet.
 
 ### Domain
 
-Brand domain (`brandname.com`) is held at **Squarespace**, which also hosts DNS. We add two A records — `reviews` and `reviews-dev` — pointing at the Oracle relay's public IP. Nothing else about the apex zone changes. Squarespace stays the sole authoritative DNS for the brand domain.
+Brand domain (`brandname.com`) is held at **Squarespace**, which also hosts DNS. We add two A records — `reviews` and `reviews-dev` — pointing at the GCP relay's public IP. Nothing else about the apex zone changes. Squarespace stays the sole authoritative DNS for the brand domain.
 
 ### Email
 
@@ -721,7 +721,7 @@ Brand uses an existing Gmail account with a custom-domain alias (`reviews@brandn
 
 ### Remaining work (steps 12–14, all external configuration, not code)
 
-- **Step 12** Oracle Cloud relay (Caddy + Tailscale) — needs Oracle Cloud Free Tier account, ARM compute instance, A records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md). Replaces the originally-planned Cloudflare Tunnel after Cloudflare's free-tier subdomain zone path was found to no longer be available.
+- **Step 12** Google Cloud relay (Caddy + Tailscale) — needs GCP account, e2-micro Always-Free VM, A records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md). Oracle Cloud was attempted first but its image catalog failed to populate; switched to GCP for a smoother signup. Cloudflare Tunnel was the original plan but Cloudflare's free-tier subdomain zone path is no longer available.
 - **Step 13** Yotpo cleanup on the live store — walk through with the owner.
 - **Step 14** Theme integration on the live store — walk through with the owner.
 
