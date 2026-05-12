@@ -13,12 +13,14 @@ interface ExistingSubscription {
   endpoint: { callbackUrl?: string };
 }
 
+// Shopify's GraphQL webhookSubscriptionCreate no longer accepts the three GDPR
+// compliance topics — they have to be declared in the app version's "Compliance
+// webhooks" section on dev.shopify.com and Shopify fires them automatically.
+// Our route handlers in src/routes/webhooks.ts are ready to respond if/when
+// those configurations are set up; we just don't subscribe via the API.
 const desired: Array<{ topic: string; path: string }> = [
-  { topic: 'ORDERS_PAID',             path: '/webhooks/orders/paid' },
-  { topic: 'ORDERS_FULFILLED',        path: '/webhooks/orders/fulfilled' },
-  { topic: 'CUSTOMERS_DATA_REQUEST',  path: '/webhooks/customers/data_request' },
-  { topic: 'CUSTOMERS_REDACT',        path: '/webhooks/customers/redact' },
-  { topic: 'SHOP_REDACT',             path: '/webhooks/shop/redact' },
+  { topic: 'ORDERS_PAID',      path: '/webhooks/orders/paid' },
+  { topic: 'ORDERS_FULFILLED', path: '/webhooks/orders/fulfilled' },
 ];
 
 const listQuery = `
