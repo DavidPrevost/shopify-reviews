@@ -278,12 +278,12 @@ The second command prints a URL. Open it in a browser (any device — your lapto
 
 In your Tailscale admin console (`login.tailscale.com/admin/machines`), give the new machine a memorable name like `reviews-relay`. Note its Tailscale IP (something like `100.x.y.z`).
 
-Test that the relay can reach Mercury:
+Test that the relay can reach Mercury through Tailscale:
 ```
-ping -c 3 100.117.6.18
+tailscale ping 100.117.6.18
 ```
 
-(Replace with Mercury's actual Tailscale IP.) You should see ping replies.
+(Replace with Mercury's actual Tailscale IP.) You should see a `pong from mercury (...)` reply. GCP's minimal Ubuntu image doesn't ship the regular `ping` command — `tailscale ping` is built into the Tailscale binary and is actually a better diagnostic here because it tells you whether the Tailscale tunnel is routing properly, not just whether ICMP works.
 
 ### 3.8 — Install Caddy
 
@@ -322,6 +322,12 @@ sudo systemctl status caddy
 Both subdomains point to the same VM; Caddy will route them to different ports on Mercury. Propagation usually takes 5–30 minutes via Squarespace.
 
 ### 3.10 — Configure Caddy
+
+GCP's minimal Ubuntu image doesn't include a text editor by default. Install nano first (or skip if you'd rather use vim):
+
+```
+sudo apt install -y nano
+```
 
 Back in the SSH session, edit `/etc/caddy/Caddyfile`:
 
