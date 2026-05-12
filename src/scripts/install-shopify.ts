@@ -50,8 +50,12 @@ function verifyShopifyHmac(params: URLSearchParams, hmac: string, secret: string
 }
 
 function openBrowser(url: string): void {
+  // On Windows, avoid `cmd /c start` — cmd parses `&` in the URL as a command
+  // separator and truncates everything after the first one. `rundll32.exe
+  // url.dll,FileProtocolHandler` bypasses cmd entirely and passes the URL as a
+  // single argument to the default protocol handler.
   const [cmd, ...args] =
-    process.platform === 'win32' ? ['cmd', '/c', 'start', '""', url] :
+    process.platform === 'win32' ? ['rundll32.exe', 'url.dll,FileProtocolHandler', url] :
     process.platform === 'darwin' ? ['open', url] :
     ['xdg-open', url];
   try {
@@ -63,6 +67,7 @@ function openBrowser(url: string): void {
 
 const { shop } = parseArgs(process.argv.slice(2));
 const shopDomain = normalizeShop(shop);
+const shopHandle = shopDomain.replace(/\.myshopify\.com$/, '');
 
 const clientId = process.env.SHOPIFY_CLIENT_ID;
 const clientSecret = process.env.SHOPIFY_WEBHOOK_SECRET ?? process.env.SHOPIFY_CLIENT_SECRET;
@@ -77,7 +82,12 @@ if (!clientId || !clientSecret) {
 const state = crypto.randomBytes(16).toString('hex');
 const redirectUri = `http://localhost:${PORT}${CALLBACK_PATH}`;
 
-const authUrl = new URL(`https://${shopDomain}/admin/oauth/authorize`);
+// Shopify consolidated admin URLs onto admin.shopify.com. Sending the browser
+// to the legacy `<shop>.myshopify.com/admin/oauth/authorize` URL triggers a
+// server-side redirect that strips every query parameter except client_id —
+// which makes Shopify report "redirect_uri missing." Hitting the new URL
+// directly avoids the redirect and preserves the full parameter set.
+const authUrl = new URL(`https://admin.shopify.com/store/${shopHandle}/oauth/authorize`);
 authUrl.searchParams.set('client_id', clientId);
 authUrl.searchParams.set('scope', SCOPES);
 authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -122,9 +132,29 @@ const server = http.createServer(async (req, res) => {
       throw new Error(`Token exchange failed (${tokenRes.status}): ${text}`);
     }
 
-    const tokenData = (await tokenRes.json()) as { access_token?: string; scope?: string };
+    const tokenData = (await tokenRes.json()) as {
+      access_token?: string;
+      scope?: string;
+      expires_in?: number;
+      associated_user_scope?: string;
+      associated_user?: unknown;
+    };
     if (!tokenData.access_token) {
       throw new Error(`Token response missing access_token: ${JSON.stringify(tokenData)}`);
+    }
+
+    // The dispatcher runs as a background process; if Shopify granted an online
+    // (per-user) token instead of an offline one, it will expire and the
+    // dispatcher will start failing. Detect this loudly here so we never deploy
+    // an installation that's about to die.
+    const isOnlineToken =
+      tokenData.expires_in !== undefined || tokenData.associated_user !== undefined;
+    if (isOnlineToken) {
+      throw new Error(
+        'Shopify returned an ONLINE (per-user) access token, which expires. ' +
+        'The background dispatcher requires an OFFLINE access token. ' +
+        'Token response: ' + JSON.stringify(tokenData),
+      );
     }
 
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -136,15 +166,17 @@ const server = http.createServer(async (req, res) => {
 <p>Close this tab and return to your terminal — the access token has been printed there.</p>
 </body></html>`);
 
+    const prefix = tokenData.access_token.split('_')[0] ?? '?';
     console.log('');
     console.log('======================================================');
     console.log('  Install complete');
-    console.log('  Shop:   ' + shopDomain);
-    console.log('  Scopes: ' + (tokenData.scope ?? '(unknown)'));
+    console.log('  Shop:           ' + shopDomain);
+    console.log('  Scopes:         ' + (tokenData.scope ?? '(unknown)'));
+    console.log('  Token prefix:   ' + prefix + '_');
+    console.log('  Token kind:     OFFLINE (no expires_in in response)');
     console.log('======================================================');
     console.log('');
-    console.log('Paste this into the appropriate .env (SHOPIFY_ADMIN_TOKEN_DEV');
-    console.log('for the dev stack, SHOPIFY_ADMIN_TOKEN_PROD for prod):');
+    console.log('Paste this into the stack .env that points at this store:');
     console.log('');
     console.log('  SHOPIFY_ADMIN_TOKEN=' + tokenData.access_token);
     console.log('');

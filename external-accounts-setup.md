@@ -376,14 +376,16 @@ GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_SEND_AS_ADDRESS=reviews@brandname.com
 GMAIL_SMTP_USERNAME=brandname.gmail.address@gmail.com
 
-SHOPIFY_CLIENT_ID=...                    # app-level, shared across dev + prod
+SHOPIFY_CLIENT_ID=...                    # app-level, same in both stack .envs
 SHOPIFY_CLIENT_SECRET=...                # app-level; also SHOPIFY_WEBHOOK_SECRET
 
-SHOPIFY_DEV_DOMAIN=teraclay-dev.myshopify.com
-SHOPIFY_ADMIN_TOKEN_DEV=shpat_...        # per-install; from 2.7
+# Dev stack's .env on Mercury (/opt/stacks/shopify-reviews-dev/.env):
+SHOPIFY_SHOP_DOMAIN=teraclay-dev.myshopify.com
+SHOPIFY_ADMIN_TOKEN=shpat_...            # from running install-shopify against the dev store
 
-SHOPIFY_PROD_DOMAIN=brandname.myshopify.com
-SHOPIFY_ADMIN_TOKEN_PROD=shpat_...       # per-install; from 2.8
+# Prod stack's .env on Mercury (/opt/stacks/shopify-reviews/.env):
+SHOPIFY_SHOP_DOMAIN=brandname.myshopify.com
+SHOPIFY_ADMIN_TOKEN=shpat_...            # from running install-shopify against the live store
 SHOPIFY_STOREFRONT_ORIGIN=https://www.brandname.com
 
 GCP_RELAY_PUBLIC_IP=35.231.xx.xx
