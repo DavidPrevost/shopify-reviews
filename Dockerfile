@@ -25,6 +25,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# sqlite (CLI) is small and useful for ops/debugging against /app/data/reviews.db
+RUN apk add --no-cache sqlite
 COPY package.json package-lock.json ./
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
