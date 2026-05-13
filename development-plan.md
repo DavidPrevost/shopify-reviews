@@ -729,7 +729,37 @@ Before any of those, the stack must deploy successfully to Mercury's dev environ
 
 ---
 
-## 15. Reference Materials
+## 15. Post-MVP Roadmap
+
+Features deferred to after MVP launch, in priority order based on impact-per-hour. Update this list as priorities shift; the order is a snapshot, not a contract.
+
+### Prioritized next (next ~4 items to tackle)
+
+1. **Storefront-customer review submission.** Logged-in customers on the storefront submit reviews without an email-link token, and can edit their own existing reviews. Unblocks the interactive "Be the first to review" CTA and broadens the review-collection surface beyond email-triggered flows. Likely requires Shopify App Proxy for HMAC-signed customer identity (anything client-side without proxy is spoofable). Capped at one review per customer per product.
+
+2. **Aggregate widget on collection cards.** The widget already supports `data-reviews-widget="aggregate"` mode rendering filled stars + count in parentheses with no "Reviews" word. Just needs the placeholder `<div>` added to the storefront's product-card snippet. Quick theme work.
+
+3. **Visual polish — widget.** SVG-based star rendering (crisper at any size than text characters), refined review-card typography and spacing, smooth open/close animation on the collapsible details element, more deliberate empty-state. Pure CSS/SVG work in `widget.ts`'s inline styles.
+
+4. **Per-variant + related reviews.** Schema already has `shopify_variant_id` on purchases and reviews. Add per-product config for whether variants share reviews (sizes — single review pool per product) or are treated as distinct products (flavors — review pool per variant). When distinct, optionally show "related reviews" from sibling variants below the main list.
+
+### Held for later
+
+- **Visual polish — emails.** Logo header (we already pull `logoUrl` from Shopify brand sync), better typography hierarchy, on-brand spacing, branded footer.
+- **Photos in reviews.** Schema is ready (`review_media` table). Need upload handling on submission, storage (Mercury filesystem to start, CDN-pluggable later), and display in widget.
+- **Q&A on products.** Schema is ready (`questions` table). Need submission UI, admin moderation, display on product page.
+- **Merchant replies on storefront.** Admin already has the form to write replies (`merchant_reply` column). Need the widget to surface them inline below each review.
+- **Admin UI polish.** Customer search, per-product analytics, batch moderation, email-events timeline per customer.
+
+### Future considerations (further out)
+
+- **Affiliate/influencer platform** as a separate self-hosted service alongside reviews on the same infrastructure (Mercury + GCP relay + Caddy).
+- **Multi-tenant retrofit** if the project ever serves more than one store. Memory notes estimate ~2-3 weeks with the email layer being the largest single piece.
+- **Self-hosted small websites** on the same Mercury + GCP relay stack — would coexist via additional subdomains routed through the same Caddy instance.
+
+---
+
+## 16. Reference Materials
 
 - **Approved planning conversation**: `~/.claude/plans/okay-claude-i-co-own-a-logical-wilkes.md` — the original plan written during the planning conversation. This `development-plan.md` supersedes it as the canonical reference; the planning file is preserved for context on *why* certain decisions were made.
 - **Project memory**: `~/.claude/projects/D--AI-shopify-reviews/memory/` — user profile, communication style preferences, home-lab infrastructure details, project state. Auto-loaded into Claude Code sessions in this project.
