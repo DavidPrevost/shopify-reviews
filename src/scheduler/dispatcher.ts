@@ -2,7 +2,7 @@ import { config, assertRequired } from '../config.js';
 import {
   findEligiblePurchases,
   customerHasAnyReviews,
-  recordRequestSent,
+  recordRequestSentBatch,
   logEmailFailure,
   getSettingNumber,
   type EligibleRow,
@@ -11,113 +11,198 @@ import { renderTemplate, escapeHtml } from '../email/render.js';
 import { sendMail } from '../email/smtp-client.js';
 import { signReviewToken, signUnsubscribeToken } from '../email/tokens.js';
 import { log } from '../lib/logger.js';
-import { getOrFetchProduct } from '../shopify/product-info.js';
+import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
 
 export interface DispatchResult {
-  considered: number;
-  sent: number;
-  failed: number;
-  skipped: number;
+  considered: number;          // total purchase rows considered eligible
+  groupsConsidered: number;    // count of (customer, order) groups
+  sent: number;                // emails actually sent
+  failed: number;              // emails that errored during send
+  skipped: number;             // groups skipped (e.g. all products missing)
 }
 
+interface GroupItem {
+  purchaseId: number;
+  shopifyProductId: string;
+  product: ProductInfo;
+  reviewToken: string;
+  unsubProductToken: string;
+}
+
+const trimUrl = (s: string) => s.replace(/\/+$/, '');
+
 const buildReviewUrl = (token: string): string =>
-  `${config.publicUrl.replace(/\/+$/, '')}/r/${encodeURIComponent(token)}`;
+  `${trimUrl(config.publicUrl)}/r/${encodeURIComponent(token)}`;
 
 const buildUnsubGlobalUrl = (token: string): string =>
-  `${config.publicUrl.replace(/\/+$/, '')}/unsubscribe?token=${encodeURIComponent(token)}`;
+  `${trimUrl(config.publicUrl)}/unsubscribe?token=${encodeURIComponent(token)}`;
 
 const buildUnsubProductUrl = (token: string): string =>
-  `${config.publicUrl.replace(/\/+$/, '')}/unsubscribe/product?token=${encodeURIComponent(token)}`;
+  `${trimUrl(config.publicUrl)}/unsubscribe/product?token=${encodeURIComponent(token)}`;
+
+const buildSubject = (groupSize: number, sampleTitle: string, isRepeat: boolean): string => {
+  if (groupSize === 1) {
+    return isRepeat ? `One more review for ${sampleTitle}?` : `How was your ${sampleTitle}?`;
+  }
+  return isRepeat
+    ? `Tell us about your recent order from ${config.email.brandName}`
+    : `How was your recent order from ${config.email.brandName}?`;
+};
+
+// HTML for a single product card inside the multi-product email body.
+const renderProductCard = (item: GroupItem): string => {
+  const reviewUrl = buildReviewUrl(item.reviewToken);
+  const unsubProductUrl = buildUnsubProductUrl(item.unsubProductToken);
+  const imageBlock = item.product.featuredImageUrl
+    ? `<img src="${item.product.featuredImageUrl}" alt="" width="80" height="80" style="display:block;border-radius:6px;object-fit:cover;">`
+    : '';
+
+  return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
+      <tr>
+        <td width="96" style="padding-right:16px;vertical-align:top;">
+          ${imageBlock}
+        </td>
+        <td style="vertical-align:top;">
+          <div style="font-size:16px;font-weight:600;margin-bottom:6px;">${escapeHtml(item.product.title)}</div>
+          <a href="${reviewUrl}"
+             style="display:inline-block;background:#222;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
+            Write a review
+          </a>
+          <div style="margin-top:6px;font-size:12px;">
+            <a href="${unsubProductUrl}" style="color:#888;text-decoration:underline;">Don't ask about this one</a>
+          </div>
+        </td>
+      </tr>
+    </table>
+  `;
+};
+
+// Plain-text mirror of the product list (for the text/plain MIME part).
+const renderProductTextLines = (items: GroupItem[]): string =>
+  items
+    .map((item) => {
+      const reviewUrl = buildReviewUrl(item.reviewToken);
+      const unsubProductUrl = buildUnsubProductUrl(item.unsubProductToken);
+      return [
+        `- ${item.product.title}`,
+        `    Write a review: ${reviewUrl}`,
+        `    Don't ask about this one: ${unsubProductUrl}`,
+      ].join('\n');
+    })
+    .join('\n\n');
 
 const renderPlainText = (input: {
   firstName: string;
   brandName: string;
-  productTitle: string;
-  reviewUrl: string;
+  items: GroupItem[];
   unsubGlobalUrl: string;
-  unsubProductUrl: string;
   isRepeat: boolean;
 }): string => {
   const opening = input.isRepeat
     ? `Thanks again for being a returning customer of ${input.brandName}.`
     : `Thanks for your recent order from ${input.brandName}.`;
+  const productPhrase = input.items.length === 1
+    ? `Now that you've had some time with your ${input.items[0]!.product.title}, would you share a quick review?`
+    : `Now that you've had some time with the items from your order, would you share a review for any that you enjoyed?`;
   return [
     `Hi ${input.firstName},`,
     '',
     opening,
     '',
-    `Now that you've had some time with your ${input.productTitle}, would you share a quick review?`,
+    productPhrase,
     '',
-    `Leave a review: ${input.reviewUrl}`,
+    renderProductTextLines(input.items),
     '',
     '---',
-    `Don't ask about this product: ${input.unsubProductUrl}`,
     `Unsubscribe from all review requests: ${input.unsubGlobalUrl}`,
   ].join('\n');
 };
 
-const buildSubject = (productTitle: string, isRepeat: boolean): string =>
-  isRepeat
-    ? `One more review for ${productTitle}?`
-    : `How was your ${productTitle}?`;
+// Group eligible rows by (customer_id, shopify_order_id) — that's the unit of
+// "one email." A customer with two separate orders still gets two emails,
+// spaced by the customer-level cadence rule.
+const groupByCustomerOrder = (rows: EligibleRow[]): EligibleRow[][] => {
+  const groups = new Map<string, EligibleRow[]>();
+  for (const row of rows) {
+    const key = `${row.c_id}:${row.p_shopify_order_id}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = [];
+      groups.set(key, g);
+    }
+    g.push(row);
+  }
+  return [...groups.values()];
+};
 
-// Process one row: lookup product info, sign tokens, render, send, and on
-// success record state. Returns 'sent' | 'failed' | 'skipped'.
-const dispatchOne = async (row: EligibleRow): Promise<'sent' | 'failed' | 'skipped'> => {
-  const product = await getOrFetchProduct(row.p_shopify_product_id);
-  if (!product) {
-    log('warn', 'dispatch skipped: product not found on Shopify', {
+const dispatchGroup = async (
+  rows: EligibleRow[],
+): Promise<'sent' | 'failed' | 'skipped'> => {
+  const first = rows[0]!;
+  const customerId = first.c_id;
+  const email = first.c_email;
+  const firstName = first.c_first_name?.trim() || 'there';
+  const isRepeat = customerHasAnyReviews(customerId);
+
+  // Look up each purchase's product. Drop any that can't be resolved on the
+  // Shopify side; if all of them are missing, skip the group entirely.
+  const items: GroupItem[] = [];
+  for (const row of rows) {
+    const product = await getOrFetchProduct(row.p_shopify_product_id);
+    if (!product) {
+      log('warn', 'dispatch: product not found, skipping line', {
+        purchaseId: row.p_id,
+        shopifyProductId: row.p_shopify_product_id,
+      });
+      continue;
+    }
+    items.push({
       purchaseId: row.p_id,
       shopifyProductId: row.p_shopify_product_id,
+      product,
+      reviewToken: signReviewToken({ purchaseId: row.p_id, customerId }),
+      unsubProductToken: signUnsubscribeToken({
+        customerId,
+        kind: 'product',
+        purchaseId: row.p_id,
+      }),
     });
+  }
+
+  if (items.length === 0) {
     return 'skipped';
   }
 
-  const isRepeat = customerHasAnyReviews(row.c_id);
-  const firstName = row.c_first_name?.trim() || 'there';
-
-  const reviewToken = signReviewToken({ purchaseId: row.p_id, customerId: row.c_id });
-  const unsubGlobalToken = signUnsubscribeToken({ customerId: row.c_id, kind: 'global' });
-  const unsubProductToken = signUnsubscribeToken({
-    customerId: row.c_id,
-    kind: 'product',
-    purchaseId: row.p_id,
-  });
-
-  const reviewUrl = buildReviewUrl(reviewToken);
+  const unsubGlobalToken = signUnsubscribeToken({ customerId, kind: 'global' });
   const unsubGlobalUrl = buildUnsubGlobalUrl(unsubGlobalToken);
-  const unsubProductUrl = buildUnsubProductUrl(unsubProductToken);
+
+  const productsHtml = items.map(renderProductCard).join('');
 
   const ctx = {
     firstName: escapeHtml(firstName),
     brandName: escapeHtml(config.email.brandName),
-    productTitle: escapeHtml(product.title),
-    reviewUrl,
+    productsHtml,
     unsubGlobalUrl,
-    unsubProductUrl,
   };
 
   const html = renderTemplate(isRepeat ? 'request-repeat.html' : 'request-first.html', ctx);
   const text = renderPlainText({
     firstName,
     brandName: config.email.brandName,
-    productTitle: product.title,
-    reviewUrl,
+    items,
     unsubGlobalUrl,
-    unsubProductUrl,
     isRepeat,
   });
-  const subject = buildSubject(product.title, isRepeat);
+  const subject = buildSubject(items.length, items[0]!.product.title, isRepeat);
 
   try {
     await sendMail({
-      to: row.c_email,
+      to: email,
       subject,
       html,
       text,
       headers: {
-        // RFC 8058 one-click unsubscribe — gives mailbox providers a clean
-        // signal and improves deliverability reputation.
         'List-Unsubscribe': `<${unsubGlobalUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
@@ -125,23 +210,32 @@ const dispatchOne = async (row: EligibleRow): Promise<'sent' | 'failed' | 'skipp
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log('error', 'dispatch send failed', {
-      purchaseId: row.p_id,
-      customerId: row.c_id,
+      customerId,
+      orderId: first.p_shopify_order_id,
+      itemCount: items.length,
       error: message,
     });
-    logEmailFailure({ customerId: row.c_id, purchaseId: row.p_id, error: message });
+    for (const item of items) {
+      logEmailFailure({ customerId, purchaseId: item.purchaseId, error: message });
+    }
     return 'failed';
   }
 
-  recordRequestSent({
-    purchaseId: row.p_id,
-    customerId: row.c_id,
-    metadata: { template: isRepeat ? 'repeat' : 'first', productTitle: product.title },
+  recordRequestSentBatch({
+    purchaseIds: items.map((i) => i.purchaseId),
+    customerId,
+    metadata: {
+      template: isRepeat ? 'repeat' : 'first',
+      orderId: first.p_shopify_order_id,
+      productCount: items.length,
+    },
   });
+
   log('info', 'dispatch sent', {
-    purchaseId: row.p_id,
-    customerId: row.c_id,
+    customerId,
+    orderId: first.p_shopify_order_id,
     template: isRepeat ? 'repeat' : 'first',
+    purchaseIds: items.map((i) => i.purchaseId),
   });
   return 'sent';
 };
@@ -157,11 +251,24 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
 
   const batchSize = getSettingNumber('cadence_dispatcher_batch', 100);
   const rows = findEligiblePurchases(batchSize);
-  log('info', 'dispatcher run starting', { batchSize, considered: rows.length });
+  const groups = groupByCustomerOrder(rows);
 
-  const result: DispatchResult = { considered: rows.length, sent: 0, failed: 0, skipped: 0 };
-  for (const row of rows) {
-    const outcome = await dispatchOne(row);
+  log('info', 'dispatcher run starting', {
+    batchSize,
+    considered: rows.length,
+    groupsConsidered: groups.length,
+  });
+
+  const result: DispatchResult = {
+    considered: rows.length,
+    groupsConsidered: groups.length,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+  };
+
+  for (const group of groups) {
+    const outcome = await dispatchGroup(group);
     result[outcome] += 1;
   }
 

@@ -9,6 +9,7 @@ import {
   recordReviewSubmitted,
   setGlobalOptOut,
   setProductOptOut,
+  findReviewByCustomerAndProduct,
 } from '../db/queries.js';
 import { verifyReviewToken, verifyUnsubscribeToken } from '../email/tokens.js';
 import { escapeHtml } from '../email/render.js';
@@ -210,11 +211,32 @@ widget.post('/r/:token', async (c) => {
     return renderError('Please write a few words about your experience.');
   }
 
+  // If this customer has already reviewed this product (a different order's
+  // purchase landed in their inbox before this one), don't insert a duplicate.
+  // Mark this purchase as reviewed and show the normal thank-you page so the
+  // customer experience stays clean.
+  const existingReview = findReviewByCustomerAndProduct(customer.id, purchase.shopify_product_id);
+  if (existingReview) {
+    recordReviewSubmitted({ purchaseId: purchase.id, customerId: customer.id });
+    log('info', 'duplicate review suppressed, purchase marked reviewed', {
+      purchaseId: purchase.id,
+      customerId: customer.id,
+      existingReviewId: existingReview.id,
+      productId: purchase.shopify_product_id,
+    });
+    return c.html(pageShell('Thank you', `
+      <h1>Thank you</h1>
+      <div class="ok">Your review for <strong>${escapeHtml(productTitle)}</strong> has been submitted.</div>
+      <p class="muted" style="margin-top:24px;">It may take a moment to appear on the product page.</p>
+    `));
+  }
+
   const fallbackName =
     [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || null;
 
   const reviewId = insertReview({
     shopifyProductId: purchase.shopify_product_id,
+    shopifyVariantId: purchase.shopify_variant_id,
     customerId: customer.id,
     reviewerEmail: customer.email,
     reviewerName: submittedName ?? fallbackName,

@@ -27,6 +27,7 @@ interface OrderNode {
       title: string;
       quantity: number;
       product: { id: string } | null;
+      variant: { id: string } | null;
     }>;
   };
   fulfillments: Array<{ id: string; status: string; createdAt: string }>;
@@ -43,7 +44,7 @@ const ordersQuery = `
         displayFulfillmentStatus
         customer { id email firstName lastName }
         lineItems(first: 50) {
-          nodes { id title quantity product { id } }
+          nodes { id title quantity product { id } variant { id } }
         }
         fulfillments(first: 10) { id status createdAt }
       }
@@ -111,6 +112,7 @@ export const backfillRecentOrders = async (daysBack = 90): Promise<BackfillResul
           customerId: customer.id,
           shopifyOrderId: orderId,
           shopifyProductId: gidToNumeric(line.product.id),
+          shopifyVariantId: line.variant?.id ? gidToNumeric(line.variant.id) : null,
           fulfilledAt: null,
           dueAt: null,
         });

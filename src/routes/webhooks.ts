@@ -24,6 +24,7 @@ interface OrderPayloadCustomer {
 }
 interface OrderPayloadLineItem {
   product_id?: number | null;
+  variant_id?: number | null;
   quantity?: number;
 }
 interface OrderPaidPayload {
@@ -86,6 +87,7 @@ webhooks.post('/orders/paid', async (c) => {
       customerId: customer.id,
       shopifyOrderId: orderId,
       shopifyProductId: String(item.product_id),
+      shopifyVariantId: item.variant_id ? String(item.variant_id) : null,
       fulfilledAt: null,
       dueAt: null,
     });

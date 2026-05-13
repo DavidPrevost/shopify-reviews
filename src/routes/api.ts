@@ -8,6 +8,7 @@ import {
   recordReviewSubmitted,
   findPurchaseById,
   findCustomerById,
+  findReviewByCustomerAndProduct,
   type ReviewRow,
 } from '../db/queries.js';
 import { verifyReviewToken } from '../email/tokens.js';
@@ -103,8 +104,25 @@ api.post('/reviews/submit', async (c) => {
   const fallbackName =
     [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || null;
 
+  // If the customer already reviewed this product (any prior order), don't
+  // insert a duplicate review row — mark this purchase as reviewed and return
+  // the same success response so the experience is identical from the client's
+  // perspective.
+  const existingReview = findReviewByCustomerAndProduct(customerId, purchase.shopify_product_id);
+  if (existingReview) {
+    recordReviewSubmitted({ purchaseId, customerId });
+    log('info', 'duplicate review suppressed, purchase marked reviewed', {
+      purchaseId,
+      customerId,
+      existingReviewId: existingReview.id,
+      productId: purchase.shopify_product_id,
+    });
+    return c.json({ ok: true, reviewId: existingReview.id, duplicate: true });
+  }
+
   const reviewId = insertReview({
     shopifyProductId: purchase.shopify_product_id,
+    shopifyVariantId: purchase.shopify_variant_id,
     customerId,
     reviewerEmail: customer.email,
     reviewerName: submittedName ?? fallbackName,

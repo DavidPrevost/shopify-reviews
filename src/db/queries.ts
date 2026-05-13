@@ -83,6 +83,7 @@ export interface PurchaseRow {
   customer_id: number;
   shopify_order_id: string;
   shopify_product_id: string;
+  shopify_variant_id: string | null;
   fulfilled_at: number | null;
   due_at: number | null;
   request_count: number;
@@ -96,20 +97,24 @@ export const upsertPurchase = (input: {
   customerId: number;
   shopifyOrderId: string;
   shopifyProductId: string;
+  shopifyVariantId: string | null;
   fulfilledAt: number | null;
   dueAt: number | null;
 }): void => {
   getDb().prepare(`
     INSERT INTO purchases
-      (customer_id, shopify_order_id, shopify_product_id, fulfilled_at, due_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+      (customer_id, shopify_order_id, shopify_product_id, shopify_variant_id,
+       fulfilled_at, due_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(shopify_order_id, shopify_product_id) DO UPDATE SET
+      shopify_variant_id = COALESCE(excluded.shopify_variant_id, purchases.shopify_variant_id),
       fulfilled_at = COALESCE(excluded.fulfilled_at, purchases.fulfilled_at),
       due_at = COALESCE(excluded.due_at, purchases.due_at)
   `).run(
     input.customerId,
     input.shopifyOrderId,
     input.shopifyProductId,
+    input.shopifyVariantId,
     input.fulfilledAt,
     input.dueAt,
     nowSec(),
@@ -196,6 +201,7 @@ export interface EligibleRow {
   p_id: number;
   p_shopify_order_id: string;
   p_shopify_product_id: string;
+  p_shopify_variant_id: string | null;
   p_request_count: number;
   p_due_at: number | null;
   // customer fields
@@ -215,6 +221,7 @@ export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
       p.id                  AS p_id,
       p.shopify_order_id    AS p_shopify_order_id,
       p.shopify_product_id  AS p_shopify_product_id,
+      p.shopify_variant_id  AS p_shopify_variant_id,
       p.request_count       AS p_request_count,
       p.due_at              AS p_due_at,
       c.id                  AS c_id,
@@ -249,30 +256,48 @@ export const customerHasAnyReviews = (customerId: number): boolean => {
   return row !== undefined;
 };
 
-// Transactional: bump counters, advance or null due_at, and log the event.
-// Pass the row that was returned by findEligiblePurchases — this function
-// reads the current cadence settings to decide whether to null due_at.
-export const recordRequestSent = (input: {
-  purchaseId: number;
+// Transactional: bump counters for one or more purchases that were sent in a
+// single email, advance or null each purchase's due_at independently, and log
+// one event per purchase. The customer-level counters bump just once
+// regardless of how many purchases were in the email.
+export const recordRequestSentBatch = (input: {
+  purchaseIds: number[];
   customerId: number;
   metadata?: Record<string, unknown>;
 }): void => {
+  if (input.purchaseIds.length === 0) return;
+
   const db = getDb();
   const now = nowSec();
   const minBetweenDays = getSettingNumber('cadence_min_days_between', 7);
   const maxRequests = getSettingNumber('cadence_max_requests', 3);
 
+  const updatePurchase = db.prepare(`
+    UPDATE purchases
+       SET request_count = request_count + 1,
+           last_request_at = ?,
+           due_at = CASE
+             WHEN request_count + 1 >= ? THEN NULL
+             ELSE ? + ? * 86400
+           END
+     WHERE id = ?
+  `);
+
+  const insertEvent = db.prepare(`
+    INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
+    VALUES (?, ?, 'request_sent', ?, ?)
+  `);
+
   db.transaction(() => {
-    db.prepare(`
-      UPDATE purchases
-         SET request_count = request_count + 1,
-             last_request_at = ?,
-             due_at = CASE
-               WHEN request_count + 1 >= ? THEN NULL
-               ELSE ? + ? * 86400
-             END
-       WHERE id = ?
-    `).run(now, maxRequests, now, minBetweenDays, input.purchaseId);
+    for (const pid of input.purchaseIds) {
+      updatePurchase.run(now, maxRequests, now, minBetweenDays, pid);
+      insertEvent.run(
+        input.customerId,
+        pid,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        now,
+      );
+    }
 
     db.prepare(`
       UPDATE customers
@@ -280,16 +305,6 @@ export const recordRequestSent = (input: {
              last_request_sent_at = ?
        WHERE id = ?
     `).run(now, input.customerId);
-
-    db.prepare(`
-      INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
-      VALUES (?, ?, 'request_sent', ?, ?)
-    `).run(
-      input.customerId,
-      input.purchaseId,
-      input.metadata ? JSON.stringify(input.metadata) : null,
-      now,
-    );
   })();
 };
 
@@ -298,6 +313,7 @@ export const recordRequestSent = (input: {
 export interface ReviewRow {
   id: number;
   shopify_product_id: string;
+  shopify_variant_id: string | null;
   customer_id: number | null;
   reviewer_email: string;
   reviewer_name: string | null;
@@ -314,6 +330,7 @@ export interface ReviewRow {
 
 export const insertReview = (input: {
   shopifyProductId: string;
+  shopifyVariantId: string | null;
   customerId: number | null;
   reviewerEmail: string;
   reviewerName: string | null;
@@ -326,11 +343,12 @@ export const insertReview = (input: {
   const now = nowSec();
   const result = getDb().prepare(`
     INSERT INTO reviews
-      (shopify_product_id, customer_id, reviewer_email, reviewer_name,
+      (shopify_product_id, shopify_variant_id, customer_id, reviewer_email, reviewer_name,
        rating, title, body, verified_purchase, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.shopifyProductId,
+    input.shopifyVariantId,
     input.customerId,
     input.reviewerEmail.toLowerCase(),
     input.reviewerName,
@@ -343,6 +361,24 @@ export const insertReview = (input: {
     now,
   );
   return Number(result.lastInsertRowid);
+};
+
+// Used by the submission flow to detect a duplicate: a customer who already
+// reviewed this product (across any order). If this returns a row, we silently
+// mark the new purchase as reviewed without inserting a duplicate review.
+export const findReviewByCustomerAndProduct = (
+  customerId: number,
+  shopifyProductId: string,
+): ReviewRow | null => {
+  return (getDb()
+    .prepare(`
+      SELECT * FROM reviews
+       WHERE customer_id = ?
+         AND shopify_product_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1
+    `)
+    .get(customerId, shopifyProductId) as ReviewRow | undefined) ?? null;
 };
 
 // On review submission: stop further requests for this purchase and reset the

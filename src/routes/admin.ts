@@ -16,6 +16,7 @@ import {
 } from '../db/queries.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
+import { restartScheduler } from '../scheduler/cron.js';
 import {
   verifyAdminPassword,
   signSessionCookie,
@@ -407,13 +408,24 @@ admin.get('/settings', (c) => {
   const cadenceMin = getSettingNumber('cadence_min_days_between', 7);
   const requestDelay = getSettingNumber('request_delay_days', 7);
   const dispatcherBatch = getSettingNumber('cadence_dispatcher_batch', 100);
+  const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
+  const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const brandJson = getSetting('shop_brand_json') ?? '{}';
+
+  // Hour dropdown: 1-12
+  const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
+    .map((h) => `<option value="${h}">${h}</option>`)
+    .join('');
+  // Minute dropdown: 0-59, two-digit
+  const minuteOptions = Array.from({ length: 60 }, (_, i) => i)
+    .map((m) => `<option value="${m}">${m.toString().padStart(2, '0')}</option>`)
+    .join('');
 
   return c.html(adminShell('Settings', `
     <h2>Cadence</h2>
     ${flash}
     <div class="card">
-      <form method="POST" action="/admin/settings">
+      <form method="POST" action="/admin/settings" id="settings-form">
         <label for="cadence_max_requests">Max requests per purchase</label>
         <input id="cadence_max_requests" name="cadence_max_requests" type="number" min="1" max="10" value="${cadenceMax}">
 
@@ -427,6 +439,21 @@ admin.get('/settings', (c) => {
         <input id="cadence_dispatcher_batch" name="cadence_dispatcher_batch" type="number" min="1" max="2000" value="${dispatcherBatch}">
         <p class="muted">Gmail's free-tier sending ceiling is ~500/day. Keep this comfortably below that.</p>
 
+        <label>Daily dispatcher time</label>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+          <select id="dispatcher_hour_local" style="width:auto;">${hourOptions}</select>
+          <span>:</span>
+          <select id="dispatcher_minute_local" style="width:auto;">${minuteOptions}</select>
+          <select id="dispatcher_ampm" style="width:auto;">
+            <option value="AM">AM</option>
+            <option value="PM">PM</option>
+          </select>
+          <span id="dispatcher_tz_label" class="muted" style="margin-left:8px;"></span>
+        </div>
+        <p class="muted">Time shown in your browser's local timezone. The dispatcher runs once daily at this time.</p>
+        <input type="hidden" name="dispatcher_hour" id="dispatcher_hour" value="${dispatcherHour}">
+        <input type="hidden" name="dispatcher_minute" id="dispatcher_minute" value="${dispatcherMinute}">
+
         <label for="shop_brand_json">Brand colors (JSON, used in email templates)</label>
         <textarea id="shop_brand_json" name="shop_brand_json" rows="4">${escapeHtml(brandJson)}</textarea>
 
@@ -435,6 +462,60 @@ admin.get('/settings', (c) => {
         </div>
       </form>
     </div>
+
+    <script>
+      (function() {
+        // Stored values are UTC. Convert to/from local for the user-facing controls.
+        var utcHour = ${dispatcherHour};
+        var utcMinute = ${dispatcherMinute};
+
+        var tz;
+        try {
+          tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        } catch (e) {
+          tz = 'UTC';
+        }
+        document.getElementById('dispatcher_tz_label').textContent = 'Timezone: ' + tz;
+
+        function utcToLocal(h, m) {
+          var d = new Date();
+          d.setUTCHours(h, m, 0, 0);
+          return { h: d.getHours(), m: d.getMinutes() };
+        }
+        function localToUtc(h, m) {
+          var d = new Date();
+          d.setHours(h, m, 0, 0);
+          return { h: d.getUTCHours(), m: d.getUTCMinutes() };
+        }
+        function to12Hour(h) {
+          var ampm = h >= 12 ? 'PM' : 'AM';
+          var h12 = h % 12;
+          if (h12 === 0) h12 = 12;
+          return { h: h12, ampm: ampm };
+        }
+        function from12Hour(h12, ampm) {
+          var h = h12 % 12;
+          if (ampm === 'PM') h += 12;
+          return h;
+        }
+
+        var local = utcToLocal(utcHour, utcMinute);
+        var twelve = to12Hour(local.h);
+        document.getElementById('dispatcher_hour_local').value = String(twelve.h);
+        document.getElementById('dispatcher_minute_local').value = String(local.m);
+        document.getElementById('dispatcher_ampm').value = twelve.ampm;
+
+        document.getElementById('settings-form').addEventListener('submit', function() {
+          var hLocal = parseInt(document.getElementById('dispatcher_hour_local').value, 10);
+          var mLocal = parseInt(document.getElementById('dispatcher_minute_local').value, 10);
+          var ampm = document.getElementById('dispatcher_ampm').value;
+          var h24 = from12Hour(hLocal, ampm);
+          var utc = localToUtc(h24, mLocal);
+          document.getElementById('dispatcher_hour').value = String(utc.h);
+          document.getElementById('dispatcher_minute').value = String(utc.m);
+        });
+      })();
+    </script>
   `, 'settings'));
 });
 
@@ -452,6 +533,21 @@ admin.post('/settings', async (c) => {
     if (!Number.isFinite(n) || n < 0) continue;
     setSetting(k, String(Math.floor(n)));
   }
+
+  // Dispatcher schedule fields are sent as UTC (the client-side JS handles the
+  // timezone conversion). Clamp to valid ranges before saving.
+  let scheduleChanged = false;
+  const hourRaw = Number(form.get('dispatcher_hour') ?? '');
+  const minuteRaw = Number(form.get('dispatcher_minute') ?? '');
+  if (Number.isFinite(hourRaw) && hourRaw >= 0 && hourRaw <= 23) {
+    setSetting('dispatcher_hour', String(Math.floor(hourRaw)));
+    scheduleChanged = true;
+  }
+  if (Number.isFinite(minuteRaw) && minuteRaw >= 0 && minuteRaw <= 59) {
+    setSetting('dispatcher_minute', String(Math.floor(minuteRaw)));
+    scheduleChanged = true;
+  }
+
   const brandJson = String(form.get('shop_brand_json') ?? '').trim();
   if (brandJson) {
     try {
@@ -461,7 +557,12 @@ admin.post('/settings', async (c) => {
       // Don't save malformed JSON; future improvement: surface this as an error to the user.
     }
   }
-  log('info', 'admin settings updated', {});
+
+  if (scheduleChanged) {
+    restartScheduler();
+  }
+
+  log('info', 'admin settings updated', { scheduleChanged });
   return c.redirect('/admin/settings?saved=1');
 });
 
