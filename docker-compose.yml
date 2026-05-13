@@ -1,5 +1,5 @@
 # Stack for Mercury — /opt/stacks/shopify-reviews-{dev,prod}/
-# Public ingress is handled by an Oracle Cloud relay (Caddy + Tailscale)
+# Public ingress is handled by a GCP Always-Free relay (Caddy + Tailscale)
 # rather than cloudflared inside this compose. The relay reaches Mercury via
 # its Tailscale IP, so we bind the app's port to that interface specifically
 # (not 0.0.0.0) — keeps the app off Mercury's LAN-facing interfaces.
@@ -11,7 +11,11 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./data:/data
+      # Mount the host's ./data at /app/data inside the container — that's
+      # where config.dataDir resolves to since WORKDIR is /app. The SQLite
+      # file lives at /app/data/reviews.db; binding here makes it persist
+      # across rebuilds.
+      - ./data:/app/data
     ports:
       # HOST_BIND_IP should be Mercury's Tailscale IP (100.x.y.z).
       # HOST_PORT is 8080 for prod, 8081 for dev.
