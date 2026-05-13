@@ -101,8 +101,9 @@ api.post('/reviews/submit', async (c) => {
 
   const title = trimOrNull(body.title, MAX_TITLE_LEN);
   const submittedName = trimOrNull(body.reviewerName, MAX_NAME_LEN);
-  const fallbackName =
-    [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || null;
+  // Default display name: first name only (privacy-friendly). If the client
+  // sent a reviewerName field, that overrides this fallback.
+  const fallbackName = customer.first_name?.trim() || null;
 
   // If the customer already reviewed this product (any prior order), don't
   // insert a duplicate review row — mark this purchase as reviewed and return

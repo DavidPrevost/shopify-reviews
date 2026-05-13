@@ -38,14 +38,8 @@ widget.get('/widget.js', async (c) => {
   return c.body(body);
 });
 
-widget.get('/widget.css', async (c) => {
-  const file = path.join(PUBLIC_DIR, 'widget.css');
-  if (!fs.existsSync(file)) return c.text('not built', 500);
-  const body = fs.readFileSync(file, 'utf8');
-  c.header('Content-Type', 'text/css; charset=utf-8');
-  c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
-  return c.body(body);
-});
+// /widget.css is no longer served — styles are inlined into widget.js and
+// injected at runtime so the storefront only needs the one <script> tag.
 
 // --- Page shell ---
 
@@ -231,8 +225,10 @@ widget.post('/r/:token', async (c) => {
     `));
   }
 
-  const fallbackName =
-    [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || null;
+  // Default display name: first name only (privacy-friendly). If the customer
+  // wants something different shown publicly, they fill in the "Display name"
+  // field on the form and that submittedName overrides this fallback.
+  const fallbackName = customer.first_name?.trim() || null;
 
   const reviewId = insertReview({
     shopifyProductId: purchase.shopify_product_id,
