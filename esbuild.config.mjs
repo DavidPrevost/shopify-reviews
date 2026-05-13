@@ -6,12 +6,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
 
-// API base URL is baked into the widget bundle at build time. Override via
-// REVIEWS_API_BASE env var; defaults to PUBLIC_URL for production builds.
-const apiBase =
-  process.env.REVIEWS_API_BASE
-  ?? process.env.PUBLIC_URL
-  ?? 'https://reviews.brandname.com';
+// The widget detects its API base at runtime from its own script src, so the
+// bundle is environment-agnostic — the same artifact works on dev and prod
+// stacks without needing PUBLIC_URL at build time.
 
 await mkdir(path.join(root, 'public'), { recursive: true });
 
@@ -22,9 +19,6 @@ await build({
   minify: true,
   format: 'iife',
   target: ['es2020'],
-  define: {
-    __REVIEWS_API_BASE__: JSON.stringify(apiBase.replace(/\/+$/, '')),
-  },
   logLevel: 'info',
 });
 
@@ -33,4 +27,4 @@ await cp(
   path.join(root, 'public/widget.css'),
 );
 
-console.log(`widget bundle built (api base: ${apiBase})`);
+console.log('widget bundle built (API base detected at runtime from script src)');

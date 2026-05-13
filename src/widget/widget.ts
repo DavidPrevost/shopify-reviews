@@ -29,8 +29,32 @@ interface ReviewsResponse {
   size: number;
 }
 
-declare const __REVIEWS_API_BASE__: string;
-const API_BASE = __REVIEWS_API_BASE__;
+// The widget calls back to whichever origin served widget.js, so the same
+// bundle works for dev (reviews-dev.<brand>) and prod (reviews.<brand>) with
+// no build-time configuration. document.currentScript is set during the
+// synchronous IIFE execution; we capture it at module load before any async
+// callbacks fire and would null it out.
+const detectApiBase = (): string => {
+  const current = document.currentScript;
+  if (current instanceof HTMLScriptElement && current.src) {
+    return new URL(current.src).origin;
+  }
+  // Fallback: look for ourselves by src pattern. Useful if currentScript is
+  // unset due to dynamic insertion.
+  const scripts = document.querySelectorAll('script[src]');
+  for (const s of scripts) {
+    const src = s.getAttribute('src');
+    if (src && /\/widget\.js(\?|$)/.test(src)) {
+      try {
+        return new URL(src, document.baseURI).origin;
+      } catch {
+        // try next
+      }
+    }
+  }
+  return '';
+};
+const API_BASE = detectApiBase();
 
 const escapeHtml = (s: string): string =>
   s
