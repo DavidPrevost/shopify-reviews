@@ -4,6 +4,7 @@ import {
   customerHasAnyReviews,
   recordRequestSentBatch,
   logEmailFailure,
+  getSetting,
   getSettingNumber,
   type EligibleRow,
 } from '../db/queries.js';
@@ -11,6 +12,7 @@ import { renderTemplate, escapeHtml } from '../email/render.js';
 import { sendMail } from '../email/smtp-client.js';
 import { signReviewToken, signUnsubscribeToken } from '../email/tokens.js';
 import { log } from '../lib/logger.js';
+import { resolveBrandColors, type ResolvedBrandColors } from '../shopify/brand-info.js';
 import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
 
 export interface DispatchResult {
@@ -50,7 +52,7 @@ const buildSubject = (groupSize: number, sampleTitle: string, isRepeat: boolean)
 };
 
 // HTML for a single product card inside the multi-product email body.
-const renderProductCard = (item: GroupItem): string => {
+const renderProductCard = (item: GroupItem, colors: ResolvedBrandColors): string => {
   const reviewUrl = buildReviewUrl(item.reviewToken);
   const unsubProductUrl = buildUnsubProductUrl(item.unsubProductToken);
   const imageBlock = item.product.featuredImageUrl
@@ -66,7 +68,7 @@ const renderProductCard = (item: GroupItem): string => {
         <td style="vertical-align:top;">
           <div style="font-size:16px;font-weight:600;margin-bottom:6px;">${escapeHtml(item.product.title)}</div>
           <a href="${reviewUrl}"
-             style="display:inline-block;background:#222;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
+             style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
             Write a review
           </a>
           <div style="margin-top:6px;font-size:12px;">
@@ -177,7 +179,8 @@ const dispatchGroup = async (
   const unsubGlobalToken = signUnsubscribeToken({ customerId, kind: 'global' });
   const unsubGlobalUrl = buildUnsubGlobalUrl(unsubGlobalToken);
 
-  const productsHtml = items.map(renderProductCard).join('');
+  const colors = resolveBrandColors(getSetting('shop_brand_json'));
+  const productsHtml = items.map((item) => renderProductCard(item, colors)).join('');
 
   const ctx = {
     firstName: escapeHtml(firstName),

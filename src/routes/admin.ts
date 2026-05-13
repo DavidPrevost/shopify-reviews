@@ -15,6 +15,7 @@ import {
   type ReviewRow,
 } from '../db/queries.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
+import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { restartScheduler } from '../scheduler/cron.js';
 import {
@@ -411,7 +412,33 @@ admin.get('/settings', (c) => {
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
-  const brandJson = getSetting('shop_brand_json') ?? '{}';
+  const brandJsonRaw = getSetting('shop_brand_json') ?? '{}';
+  const resolvedColors = resolveBrandColors(brandJsonRaw);
+
+  // Try to extract whether Shopify-side brand info is actually populated for
+  // the preview block. If parsing fails, show no preview.
+  let brandPreviewHtml = '';
+  try {
+    const parsed = JSON.parse(brandJsonRaw);
+    const primary = parsed?.colors?.primary;
+    const secondary = parsed?.colors?.secondary;
+    const hasAny = !!(primary?.background || secondary?.background || parsed?.logoUrl);
+    if (hasAny) {
+      const swatch = (label: string, bg: string | null | undefined, fg: string | null | undefined) =>
+        bg ? `<div style="display:inline-block;margin-right:12px;"><div style="display:inline-block;width:20px;height:20px;background:${escapeHtml(bg)};border:1px solid #ccc;border-radius:3px;vertical-align:middle;"></div> ${escapeHtml(label)} <code style="color:#666;">${escapeHtml(bg)}</code>${fg ? ` / <code style="color:#666;">${escapeHtml(fg)}</code>` : ''}</div>` : '';
+      brandPreviewHtml = `
+        <div style="margin: 8px 0 16px; padding: 12px; background:#f9f9f9; border-radius: 4px; font-size: 13px;">
+          ${swatch('Primary', primary?.background, primary?.foreground)}
+          ${swatch('Secondary', secondary?.background, secondary?.foreground)}
+          ${parsed?.logoUrl ? `<div style="margin-top:8px;">Logo: <a href="${escapeHtml(parsed.logoUrl)}" target="_blank">${escapeHtml(parsed.logoUrl)}</a></div>` : ''}
+          ${parsed?.syncedAt ? `<div class="muted" style="margin-top:4px;">Synced ${escapeHtml(formatTs(parsed.syncedAt))}</div>` : ''}
+        </div>`;
+    } else {
+      brandPreviewHtml = `<p class="muted" style="margin: 8px 0 16px;">No brand info synced yet. Click below to fetch from Shopify, or set brand colors in your Shopify admin (Settings → Brand) first.</p>`;
+    }
+  } catch {
+    brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — sync to overwrite, or fix the JSON below)</p>';
+  }
 
   // Hour dropdown: 1-12
   const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -455,8 +482,18 @@ admin.get('/settings', (c) => {
         <input type="hidden" name="dispatcher_hour" id="dispatcher_hour" value="${dispatcherHour}">
         <input type="hidden" name="dispatcher_minute" id="dispatcher_minute" value="${dispatcherMinute}">
 
-        <label for="shop_brand_json">Brand colors (JSON, used in email templates)</label>
-        <textarea id="shop_brand_json" name="shop_brand_json" rows="4">${escapeHtml(brandJson)}</textarea>
+        <label>Brand info (synced from Shopify, applied to email button colors)</label>
+        ${brandPreviewHtml}
+        <p class="muted" style="margin: 4px 0 8px;">Resolved CTA color: <code>${escapeHtml(resolvedColors.ctaBackground)}</code> background, <code>${escapeHtml(resolvedColors.ctaForeground)}</code> text. Falls back to neutral defaults when Shopify has nothing configured.</p>
+
+        <details style="margin: 8px 0 16px;">
+          <summary style="cursor:pointer; font-size: 13px; color:#666;">Advanced: edit raw JSON</summary>
+          <textarea id="shop_brand_json" name="shop_brand_json" rows="6" style="margin-top:8px;">${escapeHtml(brandJsonRaw)}</textarea>
+        </details>
+
+        <p>
+          <button type="submit" formaction="/admin/settings/sync-brand" formnovalidate>Sync brand info from Shopify</button>
+        </p>
 
         <div style="margin-top:24px; padding:16px; background:#fff8e1; border:1px solid #ffd54f; border-radius:6px;">
           <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">
@@ -579,6 +616,25 @@ admin.post('/settings', async (c) => {
 
   log('info', 'admin settings updated', { scheduleChanged, immediateOnFulfillment: immediateChecked });
   return c.redirect('/admin/settings?saved=1');
+});
+
+// --- Brand info sync from Shopify ---
+
+admin.post('/settings/sync-brand', async (c) => {
+  try {
+    const brandInfo = await fetchShopifyBrand();
+    setSetting('shop_brand_json', JSON.stringify(brandInfo, null, 2));
+    log('info', 'admin synced brand info from Shopify', {
+      hasPrimary: !!brandInfo.colors?.primary?.background,
+      hasSecondary: !!brandInfo.colors?.secondary?.background,
+      hasLogo: !!brandInfo.logoUrl,
+    });
+    return c.redirect('/admin/settings?saved=1');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log('error', 'brand sync failed', { error: msg });
+    return c.html(adminShell('Brand sync failed', `<div class="err">${escapeHtml(msg)}</div><p><a href="/admin/settings">Back to settings</a></p>`), 500);
+  }
 });
 
 // --- Manual operations ---
