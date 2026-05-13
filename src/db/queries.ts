@@ -249,6 +249,63 @@ export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
   `).all(batchSize) as EligibleRow[];
 };
 
+export interface SuppressionAudit {
+  globalOptOut: number;
+  productOptOut: number;
+  maxRequestsHit: number;
+  cadenceTooSoon: number;
+  alreadyReviewed: number;
+}
+
+// Counts purchases that would otherwise be eligible (due, unreviewed) but
+// were excluded from the dispatcher's eligibility set by each suppression
+// rule. Each purchase is counted in exactly one bucket using the priority
+// order: globalOptOut → productOptOut → maxRequestsHit → cadenceTooSoon →
+// alreadyReviewed. Purpose: observability for "why didn't X get an email?"
+// without changing the canonical eligibility query.
+export const auditSuppressions = (): SuppressionAudit => {
+  const row = getDb().prepare(`
+    SELECT
+      SUM(CASE WHEN c.global_opt_out = 1 THEN 1 ELSE 0 END) AS global_opt_out,
+      SUM(CASE WHEN c.global_opt_out = 0 AND p.product_opt_out = 1 THEN 1 ELSE 0 END) AS product_opt_out,
+      SUM(CASE
+        WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND p.request_count >= CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
+        THEN 1 ELSE 0 END) AS max_requests_hit,
+      SUM(CASE
+        WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
+         AND c.last_request_sent_at IS NOT NULL
+         AND c.last_request_sent_at >= unixepoch() - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400
+        THEN 1 ELSE 0 END) AS cadence_too_soon,
+      SUM(CASE
+        WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
+         AND (c.last_request_sent_at IS NULL
+              OR c.last_request_sent_at < unixepoch() - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400)
+         AND EXISTS (SELECT 1 FROM reviews r WHERE r.customer_id = c.id AND r.shopify_product_id = p.shopify_product_id)
+        THEN 1 ELSE 0 END) AS already_reviewed
+    FROM purchases p
+    JOIN customers c ON c.id = p.customer_id
+    WHERE p.due_at IS NOT NULL
+      AND p.due_at <= unixepoch()
+      AND p.reviewed_at IS NULL
+  `).get() as {
+    global_opt_out: number | null;
+    product_opt_out: number | null;
+    max_requests_hit: number | null;
+    cadence_too_soon: number | null;
+    already_reviewed: number | null;
+  };
+  return {
+    globalOptOut: row.global_opt_out ?? 0,
+    productOptOut: row.product_opt_out ?? 0,
+    maxRequestsHit: row.max_requests_hit ?? 0,
+    cadenceTooSoon: row.cadence_too_soon ?? 0,
+    alreadyReviewed: row.already_reviewed ?? 0,
+  };
+};
+
 export const customerHasAnyReviews = (customerId: number): boolean => {
   const row = getDb()
     .prepare('SELECT 1 AS x FROM reviews WHERE customer_id = ? LIMIT 1')
@@ -443,6 +500,33 @@ export const setGlobalOptOut = (customerId: number): void => {
       VALUES (?, NULL, 'unsubscribed', ?)
     `).run(customerId, now);
   })();
+};
+
+// Flips global_opt_out back to 0 AND clears due_at on the customer's
+// unreviewed purchases so they don't get a backlog of review-request emails
+// covering everything they bought while opted out. Future purchases go
+// through normal cadence; only purchases sitting in the queue with the
+// original due_at get wiped. Returns the number of purchases cleared.
+export const clearGlobalOptOut = (customerId: number): { purchasesCleared: number } => {
+  const now = nowSec();
+  const db = getDb();
+  let purchasesCleared = 0;
+  db.transaction(() => {
+    db.prepare('UPDATE customers SET global_opt_out = 0 WHERE id = ?').run(customerId);
+    const res = db.prepare(`
+      UPDATE purchases
+         SET due_at = NULL
+       WHERE customer_id = ?
+         AND reviewed_at IS NULL
+         AND due_at IS NOT NULL
+    `).run(customerId);
+    purchasesCleared = res.changes;
+    db.prepare(`
+      INSERT INTO email_events (customer_id, purchase_id, kind, metadata_json, created_at)
+      VALUES (?, NULL, 'resubscribed', ?, ?)
+    `).run(customerId, JSON.stringify({ purchasesCleared }), now);
+  })();
+  return { purchasesCleared };
 };
 
 export const setProductOptOut = (purchaseId: number, customerId: number | null): void => {

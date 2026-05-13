@@ -6,7 +6,9 @@ import {
   logEmailFailure,
   getSetting,
   getSettingNumber,
+  auditSuppressions,
   type EligibleRow,
+  type SuppressionAudit,
 } from '../db/queries.js';
 import { renderTemplate, escapeHtml } from '../email/render.js';
 import { sendMail } from '../email/smtp-client.js';
@@ -21,6 +23,7 @@ export interface DispatchResult {
   sent: number;                // emails actually sent
   failed: number;              // emails that errored during send
   skipped: number;             // groups skipped (e.g. all products missing)
+  suppressed: SuppressionAudit; // purchases excluded by each suppression rule
 }
 
 interface GroupItem {
@@ -255,11 +258,13 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
   const batchSize = getSettingNumber('cadence_dispatcher_batch', 100);
   const rows = findEligiblePurchases(batchSize);
   const groups = groupByCustomerOrder(rows);
+  const suppressed = auditSuppressions();
 
   log('info', 'dispatcher run starting', {
     batchSize,
     considered: rows.length,
     groupsConsidered: groups.length,
+    suppressed,
   });
 
   const result: DispatchResult = {
@@ -268,6 +273,7 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
     sent: 0,
     failed: 0,
     skipped: 0,
+    suppressed,
   };
 
   for (const group of groups) {

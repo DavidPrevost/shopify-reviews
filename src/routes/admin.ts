@@ -12,6 +12,7 @@ import {
   getSetting,
   getSettingNumber,
   setGlobalOptOut,
+  clearGlobalOptOut,
   type ReviewRow,
 } from '../db/queries.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
@@ -358,6 +359,11 @@ admin.get('/customers/:email', (c) => {
   const detail = getCustomerDetail(email);
   if (!detail) return c.html(adminShell('Not found', `<p>No customer for ${escapeHtml(email)}</p>`), 404);
 
+  const resubscribedCount = c.req.query('resubscribed');
+  const flash = resubscribedCount
+    ? `<div class="ok">Re-subscribed. Cleared ${escapeHtml(resubscribedCount)} pending review-request${resubscribedCount === '1' ? '' : 's'} so the customer won't be backfilled.</div>`
+    : '';
+
   const purchasesHtml = detail.purchases.length === 0
     ? '<p class="muted">No purchases on record.</p>'
     : `<table>
@@ -375,12 +381,17 @@ admin.get('/customers/:email', (c) => {
        </table>`;
 
   const optOutForm = detail.global_opt_out
-    ? '<p>This customer has globally unsubscribed from review requests.</p>'
+    ? `<p>This customer has globally unsubscribed from review requests.</p>
+       <form method="POST" action="/admin/customers/${encodeURIComponent(email)}/resubscribe" onsubmit="return confirm('Re-subscribe ${escapeHtml(email)}? This clears any pending review requests so they don\\'t get backfilled.');">
+         <button type="submit">Re-subscribe customer</button>
+       </form>
+       <p class="muted" style="font-size:0.85em;margin-top:4px;">Re-subscribing also clears <code>due_at</code> on the customer's pending purchases so they don't receive a backlog of review-request emails from the period they were opted out.</p>`
     : `<form method="POST" action="/admin/customers/${encodeURIComponent(email)}/global-opt-out">
          <button type="submit" class="danger">Apply global opt-out</button>
        </form>`;
 
   return c.html(adminShell(`Customer ${email}`, `
+    ${flash}
     <h2>${escapeHtml(email)}</h2>
     <div class="card">
       <p>${escapeHtml([detail.first_name, detail.last_name].filter(Boolean).join(' ') || '(no name)')}</p>
@@ -399,6 +410,15 @@ admin.post('/customers/:email/global-opt-out', (c) => {
   setGlobalOptOut(detail.id);
   log('info', 'admin applied global opt-out', { customerId: detail.id });
   return c.redirect(`/admin/customers/${encodeURIComponent(email)}`);
+});
+
+admin.post('/customers/:email/resubscribe', (c) => {
+  const email = decodeURIComponent(c.req.param('email'));
+  const detail = getCustomerDetail(email);
+  if (!detail) return c.text('not found', 404);
+  const { purchasesCleared } = clearGlobalOptOut(detail.id);
+  log('info', 'admin re-subscribed customer', { customerId: detail.id, purchasesCleared });
+  return c.redirect(`/admin/customers/${encodeURIComponent(email)}?resubscribed=${purchasesCleared}`);
 });
 
 // --- Settings ---

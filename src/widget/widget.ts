@@ -244,7 +244,7 @@ const renderAggregateInline = (agg: Aggregate, mode: 'full' | 'aggregate'): stri
 
 const formatDate = (unixSec: number): string => {
   const d = new Date(unixSec * 1000);
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
 };
 
 const renderReviewItem = (r: ReviewItem): string => {
