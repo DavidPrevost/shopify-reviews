@@ -410,6 +410,7 @@ admin.get('/settings', (c) => {
   const dispatcherBatch = getSettingNumber('cadence_dispatcher_batch', 100);
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
+  const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
   const brandJson = getSetting('shop_brand_json') ?? '{}';
 
   // Hour dropdown: 1-12
@@ -456,6 +457,16 @@ admin.get('/settings', (c) => {
 
         <label for="shop_brand_json">Brand colors (JSON, used in email templates)</label>
         <textarea id="shop_brand_json" name="shop_brand_json" rows="4">${escapeHtml(brandJson)}</textarea>
+
+        <div style="margin-top:24px; padding:16px; background:#fff8e1; border:1px solid #ffd54f; border-radius:6px;">
+          <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="dispatch_immediately_on_fulfillment" value="1" ${immediateOnFulfillment ? 'checked' : ''} style="width:auto;">
+            <span>Send review-request email immediately on fulfillment <em style="color:#a86b00;">— testing only</em></span>
+          </label>
+          <p class="muted" style="margin:8px 0 0; color:#7a4f01;">
+            <strong>Leave OFF in production.</strong> When ON, every order's review email goes out within seconds of being marked fulfilled — bypassing the normal <code>request_delay_days</code> waiting period that prevents the system from feeling spammy. Useful for end-to-end testing where waiting 14 days isn't practical.
+          </p>
+        </div>
 
         <div style="margin-top:24px;">
           <button type="submit" class="primary">Save settings</button>
@@ -558,11 +569,15 @@ admin.post('/settings', async (c) => {
     }
   }
 
+  // Checkbox: form.get returns '1' when checked, null when unchecked.
+  const immediateChecked = form.get('dispatch_immediately_on_fulfillment') === '1';
+  setSetting('dispatch_immediately_on_fulfillment', immediateChecked ? '1' : '0');
+
   if (scheduleChanged) {
     restartScheduler();
   }
 
-  log('info', 'admin settings updated', { scheduleChanged });
+  log('info', 'admin settings updated', { scheduleChanged, immediateOnFulfillment: immediateChecked });
   return c.redirect('/admin/settings?saved=1');
 });
 

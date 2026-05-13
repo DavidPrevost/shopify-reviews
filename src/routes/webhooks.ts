@@ -7,11 +7,13 @@ import {
   findCustomerByShopifyId,
   anonymizeCustomer,
   logEmailEvent,
+  getSetting,
   getSettingNumber,
 } from '../db/queries.js';
 import { getDb } from '../db/client.js';
 import { log } from '../lib/logger.js';
 import { nowSec, daysToSec } from '../lib/time.js';
+import { runDispatcher } from '../scheduler/dispatcher.js';
 import { verifyShopifyWebhook } from '../shopify/webhook-verify.js';
 
 // Shape of the orders/* webhook payload we actually consume. Shopify sends much
@@ -104,7 +106,8 @@ webhooks.post('/orders/fulfilled', async (c) => {
 
   const orderId = String(body.id);
   const fulfilledAt = nowSec();
-  const delayDays = getSettingNumber('request_delay_days', 7);
+  const immediate = getSetting('dispatch_immediately_on_fulfillment') === '1';
+  const delayDays = immediate ? 0 : getSettingNumber('request_delay_days', 7);
   const dueAt = fulfilledAt + daysToSec(delayDays);
 
   const updated = markOrderFulfilled({
@@ -113,7 +116,19 @@ webhooks.post('/orders/fulfilled', async (c) => {
     dueAt,
   });
 
-  log('info', 'orders/fulfilled processed', { orderId, purchasesUpdated: updated });
+  log('info', 'orders/fulfilled processed', { orderId, purchasesUpdated: updated, immediate });
+
+  if (immediate) {
+    // Fire-and-forget: don't block the webhook response. Shopify expects a
+    // fast 200 here; the dispatcher's own logs capture the email outcome.
+    runDispatcher().catch((err) => {
+      log('error', 'immediate dispatcher run failed', {
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   return c.json({ ok: true, updated });
 });
 
