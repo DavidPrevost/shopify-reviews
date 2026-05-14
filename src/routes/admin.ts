@@ -578,20 +578,25 @@ admin.get('/sample-invitations', (c) => {
           tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
           panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
         }
-        // Default tab: hash if present, otherwise "individual" — but if the
-        // user just created an invitation (?created=... in the URL), force
-        // Individual so the success flash with the copyable link is visible.
+        // Initial tab: from URL hash if present, otherwise "individual" — but
+        // if the user just created an invitation (?created=... in the URL),
+        // force Individual so the success flash with the copyable link is
+        // visible regardless of any stale hash.
         var hash = (location.hash || '').replace('#', '');
         var hasCreated = location.search.indexOf('created=') !== -1;
         var initial = hasCreated ? 'individual' : (hash || 'individual');
         show(initial);
+        // Tab clicks intercepted: preventDefault stops the native hash-jump,
+        // replaceState swaps the URL hash without pushing a history entry.
+        // Net effect: tab switches do not pollute browser back/forward — those
+        // continue to navigate between pages rather than between tabs.
         tabs.forEach(function (a) {
-          a.addEventListener('click', function () {
-            // Let the native hash-change happen; show() runs from the listener below.
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var name = a.dataset.tab;
+            history.replaceState(null, '', '#' + name);
+            show(name);
           });
-        });
-        window.addEventListener('hashchange', function () {
-          show(location.hash.replace('#', '') || 'individual');
         });
       })();
     </script>
