@@ -210,6 +210,136 @@ const STYLES = `
   opacity: 0.7;
   font-size: 0.9em;
 }
+.rv-cta-button {
+  background: var(--reviews-cta-bg, #222);
+  color: var(--reviews-cta-fg, #fff);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 0.9em;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.rv-cta-button:hover { opacity: 0.9; }
+.rv-cta-link {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.95em;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+}
+.rv-empty-cta {
+  margin-top: 0.75rem;
+}
+.rv-your-review-tag {
+  display: inline-block;
+  background: rgba(127, 127, 127, 0.15);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: 0.5rem;
+}
+.rv-dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  max-width: 520px;
+  width: 90vw;
+  max-height: 90vh;
+  overflow: auto;
+  background: #fff;
+  color: #222;
+  font-family: inherit;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+.rv-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.rv-dialog-content { padding: 24px 28px; }
+.rv-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.rv-dialog-title {
+  margin: 0;
+  font-size: 1.15em;
+  font-weight: 600;
+}
+.rv-dialog-close {
+  background: none;
+  border: none;
+  font-size: 1.5em;
+  cursor: pointer;
+  color: #888;
+  padding: 0;
+  line-height: 1;
+}
+.rv-dialog-close:hover { color: #222; }
+.rv-dialog label {
+  display: block;
+  margin-top: 14px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+.rv-dialog input[type="text"],
+.rv-dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  margin-top: 4px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.95em;
+  font-family: inherit;
+}
+.rv-dialog textarea { min-height: 110px; resize: vertical; }
+.rv-dialog-stars {
+  display: inline-flex;
+  flex-direction: row-reverse;
+  font-size: 1.6em;
+  margin-top: 4px;
+  user-select: none;
+}
+.rv-dialog-stars input[type="radio"] { display: none; }
+.rv-dialog-stars label {
+  display: inline-block;
+  cursor: pointer;
+  color: #ddd;
+  margin: 0;
+  font-weight: normal;
+  font-size: inherit;
+}
+.rv-dialog-stars label:hover,
+.rv-dialog-stars label:hover ~ label,
+.rv-dialog-stars input:checked ~ label { color: #f5a623; }
+.rv-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.rv-dialog-error {
+  background: #fee;
+  border: 1px solid #fcc;
+  color: #933;
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 12px 0 0;
+  font-size: 0.9em;
+}
+.rv-dialog-muted { color: #888; font-size: 0.8em; margin-top: 8px; }
+@media (max-width: 480px) {
+  .rv-dialog { width: 100vw; max-width: 100vw; max-height: 100vh; height: 100vh; border-radius: 0; }
+}
 `;
 
 const injectStylesOnce = (): void => {
@@ -274,7 +404,7 @@ const formatDate = (unixSec: number): string => {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
 };
 
-const renderReviewItem = (r: ReviewItem): string => {
+const renderReviewItem = (r: ReviewItem, isOwn: boolean = false): string => {
   const displayName = firstNameOnly(r.reviewerName);
   // Different verification origins get different badge text so the storefront
   // is honest about provenance. Purchase reviews → "Verified Buyer"; sample/
@@ -285,11 +415,13 @@ const renderReviewItem = (r: ReviewItem): string => {
     if (kind === 'sample') return `<span class="rv-review-verified">Verified Reviewer</span>`;
     return '';
   })();
+  const ownTag = isOwn ? '<span class="rv-your-review-tag">Your review</span>' : '';
   return `
     <li class="rv-review">
       <div class="rv-review-head">
         ${renderStars(r.rating)}
         ${r.title ? `<strong class="rv-review-title">${escapeHtml(r.title)}</strong>` : ''}
+        ${ownTag}
       </div>
       <div class="rv-review-meta">
         ${displayName ? `<span class="rv-review-author">${escapeHtml(displayName)}</span>` : ''}
@@ -321,16 +453,245 @@ const fetchAggregate = async (productId: string): Promise<Aggregate> => {
   return (await res.json()) as Aggregate;
 };
 
-const renderFull = async (el: HTMLElement, productId: string, variantId: string | null): Promise<void> => {
+// App Proxy endpoint — hits the storefront's /apps/reviews/* prefix which
+// Shopify forwards to our backend's /proxy/* with HMAC-signed query params.
+// Same-origin so Shopify's session cookie is sent; that's what tells Shopify
+// who's logged in.
+const proxyUrl = (path: string): string =>
+  `${window.location.origin}/apps/reviews${path}`;
+
+const fetchMyReview = async (productId: string): Promise<ReviewItem | null> => {
+  try {
+    const res = await fetch(
+      proxyUrl(`/customer/review?product_id=${encodeURIComponent(productId)}`),
+      { method: 'GET', credentials: 'same-origin' },
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.review ?? null;
+  } catch {
+    return null;
+  }
+};
+
+interface ReviewFormData {
+  rating: number;
+  title: string | null;
+  body: string;
+  reviewerName: string | null;
+}
+
+const submitNewReview = (
+  productId: string,
+  variantId: string | null,
+  data: ReviewFormData,
+): Promise<Response> =>
+  fetch(proxyUrl('/customer/review'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      product_id: productId,
+      variant_id: variantId,
+      rating: data.rating,
+      title: data.title,
+      body: data.body,
+      reviewer_name: data.reviewerName,
+    }),
+  });
+
+const submitEdit = (reviewId: number, data: ReviewFormData): Promise<Response> =>
+  fetch(proxyUrl(`/customer/review/${reviewId}`), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      rating: data.rating,
+      title: data.title,
+      body: data.body,
+      reviewer_name: data.reviewerName,
+    }),
+  });
+
+// Singleton modal element — created lazily on first open, reused thereafter.
+// Lives on document.body so it sits above the storefront's z-index stacks.
+let modalEl: HTMLDialogElement | null = null;
+
+const ensureModal = (): HTMLDialogElement => {
+  if (modalEl) return modalEl;
+  const d = document.createElement('dialog');
+  d.className = 'rv-dialog';
+  document.body.appendChild(d);
+  // Click on the backdrop (target is the dialog itself, not inner content)
+  // closes — standard modal pattern.
+  d.addEventListener('click', (e) => {
+    if (e.target === d) d.close();
+  });
+  modalEl = d;
+  return d;
+};
+
+interface OpenModalOptions {
+  mode: 'create' | 'edit';
+  productId: string;
+  variantId: string | null;
+  productTitle: string;
+  existingReview?: ReviewItem;
+  onSuccess: () => void;
+}
+
+const openReviewModal = (opts: OpenModalOptions): void => {
+  const d = ensureModal();
+  const r = opts.existingReview;
+  const heading = opts.mode === 'edit'
+    ? 'Edit your review'
+    : `Review ${opts.productTitle || 'this product'}`;
+
+  const starsHtml = [5, 4, 3, 2, 1]
+    .map((n) => `
+      <input type="radio" id="rv-rating-${n}" name="rating" value="${n}"${r?.rating === n ? ' checked' : ''}>
+      <label for="rv-rating-${n}" title="${n} star${n === 1 ? '' : 's'}">★</label>
+    `).join('');
+
+  d.innerHTML = `
+    <div class="rv-dialog-content">
+      <div class="rv-dialog-header">
+        <h2 class="rv-dialog-title">${escapeHtml(heading)}</h2>
+        <button type="button" class="rv-dialog-close" aria-label="Close">×</button>
+      </div>
+      <form>
+        <label>Rating</label>
+        <div class="rv-dialog-stars">${starsHtml}</div>
+
+        <label for="rv-form-title">Title <span style="font-weight:normal;opacity:0.6;">(optional)</span></label>
+        <input type="text" id="rv-form-title" name="title" maxlength="120" value="${escapeHtml(r?.title ?? '')}">
+
+        <label for="rv-form-body">Your review</label>
+        <textarea id="rv-form-body" name="body" required maxlength="4000">${escapeHtml(r?.body ?? '')}</textarea>
+
+        <label for="rv-form-name">Display name <span style="font-weight:normal;opacity:0.6;">(optional — only first word shown publicly)</span></label>
+        <input type="text" id="rv-form-name" name="reviewerName" maxlength="80" value="${escapeHtml(r?.reviewerName ?? '')}">
+
+        <div class="rv-dialog-error" hidden></div>
+        <p class="rv-dialog-muted">Reviews may be lightly edited for clarity.</p>
+        <div class="rv-dialog-actions">
+          <button type="button" class="rv-cta-link" data-rv-cancel>Cancel</button>
+          <button type="submit" class="rv-cta-button">${opts.mode === 'edit' ? 'Save changes' : 'Submit review'}</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  const closeBtn = d.querySelector('.rv-dialog-close') as HTMLButtonElement;
+  const cancelBtn = d.querySelector('[data-rv-cancel]') as HTMLButtonElement;
+  const form = d.querySelector('form') as HTMLFormElement;
+  const errBox = d.querySelector('.rv-dialog-error') as HTMLElement;
+  const submitBtn = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+  const originalLabel = submitBtn.textContent ?? 'Submit';
+
+  const close = () => d.close();
+  closeBtn.addEventListener('click', close);
+  cancelBtn.addEventListener('click', close);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const rating = Number(fd.get('rating'));
+    const titleVal = String(fd.get('title') ?? '').trim() || null;
+    const bodyVal = String(fd.get('body') ?? '').trim();
+    const nameVal = String(fd.get('reviewerName') ?? '').trim() || null;
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      errBox.textContent = 'Please pick a rating from 1 to 5 stars.';
+      errBox.hidden = false;
+      return;
+    }
+    if (!bodyVal) {
+      errBox.textContent = 'Please write a few words about your experience.';
+      errBox.hidden = false;
+      return;
+    }
+
+    errBox.hidden = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+
+    const formData: ReviewFormData = { rating, title: titleVal, body: bodyVal, reviewerName: nameVal };
+    let res: Response;
+    try {
+      res = opts.mode === 'edit' && r
+        ? await submitEdit(r.id, formData)
+        : await submitNewReview(opts.productId, opts.variantId, formData);
+    } catch {
+      errBox.textContent = 'Network error. Please try again.';
+      errBox.hidden = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+      return;
+    }
+
+    if (!res.ok) {
+      let msg = 'Something went wrong. Please try again.';
+      try {
+        const data = await res.json();
+        if (data.error === 'not_logged_in') msg = 'Please log in to leave a review.';
+        else if (data.error === 'already_reviewed') msg = "You've already reviewed this product.";
+        else if (data.error === 'not_yours') msg = 'You can only edit your own reviews.';
+        else if (data.error === 'invalid_rating') msg = 'Please pick a valid rating.';
+      } catch {
+        // body wasn't JSON — fall through to generic message
+      }
+      errBox.textContent = msg;
+      errBox.hidden = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+      return;
+    }
+
+    close();
+    opts.onSuccess();
+  });
+
+  d.showModal();
+};
+
+const renderFull = async (
+  el: HTMLElement,
+  productId: string,
+  variantId: string | null,
+  customerId: string | null,
+): Promise<void> => {
   el.innerHTML = '<div class="rv-widget rv-widget-full"><div class="rv-loading">Loading reviews…</div></div>';
   try {
-    const data = await fetchReviews(productId, variantId);
-    const writeLink = (() => {
+    // Public reviews come from the CORS API; the logged-in customer's own
+    // review (if any) comes from the App-Proxy-gated endpoint. Run them in
+    // parallel so we don't wait for two sequential round trips.
+    const [data, myReview] = await Promise.all([
+      fetchReviews(productId, variantId),
+      customerId ? fetchMyReview(productId) : Promise.resolve(null),
+    ]);
+
+    // Legacy hash-token write link (kept for backward compat with deep-links
+    // that arrive from an email but the customer isn't logged in to Shopify).
+    const tokenLink = (() => {
       const m = window.location.hash.match(/reviews-token=([^&]+)/);
       if (!m) return '';
       const token = decodeURIComponent(m[1] ?? '');
       const url = `${API_BASE}/r/${encodeURIComponent(token)}`;
       return `<a class="rv-write-link" href="${url}">Write a review</a>`;
+    })();
+
+    // Header CTA:
+    //   - logged in + have a review → "Edit your review"
+    //   - logged in + no review     → "Write a review"
+    //   - not logged in             → "Log in to write a review"
+    const headerCta = (() => {
+      if (!customerId) {
+        const returnUrl = window.location.pathname + window.location.search;
+        return `<a class="rv-cta-link" href="/account/login?return_url=${encodeURIComponent(returnUrl)}">Log in to write a review</a>`;
+      }
+      if (myReview) return `<button type="button" class="rv-cta-link" data-rv-edit="${myReview.id}">Edit your review</button>`;
+      return `<button type="button" class="rv-cta-button" data-rv-write="1">Write a review</button>`;
     })();
 
     // The "related" section surfaces when the product is variant-distinct
@@ -348,36 +709,75 @@ const renderFull = async (el: HTMLElement, productId: string, variantId: string 
             <span class="rv-muted">across other variants of this product</span>
           </div>
           <ul class="rv-list">
-            ${data.related.reviews.map(renderReviewItem).join('')}
+            ${data.related.reviews.map((rr) => renderReviewItem(rr, false)).join('')}
           </ul>
         </details>
       `;
     })();
 
-    if (data.reviews.length === 0) {
+    // Sort the customer's own review to the top of the list (if it exists
+    // and is part of the publicly-returned set).
+    const ownInList = !!(myReview && data.reviews.some((rv) => rv.id === myReview.id));
+    const orderedReviews = ownInList && myReview
+      ? [myReview, ...data.reviews.filter((rv) => rv.id !== myReview.id)]
+      : data.reviews;
+
+    if (orderedReviews.length === 0) {
+      const emptyCta = customerId && !myReview
+        ? `<div class="rv-empty-cta"><button type="button" class="rv-cta-button" data-rv-write="1">Write a review</button></div>`
+        : '';
       el.innerHTML = `
         <div class="rv-widget rv-widget-full">
-          <div class="rv-header">${renderAggregateInline(data.aggregate, 'full')} ${writeLink}</div>
+          <div class="rv-header">${renderAggregateInline(data.aggregate, 'full')} ${headerCta || tokenLink}</div>
           <p class="rv-empty">Be the first to review this${data.variantHandling === 'distinct' ? ' variant' : ' product'}.</p>
+          ${emptyCta}
           ${relatedBlock}
         </div>
       `;
-      return;
+    } else {
+      const toggleLabel = orderedReviews.length === 1 ? 'Show review' : 'Show reviews';
+      el.innerHTML = `
+        <div class="rv-widget rv-widget-full">
+          <div class="rv-header">${renderAggregateInline(data.aggregate, 'full')} ${headerCta || tokenLink}</div>
+          <details class="rv-details">
+            <summary class="rv-toggle">${toggleLabel}</summary>
+            <ul class="rv-list">
+              ${orderedReviews.map((rv) => renderReviewItem(rv, !!(myReview && rv.id === myReview.id))).join('')}
+            </ul>
+          </details>
+          ${relatedBlock}
+        </div>
+      `;
     }
 
-    const label = data.reviews.length === 1 ? 'Show review' : `Show reviews`;
-    el.innerHTML = `
-      <div class="rv-widget rv-widget-full">
-        <div class="rv-header">${renderAggregateInline(data.aggregate, 'full')} ${writeLink}</div>
-        <details class="rv-details">
-          <summary class="rv-toggle">${label}</summary>
-          <ul class="rv-list">
-            ${data.reviews.map(renderReviewItem).join('')}
-          </ul>
-        </details>
-        ${relatedBlock}
-      </div>
-    `;
+    // Wire CTA buttons. The renderFull call is re-invoked on successful
+    // modal submission so the widget reflects the new state without a page
+    // reload.
+    el.querySelectorAll<HTMLButtonElement>('[data-rv-write]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        openReviewModal({
+          mode: 'create',
+          productId,
+          variantId,
+          productTitle: '',
+          onSuccess: () => renderFull(el, productId, variantId, customerId),
+        });
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>('[data-rv-edit]').forEach((btn) => {
+      const reviewId = Number(btn.getAttribute('data-rv-edit'));
+      if (!myReview || myReview.id !== reviewId) return;
+      btn.addEventListener('click', () => {
+        openReviewModal({
+          mode: 'edit',
+          productId,
+          variantId,
+          productTitle: '',
+          existingReview: myReview,
+          onSuccess: () => renderFull(el, productId, variantId, customerId),
+        });
+      });
+    });
   } catch (err) {
     el.innerHTML = '<div class="rv-widget rv-widget-full"><div class="rv-error">Reviews unavailable</div></div>';
     console.warn('reviews widget error', err);
@@ -410,7 +810,14 @@ const init = (): void => {
     // treats the request as variant-unscoped and returns the full product
     // review pool regardless of variant_handling.
     const variantId = el.getAttribute('data-variant-id') || null;
-    if (mode === 'full') void renderFull(el, productId, variantId);
+    // data-customer-id (passed by the theme from {{ customer.id }}) signals
+    // whether a Shopify customer is logged in. Empty string or missing means
+    // anonymous — the widget shows a "Log in to write a review" affordance
+    // instead of the form. Submission and edit always re-verify on the
+    // server via the App Proxy signature; this attribute is only for UI.
+    const rawCustomerId = el.getAttribute('data-customer-id');
+    const customerId = rawCustomerId && rawCustomerId.trim() !== '' ? rawCustomerId.trim() : null;
+    if (mode === 'full') void renderFull(el, productId, variantId, customerId);
     else if (mode === 'aggregate') void renderAggregate(el, productId);
   });
 };

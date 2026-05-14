@@ -5,6 +5,7 @@ import { closeDb, migrate } from './db/client.js';
 import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
+import proxy from './routes/proxy.js';
 import webhooks from './routes/webhooks.js';
 import widget from './routes/widget.js';
 import { startScheduler } from './scheduler/cron.js';
@@ -20,6 +21,7 @@ app.get('/', (c) => c.text('shopify-reviews'));
 app.route('/webhooks', webhooks);
 app.route('/api', api);
 app.route('/admin', admin);
+app.route('/proxy', proxy);
 app.route('/', widget);
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {

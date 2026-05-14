@@ -718,6 +718,48 @@ export const updateReviewStatus = (id: number, status: 'published' | 'pending' |
   `).run(status, nowSec(), id);
 };
 
+// Used by the storefront-customer edit flow. Only fields the customer can
+// change are updateable; status, customer_id, product/variant ids, verified
+// state and merchant reply are NOT touched here.
+export const updateReviewContent = (input: {
+  id: number;
+  rating: number;
+  title: string | null;
+  body: string;
+  reviewerName: string | null;
+}): void => {
+  getDb().prepare(`
+    UPDATE reviews
+       SET rating = ?, title = ?, body = ?, reviewer_name = ?, updated_at = ?
+     WHERE id = ?
+  `).run(
+    input.rating,
+    input.title,
+    input.body,
+    input.reviewerName,
+    nowSec(),
+    input.id,
+  );
+};
+
+// True if this customer has at least one fulfilled purchase of this product.
+// Determines whether their storefront review gets verified_kind='purchase' or
+// null (unverified). Includes purchases regardless of reviewed_at / due_at —
+// any prior purchase confers verified status.
+export const customerHasPurchasedProduct = (
+  customerId: number,
+  shopifyProductId: string,
+): boolean => {
+  const row = getDb()
+    .prepare(`
+      SELECT 1 AS x FROM purchases
+       WHERE customer_id = ? AND shopify_product_id = ?
+       LIMIT 1
+    `)
+    .get(customerId, shopifyProductId) as { x: 1 } | undefined;
+  return row !== undefined;
+};
+
 export const setMerchantReply = (id: number, reply: string | null): void => {
   getDb().prepare(`
     UPDATE reviews

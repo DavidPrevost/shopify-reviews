@@ -974,6 +974,41 @@ admin.get('/settings', (c) => {
       </form>
     </div>
 
+    <div class="card">
+      <h3 style="margin-top:0;">Storefront-customer review submission (App Proxy setup)</h3>
+      <p class="muted">By default, customers can only leave reviews via the email-link flow (sent after fulfillment) or sample invitations. To let logged-in storefront customers submit reviews directly from product pages — and edit their own existing reviews — set up Shopify's App Proxy on the Reviews app. This routes customer-authenticated requests through Shopify's edge with a cryptographic signature we verify, so no customer can submit a review as someone else.</p>
+
+      <details style="margin-top:12px;">
+        <summary style="cursor:pointer;font-weight:600;">How to configure App Proxy in dev.shopify.com</summary>
+        <div style="margin-top:12px;padding:16px;background:#f9f9f9;border-radius:6px;font-size:14px;">
+          <p><strong>One-time: configure the proxy on the app version.</strong></p>
+          <ol style="padding-left:20px;line-height:1.6;">
+            <li>Go to <strong>dev.shopify.com → Reviews app → Versions → Create version</strong>.</li>
+            <li>Carry over all the existing config (scopes, redirect URLs, embed-off, legacy install flow on, etc. — same as the current active version).</li>
+            <li>In the <strong>App Proxy</strong> section, set:
+              <ul style="padding-left:20px;line-height:1.6;">
+                <li><strong>Subpath prefix</strong>: <code>apps</code></li>
+                <li><strong>Subpath</strong>: <code>reviews</code></li>
+                <li><strong>Proxy URL</strong>: <code>${escapeHtml(config.publicUrl)}/proxy/</code> (include the trailing slash)</li>
+              </ul>
+            </li>
+            <li><strong>Release</strong> the new version. The currently-installed store(s) will automatically pick up the new App Proxy config without needing re-install.</li>
+          </ol>
+          <p style="margin-top:16px;"><strong>Per theme: add data attributes to the widget div.</strong></p>
+          <p>In your <code>sections/product-information.liquid</code> (or wherever you placed the widget), update the div to:</p>
+          <pre style="background:#222;color:#eee;padding:12px;border-radius:4px;overflow-x:auto;font-size:12px;">&lt;div
+  data-reviews-widget="full"
+  data-product-id="{{ product.id }}"
+  data-variant-id="{{ product.selected_or_first_available_variant.id }}"
+  data-customer-id="{{ customer.id }}"
+&gt;&lt;/div&gt;</pre>
+          <p>The <code>data-customer-id</code> Liquid variable resolves to the logged-in customer's numeric ID when they're signed in, or an empty string when they aren't. The widget reads this to decide whether to render "Write a review" / "Edit your review" / "Log in to write a review."</p>
+        </div>
+      </details>
+
+      <p class="muted" style="font-size:12px;margin-top:12px;">Once App Proxy is configured, logged-in customers see a "Write a review" button in the widget header (and on empty-state cards). It opens a modal with the review form. Customers with an existing review see "Edit your review" instead, and their own review is highlighted with a "Your review" tag at the top of the list.</p>
+    </div>
+
     <script>
       (function() {
         // Stored values are UTC. Convert to/from local for the user-facing controls.
