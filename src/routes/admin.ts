@@ -15,6 +15,7 @@ import {
   clearGlobalOptOut,
   createSampleInvitation,
   listSampleInvitations,
+  clearProductCache,
   type ReviewRow,
 } from '../db/queries.js';
 import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
@@ -827,7 +828,11 @@ admin.post('/sample-invitations', async (c) => {
 // --- Settings ---
 
 admin.get('/settings', (c) => {
-  const flash = c.req.query('saved') === '1' ? '<div class="ok">Settings saved.</div>' : '';
+  const savedFlash = c.req.query('saved') === '1' ? '<div class="ok">Settings saved.</div>' : '';
+  const cacheFlash = c.req.query('cache_refreshed') !== undefined
+    ? `<div class="ok">Cleared ${escapeHtml(c.req.query('cache_refreshed') ?? '0')} cached product${c.req.query('cache_refreshed') === '1' ? '' : 's'}. The next storefront load (or admin operation) for each product will re-fetch from Shopify, picking up any updated metafields or product changes.</div>`
+    : '';
+  const flash = savedFlash + cacheFlash;
   const cadenceMax = getSettingNumber('cadence_max_requests', 3);
   const cadenceMin = getSettingNumber('cadence_min_days_between', 7);
   const requestDelay = getSettingNumber('request_delay_days', 7);
@@ -931,6 +936,41 @@ admin.get('/settings', (c) => {
         <div style="margin-top:24px;">
           <button type="submit" class="primary">Save settings</button>
         </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Per-variant reviews (optional setup)</h3>
+      <p class="muted">By default, all reviews on a product apply to every variant of that product (sizes, colors, etc. share one review pool). For products where variants are genuinely different — e.g., flavors or scents — you can opt that specific product into per-variant review pools so each variant has its own reviews, with a "Customers also reviewed these variants" section surfacing sibling-variant reviews below the main list.</p>
+
+      <details style="margin-top:12px;">
+        <summary style="cursor:pointer;font-weight:600;">How to set up per-variant reviews on a Shopify product</summary>
+        <div style="margin-top:12px;padding:16px;background:#f9f9f9;border-radius:6px;font-size:14px;">
+          <p><strong>One-time: define the metafield in your store.</strong></p>
+          <ol style="padding-left:20px;line-height:1.6;">
+            <li>Go to your Shopify admin → <strong>Settings → Custom data → Products</strong>.</li>
+            <li>Click <strong>Add definition</strong>.</li>
+            <li>Set <strong>Name</strong>: <code>Variant handling</code></li>
+            <li>Set <strong>Namespace and key</strong>: <code>reviews.variant_handling</code></li>
+            <li>Set <strong>Type</strong>: Single line text</li>
+            <li>Under <strong>Validation</strong> (optional but recommended): set <em>Limit to preset choices</em> with the values <code>distinct</code> and <code>shared</code>. This makes the field a dropdown in the product editor.</li>
+            <li>Click <strong>Save</strong>.</li>
+          </ol>
+          <p style="margin-top:16px;"><strong>Per product: turn on per-variant pools.</strong></p>
+          <ol style="padding-left:20px;line-height:1.6;">
+            <li>Open the product in Shopify admin.</li>
+            <li>Scroll to the <strong>Metafields</strong> section.</li>
+            <li>Find <strong>Variant handling</strong> and set it to <code>distinct</code>.</li>
+            <li>Save.</li>
+          </ol>
+          <p style="margin-top:16px;">Products without the metafield set (or with it set to anything other than <code>distinct</code>) keep the default shared-review-pool behavior.</p>
+          <p>The storefront widget picks up the change on the next product-cache refresh (TTL is 1 hour). To verify the change immediately, click <strong>Refresh product cache</strong> below.</p>
+        </div>
+      </details>
+
+      <form method="POST" action="/admin/refresh-product-cache" style="margin-top:16px;">
+        <button type="submit">Refresh product cache</button>
+        <p class="muted" style="font-size:12px;margin-top:4px;">Clears the local product cache so the next storefront load re-fetches each product (and its <code>variant_handling</code> metafield) from Shopify. Use this after changing the metafield on a product if you want the storefront to reflect the change right away rather than waiting up to an hour.</p>
       </form>
     </div>
 
@@ -1075,6 +1115,17 @@ admin.post('/sync', async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     return c.html(adminShell('Sync failed', `<div class="err">${escapeHtml(msg)}</div><p><a href="/admin/dashboard">Back to dashboard</a></p>`), 500);
   }
+});
+
+admin.post('/refresh-product-cache', (c) => {
+  const removed = clearProductCache();
+  log('info', 'admin cleared product cache', { rowsRemoved: removed });
+  return c.redirect('/admin/settings?cache_refreshed=' + removed);
+});
+
+admin.use('/refresh-product-cache', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
 });
 
 admin.post('/dispatch', async (c) => {

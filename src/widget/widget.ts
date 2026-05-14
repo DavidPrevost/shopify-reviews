@@ -29,6 +29,11 @@ interface Aggregate {
 interface ReviewsResponse {
   reviews: ReviewItem[];
   aggregate: Aggregate;
+  // Present when the product's variant_handling metafield is "distinct" AND
+  // a variant id was passed. Contains reviews from sibling variants and
+  // their aggregate, surfaced as a separate section below the main list.
+  related: { reviews: ReviewItem[]; aggregate: Aggregate } | null;
+  variantHandling: 'distinct' | 'shared';
   page: number;
   size: number;
 }
@@ -184,6 +189,27 @@ const STYLES = `
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
+.rv-related-details {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px dashed rgba(127, 127, 127, 0.35);
+}
+.rv-related-toggle {
+  font-style: italic;
+  opacity: 0.85;
+}
+.rv-related-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.75rem;
+  font-size: 0.9em;
+}
+.rv-muted {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
 `;
 
 const injectStylesOnce = (): void => {
@@ -275,8 +301,10 @@ const renderReviewItem = (r: ReviewItem): string => {
   `;
 };
 
-const fetchReviews = async (productId: string): Promise<ReviewsResponse> => {
-  const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(productId)}/reviews`, {
+const fetchReviews = async (productId: string, variantId: string | null): Promise<ReviewsResponse> => {
+  const url = new URL(`${API_BASE}/api/products/${encodeURIComponent(productId)}/reviews`);
+  if (variantId) url.searchParams.set('variant', variantId);
+  const res = await fetch(url.toString(), {
     method: 'GET',
     credentials: 'omit',
   });
@@ -293,10 +321,10 @@ const fetchAggregate = async (productId: string): Promise<Aggregate> => {
   return (await res.json()) as Aggregate;
 };
 
-const renderFull = async (el: HTMLElement, productId: string): Promise<void> => {
+const renderFull = async (el: HTMLElement, productId: string, variantId: string | null): Promise<void> => {
   el.innerHTML = '<div class="rv-widget rv-widget-full"><div class="rv-loading">Loading reviews…</div></div>';
   try {
-    const data = await fetchReviews(productId);
+    const data = await fetchReviews(productId, variantId);
     const writeLink = (() => {
       const m = window.location.hash.match(/reviews-token=([^&]+)/);
       if (!m) return '';
@@ -305,11 +333,33 @@ const renderFull = async (el: HTMLElement, productId: string): Promise<void> => 
       return `<a class="rv-write-link" href="${url}">Write a review</a>`;
     })();
 
+    // The "related" section surfaces when the product is variant-distinct
+    // and other variants of the same product have published reviews.
+    const relatedBlock = (() => {
+      if (!data.related || data.related.reviews.length === 0) return '';
+      const label = data.related.reviews.length === 1
+        ? 'Show review for other variants'
+        : `Show reviews for other variants`;
+      return `
+        <details class="rv-related-details">
+          <summary class="rv-toggle rv-related-toggle">${label}</summary>
+          <div class="rv-related-header">
+            ${renderAggregateInline(data.related.aggregate, 'full')}
+            <span class="rv-muted">across other variants of this product</span>
+          </div>
+          <ul class="rv-list">
+            ${data.related.reviews.map(renderReviewItem).join('')}
+          </ul>
+        </details>
+      `;
+    })();
+
     if (data.reviews.length === 0) {
       el.innerHTML = `
         <div class="rv-widget rv-widget-full">
           <div class="rv-header">${renderAggregateInline(data.aggregate, 'full')} ${writeLink}</div>
-          <p class="rv-empty">Be the first to review this product.</p>
+          <p class="rv-empty">Be the first to review this${data.variantHandling === 'distinct' ? ' variant' : ' product'}.</p>
+          ${relatedBlock}
         </div>
       `;
       return;
@@ -325,6 +375,7 @@ const renderFull = async (el: HTMLElement, productId: string): Promise<void> => 
             ${data.reviews.map(renderReviewItem).join('')}
           </ul>
         </details>
+        ${relatedBlock}
       </div>
     `;
   } catch (err) {
@@ -354,7 +405,12 @@ const init = (): void => {
     const mode = el.getAttribute('data-reviews-widget');
     const productId = el.getAttribute('data-product-id');
     if (!productId) return;
-    if (mode === 'full') void renderFull(el, productId);
+    // data-variant-id is optional; when omitted (e.g., collection-card
+    // aggregate mode, or themes that haven't been updated yet), the API
+    // treats the request as variant-unscoped and returns the full product
+    // review pool regardless of variant_handling.
+    const variantId = el.getAttribute('data-variant-id') || null;
+    if (mode === 'full') void renderFull(el, productId, variantId);
     else if (mode === 'aggregate') void renderAggregate(el, productId);
   });
 };

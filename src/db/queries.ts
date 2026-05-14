@@ -468,28 +468,62 @@ export const recordReviewSubmitted = (input: { purchaseId: number; customerId: n
   })();
 };
 
+export interface VariantFilter {
+  // When set, restricts results to reviews tagged with this variant.
+  variantId?: string;
+  // When set, excludes reviews tagged with this variant (for "related variant"
+  // sections on a variant-distinct product page). Takes precedence over
+  // variantId if both are passed (caller shouldn't do that).
+  excludeVariantId?: string;
+}
+
 export const listPublishedReviewsForProduct = (
   shopifyProductId: string,
   page: number,
   size: number,
+  filter: VariantFilter = {},
 ): ReviewRow[] => {
   const offset = Math.max(0, (page - 1) * size);
+  const params: Array<string | number> = [shopifyProductId];
+  let variantClause = '';
+  if (filter.excludeVariantId) {
+    variantClause = ' AND (shopify_variant_id IS NULL OR shopify_variant_id <> ?)';
+    params.push(filter.excludeVariantId);
+  } else if (filter.variantId) {
+    variantClause = ' AND shopify_variant_id = ?';
+    params.push(filter.variantId);
+  }
+  params.push(size, offset);
   return getDb().prepare(`
     SELECT * FROM reviews
      WHERE shopify_product_id = ?
        AND status = 'published'
+       ${variantClause}
      ORDER BY created_at DESC
      LIMIT ? OFFSET ?
-  `).all(shopifyProductId, size, offset) as ReviewRow[];
+  `).all(...params) as ReviewRow[];
 };
 
-export const getProductAggregate = (shopifyProductId: string): { avg: number | null; count: number } => {
+export const getProductAggregate = (
+  shopifyProductId: string,
+  filter: VariantFilter = {},
+): { avg: number | null; count: number } => {
+  const params: Array<string> = [shopifyProductId];
+  let variantClause = '';
+  if (filter.excludeVariantId) {
+    variantClause = ' AND (shopify_variant_id IS NULL OR shopify_variant_id <> ?)';
+    params.push(filter.excludeVariantId);
+  } else if (filter.variantId) {
+    variantClause = ' AND shopify_variant_id = ?';
+    params.push(filter.variantId);
+  }
   const row = getDb().prepare(`
     SELECT AVG(rating) AS avg, COUNT(*) AS count
       FROM reviews
      WHERE shopify_product_id = ?
        AND status = 'published'
-  `).get(shopifyProductId) as { avg: number | null; count: number };
+       ${variantClause}
+  `).get(...params) as { avg: number | null; count: number };
   return { avg: row.avg, count: row.count };
 };
 
@@ -725,6 +759,7 @@ export interface ProductCacheRow {
   handle: string;
   title: string;
   featured_image_url: string | null;
+  variant_handling: string | null;
   updated_at: number;
 }
 
@@ -733,22 +768,39 @@ export const upsertProductCache = (input: {
   handle: string;
   title: string;
   featuredImageUrl: string | null;
+  variantHandling: string | null;
 }): void => {
   getDb().prepare(`
-    INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, variant_handling, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(shopify_product_id) DO UPDATE SET
       handle = excluded.handle,
       title = excluded.title,
       featured_image_url = excluded.featured_image_url,
+      variant_handling = excluded.variant_handling,
       updated_at = excluded.updated_at
-  `).run(input.shopifyProductId, input.handle, input.title, input.featuredImageUrl, nowSec());
+  `).run(
+    input.shopifyProductId,
+    input.handle,
+    input.title,
+    input.featuredImageUrl,
+    input.variantHandling,
+    nowSec(),
+  );
 };
 
 export const findProductCache = (shopifyProductId: string): ProductCacheRow | null => {
   return (getDb()
     .prepare('SELECT * FROM products_cache WHERE shopify_product_id = ?')
     .get(shopifyProductId) as ProductCacheRow | undefined) ?? null;
+};
+
+// Clears the products cache so the next getOrFetchProduct call re-pulls from
+// Shopify (picking up any newly-set or changed metafields, title edits, etc.).
+// Used by the "refresh product cache" admin action.
+export const clearProductCache = (): number => {
+  const res = getDb().prepare('DELETE FROM products_cache').run();
+  return res.changes;
 };
 
 // --- Email events ---

@@ -12,6 +12,7 @@ import {
   type ReviewRow,
 } from '../db/queries.js';
 import { verifyReviewToken } from '../email/tokens.js';
+import { getOrFetchProduct } from '../shopify/product-info.js';
 import { log } from '../lib/logger.js';
 
 const api = new Hono();
@@ -36,17 +37,50 @@ const reviewToPublic = (r: ReviewRow) => ({
   createdAt: r.created_at,
 });
 
-api.get('/products/:productId/reviews', (c) => {
+api.get('/products/:productId/reviews', async (c) => {
   const productId = c.req.param('productId');
+  const variantId = c.req.query('variant') || null;
   const page = Math.max(1, Number(c.req.query('page') ?? '1'));
   const size = Math.min(50, Math.max(1, Number(c.req.query('size') ?? '20')));
 
+  // Resolve per-product variant handling from Shopify metafield (cached in
+  // products_cache). When 'distinct' AND we have a variant in scope, the
+  // main review list is filtered to that variant and a "related" section
+  // surfaces reviews from sibling variants. Otherwise (shared, or no variant
+  // context), behave exactly as before — one product-wide review pool.
+  const product = await getOrFetchProduct(productId);
+  const variantHandling = product?.variantHandling ?? 'shared';
+  const useDistinct = variantHandling === 'distinct' && !!variantId;
+
+  if (useDistinct) {
+    const reviews = listPublishedReviewsForProduct(productId, page, size, {
+      variantId: variantId!,
+    }).map(reviewToPublic);
+    const aggregate = getProductAggregate(productId, { variantId: variantId! });
+    const relatedReviews = listPublishedReviewsForProduct(productId, 1, 5, {
+      excludeVariantId: variantId!,
+    }).map(reviewToPublic);
+    const relatedAggregate = getProductAggregate(productId, {
+      excludeVariantId: variantId!,
+    });
+    return c.json({
+      reviews,
+      aggregate,
+      related: { reviews: relatedReviews, aggregate: relatedAggregate },
+      variantHandling,
+      page,
+      size,
+    });
+  }
+
   const reviews = listPublishedReviewsForProduct(productId, page, size).map(reviewToPublic);
   const aggregate = getProductAggregate(productId);
-
-  return c.json({ reviews, aggregate, page, size });
+  return c.json({ reviews, aggregate, related: null, variantHandling, page, size });
 });
 
+// Aggregate is always product-wide regardless of variant_handling — used by
+// collection-card placeholders where the customer hasn't picked a variant
+// yet and "this product overall" is the right framing.
 api.get('/products/:productId/aggregate', (c) => {
   const productId = c.req.param('productId');
   return c.json(getProductAggregate(productId));
