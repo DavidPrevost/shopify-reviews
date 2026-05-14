@@ -20,6 +20,7 @@ import {
 import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
 import { parse as parseCsv } from 'csv-parse/sync';
 import { getOrFetchProduct } from '../shopify/product-info.js';
+import { parseProductId } from '../shopify/parse-product-id.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
 import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
@@ -497,9 +498,9 @@ admin.get('/sample-invitations', (c) => {
     <div class="card">
       <h3 style="margin-top:0;">Create new invitation (one at a time)</h3>
       <form method="POST" action="/admin/sample-invitations">
-        <label for="shopify_product_id">Shopify product ID (numeric)</label>
-        <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386">
-        <p class="muted" style="font-size:12px;margin-top:4px;">Find this in the URL of the product's admin edit page, or via Products → click product → check URL.</p>
+        <label for="shopify_product_id">Shopify product</label>
+        <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386 — or paste the admin URL">
+        <p class="muted" style="font-size:12px;margin-top:4px;">Paste the numeric product ID, the admin URL (e.g., <code>https://admin.shopify.com/store/.../products/9218705883386</code>), or a <code>gid://shopify/Product/&lt;id&gt;</code> reference. Storefront URLs (which use product handles rather than IDs) aren't supported.</p>
 
         <label for="intended_name">Recipient name (optional, for your tracking)</label>
         <input id="intended_name" name="intended_name" type="text" maxlength="120">
@@ -520,12 +521,13 @@ admin.get('/sample-invitations', (c) => {
       <h3 style="margin-top:0;">Batch upload (CSV)</h3>
       <p class="muted">Upload a CSV to create many invitations at once. CSV must have a header row. Recognized columns (case-insensitive, all whitespace trimmed):</p>
       <ul class="muted" style="font-size:13px;">
-        <li><code>product_id</code> — required</li>
+        <li><code>product_id</code> — required; accepts a numeric ID, admin URL, or GID (same as the single-create form above)</li>
         <li><code>name</code> (or <code>intended_name</code>) — optional</li>
         <li><code>email</code> (or <code>intended_email</code>) — optional</li>
         <li><code>notes</code> — optional</li>
       </ul>
-      <p class="muted" style="font-size:13px;">Extra columns are ignored. Rows missing <code>product_id</code> are skipped (you'll see the skipped row numbers in the summary).</p>
+      <p class="muted" style="font-size:13px;">Extra columns are ignored. Rows with a missing or unrecognized <code>product_id</code> are skipped (you'll see the row numbers and reasons in the summary).</p>
+      <p style="font-size:13px;"><a href="/admin/sample-invitations/template" download>Download blank template (CSV)</a></p>
       <form method="POST" action="/admin/sample-invitations/batch" enctype="multipart/form-data">
         <label for="batch_file">CSV file</label>
         <input id="batch_file" name="file" type="file" accept=".csv,text/csv" required>
@@ -606,9 +608,14 @@ admin.post('/sample-invitations/batch', async (c) => {
   records.forEach((row, idx) => {
     const csvRowNumber = idx + 2; // +1 for header, +1 for 1-indexing
 
-    const productId = pickField(row, 'product_id', 'productid', 'shopify_product_id');
-    if (!productId) {
+    const rawProduct = pickField(row, 'product_id', 'productid', 'shopify_product_id');
+    if (!rawProduct) {
       errors.push({ rowNumber: csvRowNumber, reason: 'missing product_id' });
+      return;
+    }
+    const productId = parseProductId(rawProduct);
+    if (!productId) {
+      errors.push({ rowNumber: csvRowNumber, reason: `couldn't extract product ID from "${rawProduct}"` });
       return;
     }
     const intendedName = pickField(row, 'name', 'intended_name') || null;
@@ -659,6 +666,18 @@ admin.post('/sample-invitations/batch', async (c) => {
       <a href="/admin/sample-invitations/export">Download CSV with all invitation links</a>
     </p>
   `, 'invitations'));
+});
+
+admin.get('/sample-invitations/template', (c) => {
+  // Header + one clearly-placeholder example row. If the user uploads it
+  // unedited, the parser rejects "REPLACE_WITH_PRODUCT_ID" as an
+  // unrecognized format and reports it in the skipped-rows summary.
+  const body =
+    'product_id,name,email,notes\r\n' +
+    'REPLACE_WITH_PRODUCT_ID,Recipient name,recipient@example.com,Optional notes\r\n';
+  c.header('Content-Type', 'text/csv; charset=utf-8');
+  c.header('Content-Disposition', 'attachment; filename="sample-invitations-template.csv"');
+  return c.body(body);
 });
 
 admin.get('/sample-invitations/export', async (c) => {
@@ -720,9 +739,13 @@ admin.get('/sample-invitations/export', async (c) => {
 
 admin.post('/sample-invitations', async (c) => {
   const form = await c.req.formData();
-  const productId = String(form.get('shopify_product_id') ?? '').trim();
-  if (!productId) {
+  const rawProduct = String(form.get('shopify_product_id') ?? '').trim();
+  if (!rawProduct) {
     return c.html(adminShell('Invalid input', '<div class="err">Product ID is required.</div><p><a href="/admin/sample-invitations">Back</a></p>', 'invitations'), 400);
+  }
+  const productId = parseProductId(rawProduct);
+  if (!productId) {
+    return c.html(adminShell('Invalid input', `<div class="err">Couldn't recognize "${escapeHtml(rawProduct)}" as a product ID, admin URL, or GID. Paste a numeric ID, an admin URL ending in <code>/products/&lt;id&gt;</code>, or a <code>gid://shopify/Product/&lt;id&gt;</code> reference.</div><p><a href="/admin/sample-invitations">Back</a></p>`, 'invitations'), 400);
   }
   const intendedName = String(form.get('intended_name') ?? '').trim() || null;
   const intendedEmail = String(form.get('intended_email') ?? '').trim() || null;
