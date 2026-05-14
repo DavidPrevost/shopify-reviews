@@ -10,8 +10,12 @@ import {
   setGlobalOptOut,
   setProductOptOut,
   findReviewByCustomerAndProduct,
+  findSampleInvitationById,
+  consumeSampleInvitation,
+  upsertCustomer,
 } from '../db/queries.js';
-import { verifyReviewToken, verifyUnsubscribeToken } from '../email/tokens.js';
+import { verifyReviewToken, verifyUnsubscribeToken, verifySampleInviteToken } from '../email/tokens.js';
+import { nowSec } from '../lib/time.js';
 import { escapeHtml } from '../email/render.js';
 import { log } from '../lib/logger.js';
 import { getOrFetchProduct } from '../shopify/product-info.js';
@@ -239,7 +243,7 @@ widget.post('/r/:token', async (c) => {
     rating,
     title,
     body,
-    verifiedPurchase: true,
+    verifiedKind: 'purchase',
     status: 'published',
   });
 
@@ -256,6 +260,227 @@ widget.post('/r/:token', async (c) => {
   return c.html(pageShell('Thank you', `
     <h1>Thank you</h1>
     <div class="ok">Your review for <strong>${escapeHtml(productTitle)}</strong> has been submitted.</div>
+    <p class="muted" style="margin-top:24px;">It may take a moment to appear on the product page.</p>
+  `));
+});
+
+// --- /r/invite/:token — sample-invitation review form ---
+
+const renderInviteForm = (input: {
+  token: string;
+  productTitle: string;
+  intendedName: string | null;
+  intendedEmail: string | null;
+  errorMessage?: string;
+  prefillRating?: number;
+  prefillTitle?: string;
+  prefillBody?: string;
+  prefillName?: string;
+  prefillEmail?: string;
+}): string => {
+  const errBlock = input.errorMessage
+    ? `<div class="err">${escapeHtml(input.errorMessage)}</div>`
+    : '';
+  const checked = (n: number) => (input.prefillRating === n ? ' checked' : '');
+  const stars = [5, 4, 3, 2, 1]
+    .map(
+      (n) => `
+        <input type="radio" id="r${n}" name="rating" value="${n}" required${checked(n)}>
+        <label for="r${n}" title="${n} star${n === 1 ? '' : 's'}">★</label>`,
+    )
+    .join('');
+
+  const greeting = input.intendedName
+    ? `Hi ${escapeHtml(input.intendedName.split(/\s+/)[0] ?? input.intendedName)} — thanks for trying ${escapeHtml(input.productTitle)}.`
+    : `Thanks for trying ${escapeHtml(input.productTitle)}.`;
+
+  return pageShell(`Review your ${input.productTitle}`, `
+    <h1>Tell us what you thought of ${escapeHtml(input.productTitle)}</h1>
+    <p class="muted">${greeting}</p>
+    ${errBlock}
+    <form method="POST" action="/r/invite/${encodeURIComponent(input.token)}" novalidate>
+      <input type="hidden" name="token" value="${escapeHtml(input.token)}">
+
+      <label>Rating</label>
+      <div class="stars">${stars}</div>
+
+      <label for="title">Title (optional)</label>
+      <input id="title" type="text" name="title" maxlength="120" value="${escapeHtml(input.prefillTitle ?? '')}">
+
+      <label for="body">Your review</label>
+      <textarea id="body" name="body" required maxlength="4000">${escapeHtml(input.prefillBody ?? '')}</textarea>
+
+      <label for="reviewerName">Your name</label>
+      <input id="reviewerName" type="text" name="reviewerName" required maxlength="80" value="${escapeHtml(input.prefillName ?? input.intendedName ?? '')}">
+
+      <label for="reviewerEmail">Your email</label>
+      <input id="reviewerEmail" type="email" name="reviewerEmail" required maxlength="200" value="${escapeHtml(input.prefillEmail ?? input.intendedEmail ?? '')}">
+
+      <button type="submit">Submit review</button>
+      <p class="muted" style="margin-top:24px;">Your email won't be shown publicly. Only your first name appears alongside your review. Reviews may be lightly edited for clarity.</p>
+    </form>
+  `);
+};
+
+// Centralizes the validation for both GET (display form) and POST (handle
+// submission) of sample-invitation links. Returns either an error response
+// to render directly or the resolved invitation/product context.
+const resolveInvitation = async (
+  c: import('hono').Context,
+  token: string,
+): Promise<
+  | { ok: true; invitationId: number; productId: string; productTitle: string }
+  | { ok: false; response: Response }
+> => {
+  const verified = verifySampleInviteToken(token);
+  if (!verified.ok) {
+    return {
+      ok: false,
+      response: c.html(pageShell('Invalid link', `<h1>This invitation link is no longer valid</h1><p class="muted">It may have expired, or the signature didn't match. If you think you should still be able to leave a review, get in touch with us.</p>`), 410),
+    };
+  }
+  const invitation = findSampleInvitationById(verified.payload.invitationId);
+  if (!invitation) {
+    return {
+      ok: false,
+      response: c.html(pageShell('Not found', `<h1>We couldn't find that invitation</h1>`), 404),
+    };
+  }
+  if (invitation.shopify_product_id !== verified.payload.productId) {
+    return {
+      ok: false,
+      response: c.html(pageShell('Invalid link', `<h1>This link doesn't match a known product</h1>`), 400),
+    };
+  }
+  if (invitation.consumed_at !== null) {
+    return {
+      ok: false,
+      response: c.html(pageShell('Already used', `<h1>This invitation has already been used</h1><p class="muted">Thanks for your review.</p>`)),
+    };
+  }
+  if (invitation.expires_at <= nowSec()) {
+    return {
+      ok: false,
+      response: c.html(pageShell('Expired', `<h1>This invitation has expired</h1><p class="muted">Get in touch with us if you'd still like to leave a review.</p>`), 410),
+    };
+  }
+
+  const product = await getOrFetchProduct(invitation.shopify_product_id);
+  const productTitle = product?.title ?? 'the product you tried';
+  return { ok: true, invitationId: invitation.id, productId: invitation.shopify_product_id, productTitle };
+};
+
+widget.get('/r/invite/:token', async (c) => {
+  const token = c.req.param('token');
+  const resolved = await resolveInvitation(c, token);
+  if (!resolved.ok) return resolved.response;
+
+  const invitation = findSampleInvitationById(resolved.invitationId)!;
+  return c.html(renderInviteForm({
+    token,
+    productTitle: resolved.productTitle,
+    intendedName: invitation.intended_name,
+    intendedEmail: invitation.intended_email,
+  }));
+});
+
+widget.post('/r/invite/:token', async (c) => {
+  const token = c.req.param('token');
+  const resolved = await resolveInvitation(c, token);
+  if (!resolved.ok) return resolved.response;
+
+  const invitation = findSampleInvitationById(resolved.invitationId)!;
+  const formData = await c.req.formData();
+  const rating = Number(formData.get('rating'));
+  const title = trimOrNull(formData.get('title'), 120);
+  const body = trimOrNull(formData.get('body'), 4000);
+  const submittedName = trimOrNull(formData.get('reviewerName'), 80);
+  const submittedEmail = trimOrNull(formData.get('reviewerEmail'), 200);
+
+  const renderError = (msg: string) =>
+    c.html(renderInviteForm({
+      token,
+      productTitle: resolved.productTitle,
+      intendedName: invitation.intended_name,
+      intendedEmail: invitation.intended_email,
+      errorMessage: msg,
+      prefillRating: Number.isFinite(rating) ? rating : undefined,
+      prefillTitle: title ?? '',
+      prefillBody: body ?? '',
+      prefillName: submittedName ?? '',
+      prefillEmail: submittedEmail ?? '',
+    }), 400);
+
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return renderError('Please pick a rating from 1 to 5 stars.');
+  }
+  if (!body) {
+    return renderError('Please write a few words about your experience.');
+  }
+  if (!submittedName) {
+    return renderError('Please tell us your name.');
+  }
+  if (!submittedEmail || !/^.+@.+\..+$/.test(submittedEmail)) {
+    return renderError('Please provide a valid email address.');
+  }
+
+  // Upsert by email. If the reviewer later becomes a Shopify customer with
+  // the same email, the webhook-driven upsertCustomer will fill in
+  // shopify_customer_id on this same row — preserving the link from the
+  // sample review to the eventual customer record.
+  const customer = upsertCustomer({
+    shopifyCustomerId: null,
+    email: submittedEmail,
+    firstName: submittedName.split(/\s+/)[0] ?? null,
+    lastName: submittedName.split(/\s+/).slice(1).join(' ') || null,
+  });
+
+  // If this customer has already reviewed this product (e.g., the same
+  // invitation was reused via a different link), don't insert a duplicate;
+  // just mark the invitation consumed against the existing review.
+  const existingReview = findReviewByCustomerAndProduct(customer.id, invitation.shopify_product_id);
+  if (existingReview) {
+    consumeSampleInvitation({ invitationId: invitation.id, reviewId: existingReview.id });
+    log('info', 'sample invitation: duplicate review suppressed', {
+      invitationId: invitation.id,
+      customerId: customer.id,
+      existingReviewId: existingReview.id,
+    });
+    return c.html(pageShell('Thank you', `
+      <h1>Thank you</h1>
+      <div class="ok">Your review for <strong>${escapeHtml(resolved.productTitle)}</strong> has been recorded.</div>
+    `));
+  }
+
+  // First-name-only as the display name. Same rule as the email-link flow.
+  const displayName = submittedName.split(/\s+/)[0] ?? submittedName;
+
+  const reviewId = insertReview({
+    shopifyProductId: invitation.shopify_product_id,
+    shopifyVariantId: null,
+    customerId: customer.id,
+    reviewerEmail: customer.email,
+    reviewerName: displayName,
+    rating,
+    title,
+    body,
+    verifiedKind: 'sample',
+    status: 'published',
+  });
+
+  consumeSampleInvitation({ invitationId: invitation.id, reviewId });
+
+  log('info', 'sample review submitted', {
+    reviewId,
+    invitationId: invitation.id,
+    customerId: customer.id,
+    rating,
+    productId: invitation.shopify_product_id,
+  });
+
+  return c.html(pageShell('Thank you', `
+    <h1>Thank you</h1>
+    <div class="ok">Your review for <strong>${escapeHtml(resolved.productTitle)}</strong> has been submitted.</div>
     <p class="muted" style="margin-top:24px;">It may take a moment to appear on the product page.</p>
   `));
 });

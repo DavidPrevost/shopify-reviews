@@ -13,8 +13,11 @@ import {
   getSettingNumber,
   setGlobalOptOut,
   clearGlobalOptOut,
+  createSampleInvitation,
+  listSampleInvitations,
   type ReviewRow,
 } from '../db/queries.js';
+import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
 import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
@@ -39,9 +42,10 @@ const requireAuth = async (c: import('hono').Context): Promise<boolean> => {
 
 const adminShell = (title: string, body: string, navActive?: string): string => {
   const tabs = [
-    { href: '/admin/dashboard', label: 'Dashboard', key: 'dashboard' },
-    { href: '/admin/reviews',   label: 'Reviews',   key: 'reviews' },
-    { href: '/admin/settings',  label: 'Settings',  key: 'settings' },
+    { href: '/admin/dashboard',           label: 'Dashboard',   key: 'dashboard' },
+    { href: '/admin/reviews',             label: 'Reviews',     key: 'reviews' },
+    { href: '/admin/sample-invitations',  label: 'Invitations', key: 'invitations' },
+    { href: '/admin/settings',            label: 'Settings',    key: 'settings' },
   ];
   const navHtml = tabs
     .map(
@@ -187,6 +191,14 @@ admin.use('/sync', async (c, next) => {
   await next();
 });
 admin.use('/dispatch', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/sample-invitations', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/sample-invitations/*', async (c, next) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
   await next();
 });
@@ -419,6 +431,131 @@ admin.post('/customers/:email/resubscribe', (c) => {
   const { purchasesCleared } = clearGlobalOptOut(detail.id);
   log('info', 'admin re-subscribed customer', { customerId: detail.id, purchasesCleared });
   return c.redirect(`/admin/customers/${encodeURIComponent(email)}?resubscribed=${purchasesCleared}`);
+});
+
+// --- Sample invitations ---
+
+admin.get('/sample-invitations', (c) => {
+  const { pending, consumed, expired } = listSampleInvitations();
+  const flash = (() => {
+    const created = c.req.query('created');
+    if (!created) return '';
+    const url = `${config.publicUrl}/r/invite/${encodeURIComponent(created)}`;
+    return `<div class="ok" style="margin-bottom:16px;">
+      <strong>Invitation created.</strong> Copy this link and send it to the recipient:
+      <br><br>
+      <input type="text" readonly value="${escapeHtml(url)}" style="width:100%;font-family:monospace;font-size:13px;padding:8px;" onclick="this.select();">
+      <p class="muted" style="margin-top:8px;">Click the link box to select it. The recipient has ${SAMPLE_INVITE_TTL_DAYS} days to submit their review before this invitation expires. Each link is single-use.</p>
+    </div>`;
+  })();
+
+  const renderRow = (inv: typeof pending[number], extraCell?: string) => `
+    <tr>
+      <td>${inv.id}</td>
+      <td><code>${escapeHtml(inv.shopify_product_id)}</code></td>
+      <td>${escapeHtml(inv.intended_name ?? '—')}</td>
+      <td>${escapeHtml(inv.intended_email ?? '—')}</td>
+      <td>${escapeHtml(inv.notes ?? '—')}</td>
+      <td>${formatTs(inv.created_at)}</td>
+      <td>${formatTs(inv.expires_at)}</td>
+      ${extraCell ?? ''}
+    </tr>`;
+
+  const pendingTable = pending.length === 0
+    ? '<p class="muted">No pending invitations.</p>'
+    : `<table>
+        <thead><tr><th>ID</th><th>Product ID</th><th>Name</th><th>Email</th><th>Notes</th><th>Created</th><th>Expires</th><th>Link</th></tr></thead>
+        <tbody>${pending.map((inv) => renderRow(inv, `
+          <td><a href="${escapeHtml(config.publicUrl)}/r/invite/${encodeURIComponent(signSampleInviteToken({ invitationId: inv.id, productId: inv.shopify_product_id }))}" target="_blank">View link</a></td>
+        `)).join('')}</tbody>
+      </table>
+      <p class="muted" style="margin-top:8px;font-size:12px;">Note: clicking "View link" generates a fresh signed token for that invitation. The original token sent at creation time is also still valid as long as the invitation row is unconsumed and not expired.</p>`;
+
+  const consumedTable = consumed.length === 0
+    ? '<p class="muted">No consumed invitations yet.</p>'
+    : `<table>
+        <thead><tr><th>ID</th><th>Product ID</th><th>Name</th><th>Email</th><th>Notes</th><th>Created</th><th>Expires</th><th>Review</th></tr></thead>
+        <tbody>${consumed.map((inv) => renderRow(inv, `
+          <td>${inv.consumed_review_id ? `<a href="/admin/reviews/${inv.consumed_review_id}">#${inv.consumed_review_id}</a>` : '—'}</td>
+        `)).join('')}</tbody>
+      </table>`;
+
+  const expiredTable = expired.length === 0
+    ? '<p class="muted">No expired invitations.</p>'
+    : `<table>
+        <thead><tr><th>ID</th><th>Product ID</th><th>Name</th><th>Email</th><th>Notes</th><th>Created</th><th>Expires</th><th></th></tr></thead>
+        <tbody>${expired.map((inv) => renderRow(inv, '<td>expired</td>')).join('')}</tbody>
+      </table>`;
+
+  return c.html(adminShell('Sample invitations', `
+    ${flash}
+    <h2>Sample invitations</h2>
+    <p class="muted">Create a single-use review link for someone who received a product outside the normal Shopify purchase flow (free samples, influencer outreach, etc.). The reviewer's submission is recorded with a "Verified Reviewer" badge on the storefront — distinct from the "Verified Buyer" badge used for purchase-based reviews.</p>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Create new invitation</h3>
+      <form method="POST" action="/admin/sample-invitations">
+        <label for="shopify_product_id">Shopify product ID (numeric)</label>
+        <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386">
+        <p class="muted" style="font-size:12px;margin-top:4px;">Find this in the URL of the product's admin edit page, or via Products → click product → check URL.</p>
+
+        <label for="intended_name">Recipient name (optional, for your tracking)</label>
+        <input id="intended_name" name="intended_name" type="text" maxlength="120">
+
+        <label for="intended_email">Recipient email (optional, for your tracking)</label>
+        <input id="intended_email" name="intended_email" type="text" maxlength="200">
+
+        <label for="notes">Internal notes (optional)</label>
+        <input id="notes" name="notes" type="text" maxlength="500" placeholder="e.g., Sample drop batch 1 / Instagram outreach / etc.">
+
+        <div style="margin-top:24px;">
+          <button type="submit" class="primary">Generate invitation link</button>
+        </div>
+      </form>
+    </div>
+
+    <h3>Pending (${pending.length})</h3>
+    ${pendingTable}
+
+    <h3 style="margin-top:32px;">Consumed (${consumed.length})</h3>
+    ${consumedTable}
+
+    <h3 style="margin-top:32px;">Expired without use (${expired.length})</h3>
+    ${expiredTable}
+  `, 'invitations'));
+});
+
+admin.post('/sample-invitations', async (c) => {
+  const form = await c.req.formData();
+  const productId = String(form.get('shopify_product_id') ?? '').trim();
+  if (!productId) {
+    return c.html(adminShell('Invalid input', '<div class="err">Product ID is required.</div><p><a href="/admin/sample-invitations">Back</a></p>', 'invitations'), 400);
+  }
+  const intendedName = String(form.get('intended_name') ?? '').trim() || null;
+  const intendedEmail = String(form.get('intended_email') ?? '').trim() || null;
+  const notes = String(form.get('notes') ?? '').trim() || null;
+
+  const expiresAt = nowSec() + daysToSec(SAMPLE_INVITE_TTL_DAYS);
+  const invitation = createSampleInvitation({
+    shopifyProductId: productId,
+    intendedEmail,
+    intendedName,
+    notes,
+    expiresAt,
+  });
+
+  const token = signSampleInviteToken({
+    invitationId: invitation.id,
+    productId: invitation.shopify_product_id,
+  });
+
+  log('info', 'admin created sample invitation', {
+    invitationId: invitation.id,
+    productId,
+    intendedEmail: intendedEmail ? '[set]' : null,
+  });
+
+  return c.redirect(`/admin/sample-invitations?created=${encodeURIComponent(token)}`);
 });
 
 // --- Settings ---

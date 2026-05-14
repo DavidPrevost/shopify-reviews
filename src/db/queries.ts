@@ -367,6 +367,8 @@ export const recordRequestSentBatch = (input: {
 
 // --- Reviews ---
 
+export type VerifiedKind = 'purchase' | 'sample' | null;
+
 export interface ReviewRow {
   id: number;
   shopify_product_id: string;
@@ -378,6 +380,7 @@ export interface ReviewRow {
   title: string | null;
   body: string;
   verified_purchase: number;
+  verified_kind: VerifiedKind;
   status: string;
   merchant_reply: string | null;
   merchant_reply_at: number | null;
@@ -394,15 +397,16 @@ export const insertReview = (input: {
   rating: number;
   title: string | null;
   body: string;
-  verifiedPurchase: boolean;
+  verifiedKind: VerifiedKind;
   status: 'pending' | 'published' | 'rejected';
 }): number => {
   const now = nowSec();
+  const verifiedPurchase = input.verifiedKind === 'purchase' ? 1 : 0;
   const result = getDb().prepare(`
     INSERT INTO reviews
       (shopify_product_id, shopify_variant_id, customer_id, reviewer_email, reviewer_name,
-       rating, title, body, verified_purchase, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       rating, title, body, verified_purchase, verified_kind, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.shopifyProductId,
     input.shopifyVariantId,
@@ -412,7 +416,8 @@ export const insertReview = (input: {
     input.rating,
     input.title,
     input.body,
-    input.verifiedPurchase ? 1 : 0,
+    verifiedPurchase,
+    input.verifiedKind,
     input.status,
     now,
     now,
@@ -539,6 +544,87 @@ export const setProductOptOut = (purchaseId: number, customerId: number | null):
       VALUES (?, ?, 'unsubscribed', '{"scope":"product"}', ?)
     `).run(customerId, purchaseId, now);
   })();
+};
+
+// --- Sample invitations ---
+
+export interface SampleInvitationRow {
+  id: number;
+  shopify_product_id: string;
+  intended_email: string | null;
+  intended_name: string | null;
+  notes: string | null;
+  consumed_at: number | null;
+  consumed_review_id: number | null;
+  created_at: number;
+  expires_at: number;
+}
+
+export const createSampleInvitation = (input: {
+  shopifyProductId: string;
+  intendedEmail: string | null;
+  intendedName: string | null;
+  notes: string | null;
+  expiresAt: number;
+}): SampleInvitationRow => {
+  const now = nowSec();
+  const db = getDb();
+  const result = db.prepare(`
+    INSERT INTO sample_invitations
+      (shopify_product_id, intended_email, intended_name, notes, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    input.shopifyProductId,
+    input.intendedEmail?.toLowerCase() ?? null,
+    input.intendedName,
+    input.notes,
+    now,
+    input.expiresAt,
+  );
+  return db.prepare('SELECT * FROM sample_invitations WHERE id = ?').get(result.lastInsertRowid) as SampleInvitationRow;
+};
+
+export const findSampleInvitationById = (id: number): SampleInvitationRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM sample_invitations WHERE id = ?')
+    .get(id) as SampleInvitationRow | undefined) ?? null;
+};
+
+// Returns invitations in three buckets for the admin UI: pending (not yet
+// consumed, not yet expired), consumed (have a linked review), and expired
+// (passed expires_at without being consumed). Most-recently-created first.
+export const listSampleInvitations = (): {
+  pending: SampleInvitationRow[];
+  consumed: SampleInvitationRow[];
+  expired: SampleInvitationRow[];
+} => {
+  const all = getDb()
+    .prepare('SELECT * FROM sample_invitations ORDER BY id DESC')
+    .all() as SampleInvitationRow[];
+  const now = nowSec();
+  const pending: SampleInvitationRow[] = [];
+  const consumed: SampleInvitationRow[] = [];
+  const expired: SampleInvitationRow[] = [];
+  for (const inv of all) {
+    if (inv.consumed_at !== null) consumed.push(inv);
+    else if (inv.expires_at <= now) expired.push(inv);
+    else pending.push(inv);
+  }
+  return { pending, consumed, expired };
+};
+
+export const consumeSampleInvitation = (input: {
+  invitationId: number;
+  reviewId: number;
+}): void => {
+  const now = nowSec();
+  getDb()
+    .prepare(`
+      UPDATE sample_invitations
+         SET consumed_at = ?, consumed_review_id = ?
+       WHERE id = ? AND consumed_at IS NULL
+    `)
+    .run(now, input.reviewId, input.invitationId);
 };
 
 // --- Email-event recording for failures ---

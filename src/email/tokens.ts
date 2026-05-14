@@ -15,7 +15,14 @@ export interface UnsubscribeTokenPayload {
   exp?: number;
 }
 
+export interface SampleInviteTokenPayload {
+  invitationId: number;
+  productId: string;
+  exp: number;
+}
+
 const REVIEW_TOKEN_TTL_DAYS = 60;
+export const SAMPLE_INVITE_TTL_DAYS = 90;
 
 export const signReviewToken = (input: { purchaseId: number; customerId: number }): string => {
   if (!config.email.tokenSecret) {
@@ -43,4 +50,24 @@ export const signUnsubscribeToken = (input: UnsubscribeTokenPayload): string => 
 
 export const verifyUnsubscribeToken = (token: string): VerifyResult<UnsubscribeTokenPayload> => {
   return verifyToken<UnsubscribeTokenPayload>(config.email.tokenSecret, token);
+};
+
+export const signSampleInviteToken = (input: {
+  invitationId: number;
+  productId: string;
+  ttlDays?: number;
+}): string => {
+  if (!config.email.tokenSecret) {
+    throw new Error('EMAIL_TOKEN_SECRET is not configured');
+  }
+  const ttlDays = input.ttlDays ?? SAMPLE_INVITE_TTL_DAYS;
+  return signToken(config.email.tokenSecret, {
+    invitationId: input.invitationId,
+    productId: input.productId,
+    exp: nowSec() + daysToSec(ttlDays),
+  });
+};
+
+export const verifySampleInviteToken = (token: string): VerifyResult<SampleInviteTokenPayload> => {
+  return verifyToken<SampleInviteTokenPayload>(config.email.tokenSecret, token);
 };

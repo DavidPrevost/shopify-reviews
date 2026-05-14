@@ -29,6 +29,9 @@ const reviewToPublic = (r: ReviewRow) => ({
   title: r.title,
   body: r.body,
   reviewerName: r.reviewer_name,
+  // verifiedKind: 'purchase' → Verified Buyer; 'sample' → Verified Reviewer;
+  // null → no badge. verifiedPurchase remains for backward-compat callers.
+  verifiedKind: r.verified_kind,
   verifiedPurchase: r.verified_purchase === 1,
   createdAt: r.created_at,
 });
@@ -130,7 +133,7 @@ api.post('/reviews/submit', async (c) => {
     rating,
     title,
     body: reviewBody,
-    verifiedPurchase: true,
+    verifiedKind: 'purchase',
     status: 'published',
   });
 

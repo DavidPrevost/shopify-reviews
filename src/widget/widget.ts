@@ -16,7 +16,8 @@ interface ReviewItem {
   title: string | null;
   body: string;
   reviewerName: string | null;
-  verifiedPurchase: boolean;
+  verifiedKind: 'purchase' | 'sample' | null;
+  verifiedPurchase: boolean;  // kept for backward compat; widget prefers verifiedKind
   createdAt: number;
 }
 
@@ -249,6 +250,15 @@ const formatDate = (unixSec: number): string => {
 
 const renderReviewItem = (r: ReviewItem): string => {
   const displayName = firstNameOnly(r.reviewerName);
+  // Different verification origins get different badge text so the storefront
+  // is honest about provenance. Purchase reviews → "Verified Buyer"; sample/
+  // influencer reviews → "Verified Reviewer". Unverified → no badge.
+  const verifiedBadge = (() => {
+    const kind = r.verifiedKind ?? (r.verifiedPurchase ? 'purchase' : null);
+    if (kind === 'purchase') return `<span class="rv-review-verified">Verified Buyer</span>`;
+    if (kind === 'sample') return `<span class="rv-review-verified">Verified Reviewer</span>`;
+    return '';
+  })();
   return `
     <li class="rv-review">
       <div class="rv-review-head">
@@ -258,7 +268,7 @@ const renderReviewItem = (r: ReviewItem): string => {
       <div class="rv-review-meta">
         ${displayName ? `<span class="rv-review-author">${escapeHtml(displayName)}</span>` : ''}
         <span class="rv-review-date">${formatDate(r.createdAt)}</span>
-        ${r.verifiedPurchase ? `<span class="rv-review-verified">Verified Buyer</span>` : ''}
+        ${verifiedBadge}
       </div>
       <div class="rv-review-body">${escapeHtml(r.body).replace(/\n/g, '<br>')}</div>
     </li>
