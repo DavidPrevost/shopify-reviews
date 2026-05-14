@@ -18,6 +18,8 @@ import {
   type ReviewRow,
 } from '../db/queries.js';
 import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
+import { parse as parseCsv } from 'csv-parse/sync';
+import { getOrFetchProduct } from '../shopify/product-info.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
 import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
@@ -466,10 +468,10 @@ admin.get('/sample-invitations', (c) => {
     : `<table>
         <thead><tr><th>ID</th><th>Product ID</th><th>Name</th><th>Email</th><th>Notes</th><th>Created</th><th>Expires</th><th>Link</th></tr></thead>
         <tbody>${pending.map((inv) => renderRow(inv, `
-          <td><a href="${escapeHtml(config.publicUrl)}/r/invite/${encodeURIComponent(signSampleInviteToken({ invitationId: inv.id, productId: inv.shopify_product_id }))}" target="_blank">View link</a></td>
+          <td><a href="${escapeHtml(config.publicUrl)}/r/invite/${encodeURIComponent(signSampleInviteToken({ invitationId: inv.id, productId: inv.shopify_product_id, exp: inv.expires_at }))}" target="_blank">View link</a></td>
         `)).join('')}</tbody>
       </table>
-      <p class="muted" style="margin-top:8px;font-size:12px;">Note: clicking "View link" generates a fresh signed token for that invitation. The original token sent at creation time is also still valid as long as the invitation row is unconsumed and not expired.</p>`;
+      <p class="muted" style="margin-top:8px;font-size:12px;">Note: clicking "View link" generates a fresh signed token for that invitation, all valid until the invitation's expiry date. The original token sent at creation time is also still valid as long as the invitation row is unconsumed and not expired.</p>`;
 
   const consumedTable = consumed.length === 0
     ? '<p class="muted">No consumed invitations yet.</p>'
@@ -493,7 +495,7 @@ admin.get('/sample-invitations', (c) => {
     <p class="muted">Create a single-use review link for someone who received a product outside the normal Shopify purchase flow (free samples, influencer outreach, etc.). The reviewer's submission is recorded with a "Verified Reviewer" badge on the storefront — distinct from the "Verified Buyer" badge used for purchase-based reviews.</p>
 
     <div class="card">
-      <h3 style="margin-top:0;">Create new invitation</h3>
+      <h3 style="margin-top:0;">Create new invitation (one at a time)</h3>
       <form method="POST" action="/admin/sample-invitations">
         <label for="shopify_product_id">Shopify product ID (numeric)</label>
         <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386">
@@ -514,6 +516,31 @@ admin.get('/sample-invitations', (c) => {
       </form>
     </div>
 
+    <div class="card">
+      <h3 style="margin-top:0;">Batch upload (CSV)</h3>
+      <p class="muted">Upload a CSV to create many invitations at once. CSV must have a header row. Recognized columns (case-insensitive, all whitespace trimmed):</p>
+      <ul class="muted" style="font-size:13px;">
+        <li><code>product_id</code> — required</li>
+        <li><code>name</code> (or <code>intended_name</code>) — optional</li>
+        <li><code>email</code> (or <code>intended_email</code>) — optional</li>
+        <li><code>notes</code> — optional</li>
+      </ul>
+      <p class="muted" style="font-size:13px;">Extra columns are ignored. Rows missing <code>product_id</code> are skipped (you'll see the skipped row numbers in the summary).</p>
+      <form method="POST" action="/admin/sample-invitations/batch" enctype="multipart/form-data">
+        <label for="batch_file">CSV file</label>
+        <input id="batch_file" name="file" type="file" accept=".csv,text/csv" required>
+        <div style="margin-top:24px;">
+          <button type="submit">Upload and create</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Export</h3>
+      <p class="muted">Download every invitation (pending, consumed, and expired) as a CSV — including the shareable URL for each pending invitation. Suitable for mail-merge tools.</p>
+      <p><a href="/admin/sample-invitations/export">Download all invitations as CSV</a></p>
+    </div>
+
     <h3>Pending (${pending.length})</h3>
     ${pendingTable}
 
@@ -523,6 +550,172 @@ admin.get('/sample-invitations', (c) => {
     <h3 style="margin-top:32px;">Expired without use (${expired.length})</h3>
     ${expiredTable}
   `, 'invitations'));
+});
+
+// CSV column normalization — accepts a few common alias spellings so users
+// don't have to remember our exact column names.
+const pickField = (row: Record<string, string>, ...keys: string[]): string => {
+  for (const k of keys) {
+    const v = row[k] ?? row[k.toLowerCase()];
+    if (v !== undefined && v !== null && String(v).trim() !== '') {
+      return String(v).trim();
+    }
+  }
+  return '';
+};
+
+const csvEscape = (v: string | number | null | undefined): string => {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (s === '') return '';
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+};
+
+admin.post('/sample-invitations/batch', async (c) => {
+  const formData = await c.req.formData();
+  const file = formData.get('file');
+  if (!(file instanceof File)) {
+    return c.html(adminShell('Upload failed', '<div class="err">No CSV file uploaded.</div><p><a href="/admin/sample-invitations">Back</a></p>', 'invitations'), 400);
+  }
+  if (file.size > 1024 * 1024) {
+    return c.html(adminShell('Upload failed', '<div class="err">CSV is too large (max 1 MB). Split into multiple smaller files if needed.</div><p><a href="/admin/sample-invitations">Back</a></p>', 'invitations'), 413);
+  }
+
+  const text = await file.text();
+
+  let records: Array<Record<string, string>>;
+  try {
+    records = parseCsv(text, {
+      columns: (header: string[]) => header.map((h) => h.trim().toLowerCase()),
+      skip_empty_lines: true,
+      trim: true,
+      bom: true,
+    }) as Array<Record<string, string>>;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.html(adminShell('Upload failed', `<div class="err">CSV could not be parsed: ${escapeHtml(msg)}</div><p><a href="/admin/sample-invitations">Back</a></p>`, 'invitations'), 400);
+  }
+
+  const expiresAt = nowSec() + daysToSec(SAMPLE_INVITE_TTL_DAYS);
+  const created: number[] = [];
+  const errors: Array<{ rowNumber: number; reason: string }> = [];
+
+  records.forEach((row, idx) => {
+    const csvRowNumber = idx + 2; // +1 for header, +1 for 1-indexing
+
+    const productId = pickField(row, 'product_id', 'productid', 'shopify_product_id');
+    if (!productId) {
+      errors.push({ rowNumber: csvRowNumber, reason: 'missing product_id' });
+      return;
+    }
+    const intendedName = pickField(row, 'name', 'intended_name') || null;
+    const intendedEmail = pickField(row, 'email', 'intended_email') || null;
+    const notes = pickField(row, 'notes') || null;
+
+    try {
+      const invitation = createSampleInvitation({
+        shopifyProductId: productId,
+        intendedEmail,
+        intendedName,
+        notes,
+        expiresAt,
+      });
+      created.push(invitation.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push({ rowNumber: csvRowNumber, reason: msg });
+    }
+  });
+
+  log('info', 'admin batch-created sample invitations', {
+    createdCount: created.length,
+    errorCount: errors.length,
+    fileName: file.name,
+  });
+
+  const errorList = errors.length === 0
+    ? ''
+    : `<div class="err" style="margin-top:16px;">${errors.length} row${errors.length === 1 ? '' : 's'} skipped:</div>
+       <ul>${errors.map((e) => `<li>Row ${e.rowNumber}: ${escapeHtml(e.reason)}</li>`).join('')}</ul>`;
+
+  if (created.length === 0) {
+    return c.html(adminShell('Batch upload — no rows created', `
+      <h2>Batch upload</h2>
+      <div class="err">No invitations were created.</div>
+      ${errorList}
+      <p style="margin-top:24px;"><a href="/admin/sample-invitations">Back to invitations</a></p>
+    `, 'invitations'), 400);
+  }
+
+  return c.html(adminShell('Batch upload complete', `
+    <h2>Batch upload</h2>
+    <div class="ok">Created ${created.length} invitation${created.length === 1 ? '' : 's'}.</div>
+    ${errorList}
+    <p style="margin-top:24px;">
+      <a href="/admin/sample-invitations">Back to invitations list</a> ·
+      <a href="/admin/sample-invitations/export">Download CSV with all invitation links</a>
+    </p>
+  `, 'invitations'));
+});
+
+admin.get('/sample-invitations/export', async (c) => {
+  const { pending, consumed, expired } = listSampleInvitations();
+  const all = [...pending, ...consumed, ...expired];
+
+  // Pre-fetch product titles in parallel; each call hits products_cache
+  // first and only goes to Shopify on cache miss.
+  const uniqueProductIds = [...new Set(all.map((i) => i.shopify_product_id))];
+  const productTitleByid = new Map<string, string>();
+  await Promise.all(
+    uniqueProductIds.map(async (pid) => {
+      try {
+        const p = await getOrFetchProduct(pid);
+        productTitleByid.set(pid, p?.title ?? '');
+      } catch {
+        productTitleByid.set(pid, '');
+      }
+    }),
+  );
+
+  const now = nowSec();
+  const header = ['id', 'status', 'product_id', 'product_name', 'name', 'email', 'notes', 'created_iso', 'expires_iso', 'consumed_iso', 'invitation_url'];
+
+  const lines = [header.join(',')];
+  for (const inv of all) {
+    const status =
+      inv.consumed_at !== null ? 'consumed' :
+      inv.expires_at <= now ? 'expired' :
+      'pending';
+    const token = signSampleInviteToken({
+      invitationId: inv.id,
+      productId: inv.shopify_product_id,
+      exp: inv.expires_at,
+    });
+    const url = `${config.publicUrl}/r/invite/${token}`;
+    const productName = productTitleByid.get(inv.shopify_product_id) ?? '';
+    lines.push([
+      inv.id,
+      status,
+      csvEscape(inv.shopify_product_id),
+      csvEscape(productName),
+      csvEscape(inv.intended_name),
+      csvEscape(inv.intended_email),
+      csvEscape(inv.notes),
+      new Date(inv.created_at * 1000).toISOString(),
+      new Date(inv.expires_at * 1000).toISOString(),
+      inv.consumed_at !== null ? new Date(inv.consumed_at * 1000).toISOString() : '',
+      csvEscape(url),
+    ].join(','));
+  }
+
+  const body = lines.join('\r\n') + '\r\n';
+  const today = new Date().toISOString().slice(0, 10);
+  c.header('Content-Type', 'text/csv; charset=utf-8');
+  c.header('Content-Disposition', `attachment; filename="sample-invitations-${today}.csv"`);
+  return c.body(body);
 });
 
 admin.post('/sample-invitations', async (c) => {
@@ -547,6 +740,7 @@ admin.post('/sample-invitations', async (c) => {
   const token = signSampleInviteToken({
     invitationId: invitation.id,
     productId: invitation.shopify_product_id,
+    exp: invitation.expires_at,
   });
 
   log('info', 'admin created sample invitation', {

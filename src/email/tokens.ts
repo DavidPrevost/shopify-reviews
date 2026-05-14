@@ -55,16 +55,20 @@ export const verifyUnsubscribeToken = (token: string): VerifyResult<UnsubscribeT
 export const signSampleInviteToken = (input: {
   invitationId: number;
   productId: string;
-  ttlDays?: number;
+  // Token exp. Pass the invitation row's `expires_at` so re-signing (e.g.,
+  // during a CSV re-export) doesn't accidentally extend the invitation's
+  // effective lifetime beyond what was recorded at creation time. Defaults
+  // to nowSec()+90d for callers that don't have access to the row.
+  exp?: number;
 }): string => {
   if (!config.email.tokenSecret) {
     throw new Error('EMAIL_TOKEN_SECRET is not configured');
   }
-  const ttlDays = input.ttlDays ?? SAMPLE_INVITE_TTL_DAYS;
+  const exp = input.exp ?? nowSec() + daysToSec(SAMPLE_INVITE_TTL_DAYS);
   return signToken(config.email.tokenSecret, {
     invitationId: input.invitationId,
     productId: input.productId,
-    exp: nowSec() + daysToSec(ttlDays),
+    exp,
   });
 };
 
