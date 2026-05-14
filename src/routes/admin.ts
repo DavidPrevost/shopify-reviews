@@ -99,6 +99,12 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     .err { background:#fee; border:1px solid #fcc; color:#933; padding:12px; border-radius:4px; margin-bottom:16px; }
     .ok  { background:#efe; border:1px solid #cdc; color:#363; padding:12px; border-radius:4px; margin-bottom:16px; }
     .muted { color:#888; font-size: 13px; }
+    .tabs { display:flex; border-bottom: 2px solid #ddd; margin-bottom: 24px; gap: 0; flex-wrap: wrap; }
+    .tabs a { padding: 12px 20px; text-decoration: none; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; font-size: 14px; font-weight: 500; cursor: pointer; }
+    .tabs a:hover { color: #222; }
+    .tabs a.active { color: #222; border-bottom-color: #222; font-weight: 600; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
   </style>
 </head>
 <body>
@@ -491,66 +497,104 @@ admin.get('/sample-invitations', (c) => {
       </table>`;
 
   return c.html(adminShell('Sample invitations', `
-    ${flash}
     <h2>Sample invitations</h2>
     <p class="muted">Create a single-use review link for someone who received a product outside the normal Shopify purchase flow (free samples, influencer outreach, etc.). The reviewer's submission is recorded with a "Verified Reviewer" badge on the storefront — distinct from the "Verified Buyer" badge used for purchase-based reviews.</p>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Create new invitation (one at a time)</h3>
-      <form method="POST" action="/admin/sample-invitations">
-        <label for="shopify_product_id">Shopify product</label>
-        <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386 — or paste the admin URL">
-        <p class="muted" style="font-size:12px;margin-top:4px;">Paste the numeric product ID, the admin URL (e.g., <code>https://admin.shopify.com/store/.../products/9218705883386</code>), or a <code>gid://shopify/Product/&lt;id&gt;</code> reference. Storefront URLs (which use product handles rather than IDs) aren't supported.</p>
+    <nav class="tabs" id="invitations-tabs">
+      <a href="#individual" data-tab="individual">Individual</a>
+      <a href="#batch"      data-tab="batch">Batch</a>
+      <a href="#manage"     data-tab="manage">Manage <span class="muted" style="font-weight:normal;">(${pending.length + consumed.length + expired.length})</span></a>
+    </nav>
 
-        <label for="intended_name">Recipient name (optional, for your tracking)</label>
-        <input id="intended_name" name="intended_name" type="text" maxlength="120">
+    <section id="tab-individual" class="tab-panel" data-tab="individual">
+      ${flash}
+      <div class="card">
+        <h3 style="margin-top:0;">Create new invitation</h3>
+        <form method="POST" action="/admin/sample-invitations">
+          <label for="shopify_product_id">Shopify product</label>
+          <input id="shopify_product_id" name="shopify_product_id" type="text" required placeholder="e.g., 9218705883386 — or paste the admin URL">
+          <p class="muted" style="font-size:12px;margin-top:4px;">Paste the numeric product ID, the admin URL (e.g., <code>https://admin.shopify.com/store/.../products/9218705883386</code>), or a <code>gid://shopify/Product/&lt;id&gt;</code> reference. Storefront URLs (which use product handles rather than IDs) aren't supported.</p>
 
-        <label for="intended_email">Recipient email (optional, for your tracking)</label>
-        <input id="intended_email" name="intended_email" type="text" maxlength="200">
+          <label for="intended_name">Recipient name (optional, for your tracking)</label>
+          <input id="intended_name" name="intended_name" type="text" maxlength="120">
 
-        <label for="notes">Internal notes (optional)</label>
-        <input id="notes" name="notes" type="text" maxlength="500" placeholder="e.g., Sample drop batch 1 / Instagram outreach / etc.">
+          <label for="intended_email">Recipient email (optional, for your tracking)</label>
+          <input id="intended_email" name="intended_email" type="text" maxlength="200">
 
-        <div style="margin-top:24px;">
-          <button type="submit" class="primary">Generate invitation link</button>
-        </div>
-      </form>
-    </div>
+          <label for="notes">Internal notes (optional)</label>
+          <input id="notes" name="notes" type="text" maxlength="500" placeholder="e.g., Sample drop batch 1 / Instagram outreach / etc.">
 
-    <div class="card">
-      <h3 style="margin-top:0;">Batch upload (CSV)</h3>
-      <p class="muted">Upload a CSV to create many invitations at once. CSV must have a header row. Recognized columns (case-insensitive, all whitespace trimmed):</p>
-      <ul class="muted" style="font-size:13px;">
-        <li><code>product_id</code> — required; accepts a numeric ID, admin URL, or GID (same as the single-create form above)</li>
-        <li><code>name</code> (or <code>intended_name</code>) — optional</li>
-        <li><code>email</code> (or <code>intended_email</code>) — optional</li>
-        <li><code>notes</code> — optional</li>
-      </ul>
-      <p class="muted" style="font-size:13px;">Extra columns are ignored. Rows with a missing or unrecognized <code>product_id</code> are skipped (you'll see the row numbers and reasons in the summary).</p>
-      <p style="font-size:13px;"><a href="/admin/sample-invitations/template" download>Download blank template (CSV)</a></p>
-      <form method="POST" action="/admin/sample-invitations/batch" enctype="multipart/form-data">
-        <label for="batch_file">CSV file</label>
-        <input id="batch_file" name="file" type="file" accept=".csv,text/csv" required>
-        <div style="margin-top:24px;">
-          <button type="submit">Upload and create</button>
-        </div>
-      </form>
-    </div>
+          <div style="margin-top:24px;">
+            <button type="submit" class="primary">Generate invitation link</button>
+          </div>
+        </form>
+      </div>
+    </section>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Export</h3>
-      <p class="muted">Download every invitation (pending, consumed, and expired) as a CSV — including the shareable URL for each pending invitation. Suitable for mail-merge tools.</p>
-      <p><a href="/admin/sample-invitations/export">Download all invitations as CSV</a></p>
-    </div>
+    <section id="tab-batch" class="tab-panel" data-tab="batch">
+      <div class="card">
+        <h3 style="margin-top:0;">Batch upload (CSV)</h3>
+        <p class="muted">Upload a CSV to create many invitations at once. CSV must have a header row. Recognized columns (case-insensitive, all whitespace trimmed):</p>
+        <ul class="muted" style="font-size:13px;">
+          <li><code>product_id</code> — required; accepts a numeric ID, admin URL, or GID</li>
+          <li><code>name</code> (or <code>intended_name</code>) — optional</li>
+          <li><code>email</code> (or <code>intended_email</code>) — optional</li>
+          <li><code>notes</code> — optional</li>
+        </ul>
+        <p class="muted" style="font-size:13px;">Extra columns are ignored. Rows with a missing or unrecognized <code>product_id</code> are skipped (you'll see the row numbers and reasons in the summary).</p>
+        <p style="font-size:13px;"><a href="/admin/sample-invitations/template" download>Download blank template (CSV)</a></p>
+        <form method="POST" action="/admin/sample-invitations/batch" enctype="multipart/form-data">
+          <label for="batch_file">CSV file</label>
+          <input id="batch_file" name="file" type="file" accept=".csv,text/csv" required>
+          <div style="margin-top:24px;">
+            <button type="submit">Upload and create</button>
+          </div>
+        </form>
+      </div>
 
-    <h3>Pending (${pending.length})</h3>
-    ${pendingTable}
+      <div class="card">
+        <h3 style="margin-top:0;">Export</h3>
+        <p class="muted">Download every invitation (pending, consumed, and expired) as a CSV — including the shareable URL for each pending invitation. Suitable for mail-merge tools.</p>
+        <p><a href="/admin/sample-invitations/export">Download all invitations as CSV</a></p>
+      </div>
+    </section>
 
-    <h3 style="margin-top:32px;">Consumed (${consumed.length})</h3>
-    ${consumedTable}
+    <section id="tab-manage" class="tab-panel" data-tab="manage">
+      <h3>Pending (${pending.length})</h3>
+      ${pendingTable}
 
-    <h3 style="margin-top:32px;">Expired without use (${expired.length})</h3>
-    ${expiredTable}
+      <h3 style="margin-top:32px;">Consumed (${consumed.length})</h3>
+      ${consumedTable}
+
+      <h3 style="margin-top:32px;">Expired without use (${expired.length})</h3>
+      ${expiredTable}
+    </section>
+
+    <script>
+      (function () {
+        var tabs = document.querySelectorAll('#invitations-tabs a');
+        var panels = document.querySelectorAll('.tab-panel');
+        function show(name) {
+          tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
+          panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
+        }
+        // Default tab: hash if present, otherwise "individual" — but if the
+        // user just created an invitation (?created=... in the URL), force
+        // Individual so the success flash with the copyable link is visible.
+        var hash = (location.hash || '').replace('#', '');
+        var hasCreated = location.search.indexOf('created=') !== -1;
+        var initial = hasCreated ? 'individual' : (hash || 'individual');
+        show(initial);
+        tabs.forEach(function (a) {
+          a.addEventListener('click', function () {
+            // Let the native hash-change happen; show() runs from the listener below.
+          });
+        });
+        window.addEventListener('hashchange', function () {
+          show(location.hash.replace('#', '') || 'individual');
+        });
+      })();
+    </script>
   `, 'invitations'));
 });
 
@@ -662,7 +706,7 @@ admin.post('/sample-invitations/batch', async (c) => {
     <div class="ok">Created ${created.length} invitation${created.length === 1 ? '' : 's'}.</div>
     ${errorList}
     <p style="margin-top:24px;">
-      <a href="/admin/sample-invitations">Back to invitations list</a> ·
+      <a href="/admin/sample-invitations#manage">View the invitations list</a> ·
       <a href="/admin/sample-invitations/export">Download CSV with all invitation links</a>
     </p>
   `, 'invitations'));
