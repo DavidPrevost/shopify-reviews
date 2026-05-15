@@ -798,28 +798,58 @@ const renderAggregate = async (el: HTMLElement, productId: string): Promise<void
   }
 };
 
+// Initialize a single widget element. Idempotent: a `data-rv-initialized`
+// flag stops us from rendering twice if the element gets re-visited (e.g.
+// the MutationObserver fires for a node we already handled in the initial
+// scan).
+const initializeElement = (el: HTMLElement): void => {
+  if (el.hasAttribute('data-rv-initialized')) return;
+  el.setAttribute('data-rv-initialized', 'true');
+
+  const mode = el.getAttribute('data-reviews-widget');
+  const productId = el.getAttribute('data-product-id');
+  if (!productId) return;
+  // data-variant-id is optional; when omitted (e.g., collection-card
+  // aggregate mode, or themes that haven't been updated yet), the API
+  // treats the request as variant-unscoped and returns the full product
+  // review pool regardless of variant_handling.
+  const variantId = el.getAttribute('data-variant-id') || null;
+  // data-customer-id (passed by the theme from {{ customer.id }}) signals
+  // whether a Shopify customer is logged in. Empty string or missing means
+  // anonymous — the widget shows a "Log in to write a review" affordance
+  // instead of the form. Submission and edit always re-verify on the
+  // server via the App Proxy signature; this attribute is only for UI.
+  const rawCustomerId = el.getAttribute('data-customer-id');
+  const customerId = rawCustomerId && rawCustomerId.trim() !== '' ? rawCustomerId.trim() : null;
+  if (mode === 'full') void renderFull(el, productId, variantId, customerId);
+  else if (mode === 'aggregate') void renderAggregate(el, productId);
+};
+
 const init = (): void => {
   injectStylesOnce();
-  const nodes = document.querySelectorAll<HTMLElement>('[data-reviews-widget]');
-  nodes.forEach((el) => {
-    const mode = el.getAttribute('data-reviews-widget');
-    const productId = el.getAttribute('data-product-id');
-    if (!productId) return;
-    // data-variant-id is optional; when omitted (e.g., collection-card
-    // aggregate mode, or themes that haven't been updated yet), the API
-    // treats the request as variant-unscoped and returns the full product
-    // review pool regardless of variant_handling.
-    const variantId = el.getAttribute('data-variant-id') || null;
-    // data-customer-id (passed by the theme from {{ customer.id }}) signals
-    // whether a Shopify customer is logged in. Empty string or missing means
-    // anonymous — the widget shows a "Log in to write a review" affordance
-    // instead of the form. Submission and edit always re-verify on the
-    // server via the App Proxy signature; this attribute is only for UI.
-    const rawCustomerId = el.getAttribute('data-customer-id');
-    const customerId = rawCustomerId && rawCustomerId.trim() !== '' ? rawCustomerId.trim() : null;
-    if (mode === 'full') void renderFull(el, productId, variantId, customerId);
-    else if (mode === 'aggregate') void renderAggregate(el, productId);
+
+  // Initial scan — picks up widget elements that are in the DOM at
+  // DOMContentLoaded.
+  document.querySelectorAll<HTMLElement>('[data-reviews-widget]').forEach(initializeElement);
+
+  // Late-arriving widgets (Shopify's async product-recommendations,
+  // variant-change section re-renders, infinite-scroll collection pages,
+  // etc.) get caught by a MutationObserver that watches the whole body for
+  // newly-inserted nodes. The callback is cheap when no widget elements are
+  // involved (typical mutations), so leaving it running indefinitely is
+  // fine.
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      m.addedNodes.forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        if (node.hasAttribute('data-reviews-widget')) {
+          initializeElement(node);
+        }
+        node.querySelectorAll<HTMLElement>('[data-reviews-widget]').forEach(initializeElement);
+      });
+    }
   });
+  observer.observe(document.body, { childList: true, subtree: true });
 };
 
 if (document.readyState === 'loading') {
