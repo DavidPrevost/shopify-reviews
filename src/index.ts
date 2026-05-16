@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { config } from './config.js';
 import { closeDb, migrate } from './db/client.js';
+import { seedDefaultEmailTemplates } from './email/email-config.js';
 import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
@@ -11,6 +12,7 @@ import widget from './routes/widget.js';
 import { startScheduler } from './scheduler/cron.js';
 
 migrate();
+seedDefaultEmailTemplates();
 startScheduler();
 
 const app = new Hono();

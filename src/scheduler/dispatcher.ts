@@ -4,15 +4,17 @@ import {
   customerHasAnyReviews,
   recordRequestSentBatch,
   logEmailFailure,
+  findEmailTemplate,
   getSetting,
   getSettingNumber,
   auditSuppressions,
   type EligibleRow,
   type SuppressionAudit,
 } from '../db/queries.js';
-import { renderTemplate, escapeHtml } from '../email/render.js';
+import { renderTemplate, renderString, escapeHtml } from '../email/render.js';
 import { sendMail } from '../email/smtp-client.js';
 import { signReviewToken, signUnsubscribeToken } from '../email/tokens.js';
+import { resolveEmailBranding } from '../email/email-config.js';
 import { log } from '../lib/logger.js';
 import { resolveBrandColors, type ResolvedBrandColors } from '../shopify/brand-info.js';
 import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
@@ -45,22 +47,37 @@ const buildUnsubGlobalUrl = (token: string): string =>
 const buildUnsubProductUrl = (token: string): string =>
   `${trimUrl(config.publicUrl)}/unsubscribe/product?token=${encodeURIComponent(token)}`;
 
-const buildSubject = (groupSize: number, sampleTitle: string, isRepeat: boolean): string => {
-  if (groupSize === 1) {
-    return isRepeat ? `One more review for ${sampleTitle}?` : `How was your ${sampleTitle}?`;
-  }
-  return isRepeat
-    ? `Tell us about your recent order from ${config.email.brandName}`
-    : `How was your recent order from ${config.email.brandName}?`;
-};
+interface CtaConfig {
+  enabled: boolean;
+  label: string;
+}
 
-// HTML for a single product card inside the multi-product email body.
-const renderProductCard = (item: GroupItem, colors: ResolvedBrandColors): string => {
+// HTML for a single product card inside the multi-product email body. CTA
+// label and visibility come from the active template; per-card unsubscribe
+// link is always present so customers can opt out of a specific product
+// without unsubscribing globally.
+const renderProductCard = (
+  item: GroupItem,
+  colors: ResolvedBrandColors,
+  cta: CtaConfig,
+): string => {
   const reviewUrl = buildReviewUrl(item.reviewToken);
   const unsubProductUrl = buildUnsubProductUrl(item.unsubProductToken);
   const imageBlock = item.product.featuredImageUrl
     ? `<img src="${item.product.featuredImageUrl}" alt="" width="80" height="80" style="display:block;border-radius:6px;object-fit:cover;">`
     : '';
+
+  const ctaHtml = cta.enabled
+    ? `<a href="${reviewUrl}"
+         style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
+        ${escapeHtml(cta.label)}
+      </a>
+      <div style="margin-top:6px;font-size:12px;">
+        <a href="${unsubProductUrl}" style="color:#888;text-decoration:underline;">Don't ask about this one</a>
+      </div>`
+    : `<div style="margin-top:6px;font-size:12px;">
+        <a href="${unsubProductUrl}" style="color:#888;text-decoration:underline;">Don't ask about this one</a>
+      </div>`;
 
   return `
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
@@ -70,13 +87,7 @@ const renderProductCard = (item: GroupItem, colors: ResolvedBrandColors): string
         </td>
         <td style="vertical-align:top;">
           <div style="font-size:16px;font-weight:600;margin-bottom:6px;">${escapeHtml(item.product.title)}</div>
-          <a href="${reviewUrl}"
-             style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
-            Write a review
-          </a>
-          <div style="margin-top:6px;font-size:12px;">
-            <a href="${unsubProductUrl}" style="color:#888;text-decoration:underline;">Don't ask about this one</a>
-          </div>
+          ${ctaHtml}
         </td>
       </tr>
     </table>
@@ -183,16 +194,70 @@ const dispatchGroup = async (
   const unsubGlobalUrl = buildUnsubGlobalUrl(unsubGlobalToken);
 
   const colors = resolveBrandColors(getSetting('shop_brand_json'));
-  const productsHtml = items.map((item) => renderProductCard(item, colors)).join('');
+  const branding = resolveEmailBranding();
 
+  // Look up the right template for this dispatch context. Falls back to the
+  // other variant if the chosen one is missing or inactive (defensive — the
+  // seed function inserts both on first boot, but in case the admin
+  // explicitly disabled one).
+  const preferredKey = isRepeat ? 'request_repeat' : 'request_first';
+  const fallbackKey = isRepeat ? 'request_first' : 'request_repeat';
+  let template = findEmailTemplate(preferredKey);
+  if (!template || template.is_active === 0) {
+    template = findEmailTemplate(fallbackKey);
+  }
+  if (!template) {
+    // Both templates missing — shouldn't happen post-seed. Log and skip the
+    // group so we don't send a malformed email or crash the dispatcher.
+    log('error', 'no active email template found, skipping group', {
+      customerId,
+      orderId: first.p_shopify_order_id,
+    });
+    return 'skipped';
+  }
+
+  const ctaConfig: CtaConfig = {
+    enabled: template.cta_enabled === 1,
+    label: template.cta_label,
+  };
+  const productsHtml = items.map((item) => renderProductCard(item, colors, ctaConfig)).join('');
+
+  // Pre-render context: the body, subject, footer text all use this. Variables
+  // are inserted as-is (no nested re-substitution) since the rendered output
+  // is HTML that may contain user-supplied content elsewhere.
   const ctx = {
     firstName: escapeHtml(firstName),
     brandName: escapeHtml(config.email.brandName),
+    productName: items[0] ? escapeHtml(items[0].product.title) : '',
+    productCount: items.length,
     productsHtml,
     unsubGlobalUrl,
   };
 
-  const html = renderTemplate(isRepeat ? 'request-repeat.html' : 'request-first.html', ctx);
+  const renderedBody = renderString(template.body_html, ctx);
+  const renderedSubject = renderString(template.subject, ctx);
+  const renderedFooterText = renderString(branding.footerText, ctx);
+
+  const logoHeader = branding.logoUrl
+    ? `<tr><td align="center" style="padding:24px 32px 0;">
+         <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
+       </td></tr>`
+    : '';
+
+  const footerHtml = `
+    <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
+      ${renderedFooterText}
+      <a href="${unsubGlobalUrl}" style="color:#888; text-decoration:underline;">Unsubscribe from all review requests</a>
+    </p>
+  `;
+
+  const html = renderTemplate('_shell.html', {
+    subject: renderedSubject,
+    body: renderedBody,
+    logoHeader,
+    footerHtml,
+  });
+
   const text = renderPlainText({
     firstName,
     brandName: config.email.brandName,
@@ -200,7 +265,7 @@ const dispatchGroup = async (
     unsubGlobalUrl,
     isRepeat,
   });
-  const subject = buildSubject(items.length, items[0]!.product.title, isRepeat);
+  const subject = renderedSubject;
 
   try {
     await sendMail({

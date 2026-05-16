@@ -580,6 +580,70 @@ export const setProductOptOut = (purchaseId: number, customerId: number | null):
   })();
 };
 
+// --- Email templates ---
+
+export interface EmailTemplateRow {
+  id: number;
+  template_key: string;
+  display_name: string;
+  is_active: number;
+  subject: string;
+  body_html: string;
+  cta_enabled: number;
+  cta_label: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export const findEmailTemplate = (templateKey: string): EmailTemplateRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM email_templates WHERE template_key = ?')
+    .get(templateKey) as EmailTemplateRow | undefined) ?? null;
+};
+
+export const listEmailTemplates = (): EmailTemplateRow[] => {
+  return getDb()
+    .prepare('SELECT * FROM email_templates ORDER BY id ASC')
+    .all() as EmailTemplateRow[];
+};
+
+export const upsertEmailTemplate = (input: {
+  templateKey: string;
+  displayName: string;
+  subject: string;
+  bodyHtml: string;
+  ctaEnabled: boolean;
+  ctaLabel: string;
+  isActive: boolean;
+}): EmailTemplateRow => {
+  const now = nowSec();
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO email_templates
+      (template_key, display_name, is_active, subject, body_html, cta_enabled, cta_label, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(template_key) DO UPDATE SET
+      display_name = excluded.display_name,
+      is_active    = excluded.is_active,
+      subject      = excluded.subject,
+      body_html    = excluded.body_html,
+      cta_enabled  = excluded.cta_enabled,
+      cta_label    = excluded.cta_label,
+      updated_at   = excluded.updated_at
+  `).run(
+    input.templateKey,
+    input.displayName,
+    input.isActive ? 1 : 0,
+    input.subject,
+    input.bodyHtml,
+    input.ctaEnabled ? 1 : 0,
+    input.ctaLabel,
+    now,
+    now,
+  );
+  return findEmailTemplate(input.templateKey)!;
+};
+
 // --- Sample invitations ---
 
 export interface SampleInvitationRow {

@@ -19,15 +19,21 @@ const readTemplate = (name: string): string => {
 // Minimal {{ variable }} substitution. No conditionals, no loops, no escaping.
 // Templates that need conditional sections should ship two separate templates.
 // HTML escaping is the caller's responsibility for any user-supplied content.
+export const renderString = (
+  template: string,
+  context: Record<string, string | number>,
+): string => {
+  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) => {
+    const value = context[key];
+    return value === undefined ? '' : String(value);
+  });
+};
+
 export const renderTemplate = (
   templateFile: string,
   context: Record<string, string | number>,
 ): string => {
-  const raw = readTemplate(templateFile);
-  return raw.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) => {
-    const value = context[key];
-    return value === undefined ? '' : String(value);
-  });
+  return renderString(readTemplate(templateFile), context);
 };
 
 export const escapeHtml = (s: string): string =>

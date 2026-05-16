@@ -16,6 +16,9 @@ import {
   createSampleInvitation,
   listSampleInvitations,
   clearProductCache,
+  listEmailTemplates,
+  findEmailTemplate,
+  upsertEmailTemplate,
   type ReviewRow,
 } from '../db/queries.js';
 import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
@@ -30,6 +33,12 @@ import {
   PRESET_PALETTE,
   HARDCODED_DEFAULTS,
 } from '../shopify/widget-config.js';
+import {
+  resolveEmailBranding,
+  getEmailBrandingOverrides,
+  getEmailBrandingDefaults,
+} from '../email/email-config.js';
+import { renderString } from '../email/render.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
 import { fetchShopifyBrand } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
@@ -1148,11 +1157,126 @@ admin.get('/branding', (c) => {
     </form>
   `;
 
+  // --- Email tab ---
+  const emailOverrides = getEmailBrandingOverrides();
+  const emailDefaults = getEmailBrandingDefaults(config.email.brandName);
+  const resolvedEmail = resolveEmailBranding();
+  const templates = listEmailTemplates();
+
+  const textField = (opts: {
+    id: string;
+    label: string;
+    description: string;
+    overrideValue: string | null;
+    defaultValue: string | null;
+    placeholder?: string;
+    name: string;
+  }) => {
+    const hasOverride = opts.overrideValue !== null;
+    const display = opts.overrideValue ?? '';
+    const defaultLine = opts.defaultValue
+      ? `<div class="color-field-default">Default: <code>${escapeHtml(opts.defaultValue)}</code></div>`
+      : '<div class="color-field-default">No default available.</div>';
+    return `
+      <div class="color-field-row">
+        <label for="${opts.id}">${escapeHtml(opts.label)}</label>
+        <p class="muted" style="margin:0;">${opts.description}</p>
+        <input type="text" id="${opts.id}" name="${opts.name}" value="${escapeHtml(display)}" placeholder="${escapeHtml(opts.placeholder ?? '')}">
+        ${defaultLine}${hasOverride ? ' · <strong style="color:#0a8a3a;">overridden</strong>' : ''}
+      </div>
+    `;
+  };
+
+  const templateCards = templates.length === 0
+    ? '<p class="muted">No email templates found. (They should have been seeded on first boot — try restarting the container if this is unexpected.)</p>'
+    : templates.map((t) => `
+      <div class="card" id="template-${escapeHtml(t.template_key)}">
+        <h4 style="margin:0 0 8px;">${escapeHtml(t.display_name)} <code style="font-size:0.75em;color:#888;font-weight:normal;">${escapeHtml(t.template_key)}</code></h4>
+        <form method="POST" action="/admin/branding/email-template/${encodeURIComponent(t.template_key)}">
+          <label for="t-${t.id}-subject">Subject</label>
+          <input type="text" id="t-${t.id}-subject" name="subject" value="${escapeHtml(t.subject)}" maxlength="200">
+          <p class="muted" style="font-size:12px;margin:4px 0 0;">Variables: <code>{{ brandName }}</code>, <code>{{ firstName }}</code>, <code>{{ productName }}</code>, <code>{{ productCount }}</code></p>
+
+          <label for="t-${t.id}-body">Body (HTML)</label>
+          <textarea id="t-${t.id}-body" name="body_html" rows="14" style="font-family:monospace;font-size:13px;">${escapeHtml(t.body_html)}</textarea>
+          <p class="muted" style="font-size:12px;margin:4px 0 0;">Variables: same as subject, plus <code>{{ productsHtml }}</code> (renders the per-product cards). Put <code>{{ productsHtml }}</code> wherever you want the product list to appear in the email.</p>
+
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="cta_enabled" value="1" ${t.cta_enabled ? 'checked' : ''} style="width:auto;">
+            <span>Show "Write a review" button on each product card</span>
+          </label>
+
+          <label for="t-${t.id}-cta-label">Button label</label>
+          <input type="text" id="t-${t.id}-cta-label" name="cta_label" value="${escapeHtml(t.cta_label)}" maxlength="60">
+
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="is_active" value="1" ${t.is_active ? 'checked' : ''} style="width:auto;">
+            <span>Template is active (dispatcher will use this template when its key matches)</span>
+          </label>
+
+          <div style="margin-top:16px; display:flex; gap:8px;">
+            <button type="submit" class="primary">Save template</button>
+            <a href="/admin/branding/email-template/${encodeURIComponent(t.template_key)}/preview" target="_blank" style="padding:6px 12px;border:1px solid #ccc;border-radius:4px;text-decoration:none;color:#222;font-size:13px;background:#fff;">Preview in new tab</a>
+          </div>
+        </form>
+      </div>
+    `).join('');
+
   const emailTab = `
-    <p class="muted">Email template customization is on the roadmap and lands next. For now, emails use the brand colors synced from Shopify (or the neutral fallback when none are set) and the default templates baked into the app.</p>
-    <div class="card" style="background:#fff8e1; border:1px solid #ffd54f;">
-      <p style="margin:0;">When this section launches you'll be able to edit subject lines, body copy, the CTA button label, the logo header, and the footer text — all with the same Shopify-default-plus-override pattern as the widget styling on the Widget tab.</p>
-    </div>
+    <p class="muted">Email templates ship with sensible defaults that use your Shopify brand colors (CTA button) and logo (when synced). Edit the shared branding fields below — they wrap every template — or open a specific template to customize its subject, body copy, and CTA. Designed to scale to many templates: today the dispatcher uses two (<code>request_first</code> for new customers, <code>request_repeat</code> for returning ones); future templates plug into the same system.</p>
+
+    <h3>Shared email branding</h3>
+    <p class="muted">These fields apply to every email the dispatcher sends. Leave a field blank to use the default shown.</p>
+
+    <form method="POST" action="/admin/branding/email-branding">
+      ${textField({
+        id: 'eb-logoUrl',
+        name: 'logoUrl',
+        label: 'Logo URL',
+        description: 'Image displayed at the top of every email. Use the synced Shopify logo, or paste a different image URL. Recommended: ~280px wide, transparent background.',
+        overrideValue: emailOverrides.logoUrl,
+        defaultValue: emailDefaults.shopifyLogoUrl,
+        placeholder: emailDefaults.shopifyLogoUrl ?? 'https://...',
+      })}
+
+      ${textField({
+        id: 'eb-footerText',
+        name: 'footerText',
+        label: 'Footer text',
+        description: 'Short line at the bottom of every email, just above the unsubscribe link. Variables: {{ brandName }}.',
+        overrideValue: emailOverrides.footerText,
+        defaultValue: emailDefaults.defaultFooterText,
+        placeholder: emailDefaults.defaultFooterText,
+      })}
+
+      ${textField({
+        id: 'eb-senderName',
+        name: 'senderName',
+        label: 'Sender display name',
+        description: 'How the sender appears in the customer\'s inbox ("From: <SENDER NAME> <reviews@…>"). Defaults to the brand name.',
+        overrideValue: emailOverrides.senderName,
+        defaultValue: emailDefaults.defaultSenderName,
+        placeholder: emailDefaults.defaultSenderName,
+      })}
+
+      ${textField({
+        id: 'eb-replyTo',
+        name: 'replyTo',
+        label: 'Reply-to address (optional)',
+        description: 'When set, customer replies to review emails go here instead of the From address. Useful if review-request emails are sent from a no-reply alias but you want replies to land in support.',
+        overrideValue: emailOverrides.replyTo,
+        defaultValue: null,
+        placeholder: 'support@brandname.com',
+      })}
+
+      <div style="margin-top:16px;">
+        <button type="submit" class="primary">Save shared branding</button>
+      </div>
+    </form>
+
+    <h3 style="margin-top:32px;">Templates</h3>
+    <p class="muted">Edit the per-template content. Customers receive <code>request_first</code> the first time they're asked, <code>request_repeat</code> on subsequent asks. Adding new templates programmatically is supported — the dispatcher's "which template to use" logic is the next thing to extend when you want template-by-cohort or per-product variations.</p>
+    ${templateCards}
   `;
 
   return c.html(adminShell('Branding', `
@@ -1298,6 +1422,157 @@ admin.get('/branding', (c) => {
       })();
     </script>
   `, 'branding'));
+});
+
+// Trims a form value; "" → null (use default). Used for every email-branding
+// override field since each can be cleared to fall back to the Shopify or
+// hardcoded default.
+const emptyToNull = (v: unknown): string | null => {
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  return trimmed === '' ? null : trimmed;
+};
+
+admin.post('/branding/email-branding', async (c) => {
+  const form = await c.req.formData();
+  const overrides = {
+    logoUrl:    emptyToNull(form.get('logoUrl')),
+    footerText: emptyToNull(form.get('footerText')),
+    senderName: emptyToNull(form.get('senderName')),
+    replyTo:    emptyToNull(form.get('replyTo')),
+  };
+  setSetting('email_branding_json', JSON.stringify(overrides));
+  log('info', 'admin saved email branding', {
+    logoUrlSet: !!overrides.logoUrl,
+    footerTextSet: !!overrides.footerText,
+    senderNameSet: !!overrides.senderName,
+    replyToSet: !!overrides.replyTo,
+  });
+  return c.redirect('/admin/branding?saved=1#email');
+});
+
+admin.post('/branding/email-template/:key', async (c) => {
+  const key = c.req.param('key');
+  const existing = findEmailTemplate(key);
+  if (!existing) {
+    return c.html(adminShell('Not found', `<p>No template with key <code>${escapeHtml(key)}</code>.</p><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 404);
+  }
+  const form = await c.req.formData();
+  const subject  = String(form.get('subject') ?? '').trim();
+  const bodyHtml = String(form.get('body_html') ?? '');
+  const ctaLabel = String(form.get('cta_label') ?? '').trim();
+  const ctaEnabled = form.get('cta_enabled') === '1';
+  const isActive   = form.get('is_active') === '1';
+
+  if (!subject) {
+    return c.html(adminShell('Invalid input', `<div class="err">Subject can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
+  }
+  if (!bodyHtml.trim()) {
+    return c.html(adminShell('Invalid input', `<div class="err">Body can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
+  }
+
+  upsertEmailTemplate({
+    templateKey: key,
+    displayName: existing.display_name,
+    subject,
+    bodyHtml,
+    ctaEnabled,
+    ctaLabel: ctaLabel || 'Write a review',
+    isActive,
+  });
+  log('info', 'admin saved email template', { templateKey: key, isActive, ctaEnabled });
+  return c.redirect('/admin/branding?saved=1#email');
+});
+
+admin.get('/branding/email-template/:key/preview', (c) => {
+  const key = c.req.param('key');
+  const template = findEmailTemplate(key);
+  if (!template) {
+    return c.text('Template not found', 404);
+  }
+
+  // Sample data — what a "typical" email would look like with this template.
+  // No actual products or customers are touched; just renders the template
+  // against placeholder content so the merchant can see the visual result.
+  const branding = resolveEmailBranding();
+  const sampleCtx = {
+    firstName: 'Maria',
+    brandName: config.email.brandName,
+    productName: 'Sample Product',
+    productCount: 2,
+    productsHtml: `
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
+        <tr>
+          <td width="96" style="padding-right:16px;vertical-align:top;">
+            <div style="width:80px;height:80px;background:#eee;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#999;font-size:11px;">[image]</div>
+          </td>
+          <td style="vertical-align:top;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px;">Sample Product</div>
+            ${template.cta_enabled ? `<a href="#" style="display:inline-block;background:#222;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(template.cta_label)}</a>
+              <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>` : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`}
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
+        <tr>
+          <td width="96" style="padding-right:16px;vertical-align:top;">
+            <div style="width:80px;height:80px;background:#eee;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#999;font-size:11px;">[image]</div>
+          </td>
+          <td style="vertical-align:top;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px;">Another Sample Product</div>
+            ${template.cta_enabled ? `<a href="#" style="display:inline-block;background:#222;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(template.cta_label)}</a>
+              <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>` : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`}
+          </td>
+        </tr>
+      </table>
+    `,
+    unsubGlobalUrl: '#preview',
+  };
+  const renderedBody = renderString(template.body_html, sampleCtx);
+  const renderedSubject = renderString(template.subject, sampleCtx);
+  const renderedFooter = renderString(branding.footerText, sampleCtx);
+
+  const logoHeader = branding.logoUrl
+    ? `<tr><td align="center" style="padding:24px 32px 0;">
+         <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
+       </td></tr>`
+    : '';
+  const footerHtml = `
+    <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
+      ${renderedFooter}
+      <a href="#preview" style="color:#888; text-decoration:underline;">Unsubscribe from all review requests</a>
+    </p>
+  `;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(renderedSubject)}</title>
+</head>
+<body style="margin:0; padding:0; background:#f6f6f6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#222;">
+  <div style="padding:8px 16px; background:#fff8e1; border-bottom:1px solid #ffd54f; font-size:12px; color:#7a4f01;">
+    <strong>Preview</strong> — this email is rendered with sample data (placeholder customer name, fake products). Subject: <code>${escapeHtml(renderedSubject)}</code>
+  </div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px; background:#ffffff; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+        ${logoHeader}
+        <tr><td style="padding:32px 32px 16px;">
+          ${renderedBody}
+        </td></tr>
+        <tr><td style="padding:16px 32px; border-top:1px solid #eaeaea; background:#fafafa; border-radius:0 0 8px 8px;">
+          ${footerHtml}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  c.header('Content-Type', 'text/html; charset=utf-8');
+  return c.body(html);
 });
 
 admin.post('/branding', async (c) => {
