@@ -697,10 +697,10 @@ Brand uses an existing Gmail account with a custom-domain alias (`reviews@brandn
 
 ## 14. Current Build Status
 
-### Completed in code (steps 1–11)
+### Step 1–14 (original implementation plan)
 
 - **Step 1** ✅ Scaffolding (Hono server, Docker, build pipeline)
-- **Step 2** ✅ Database layer ([src/db/client.ts](src/db/client.ts), [src/db/queries.ts](src/db/queries.ts), [src/db/migrations/001_initial.sql](src/db/migrations/001_initial.sql))
+- **Step 2** ✅ Database layer ([src/db/client.ts](src/db/client.ts), [src/db/queries.ts](src/db/queries.ts), migrations up through `007_email_templates.sql`)
 - **Step 3** ✅ Shopify Admin API client and webhook HMAC verification ([src/shopify/](src/shopify/), [src/lib/hmac.ts](src/lib/hmac.ts))
 - **Step 4** ✅ Webhook receivers ([src/routes/webhooks.ts](src/routes/webhooks.ts)) + one-time installer ([src/scripts/install-webhooks.ts](src/scripts/install-webhooks.ts))
 - **Step 5** ✅ Backfill ([src/shopify/sync.ts](src/shopify/sync.ts), [src/scripts/backfill.ts](src/scripts/backfill.ts))
@@ -710,52 +710,130 @@ Brand uses an existing Gmail account with a custom-domain alias (`reviews@brandn
 - **Step 9** ✅ Server-rendered admin UI ([src/routes/admin.ts](src/routes/admin.ts), [src/lib/auth.ts](src/lib/auth.ts))
 - **Step 10** ✅ GDPR webhook handlers (folded into Step 4's `webhooks.ts`)
 - **Step 11** ✅ Backup script ([scripts/backup.sh](scripts/backup.sh)) + sidecar service in `docker-compose.yml`
+- **Step 12** ✅ Google Cloud relay (Caddy + Tailscale) — GCP e2-micro VM running, DNS A records at Squarespace, App Proxy configured on the dev store. See [external-accounts-setup.md](external-accounts-setup.md).
+- **Step 13** ⏳ Yotpo cleanup on the **live** store (pending live-store deployment).
+- **Step 14** ⏳ Theme integration on the **live** store (pending live-store deployment; dev-store theme integration done).
 
-`npm run typecheck` and `npm run build` both pass.
+### Features built beyond the original plan
+
+These were either added during the build as user-priority items or evolved from in-flight design conversations:
+
+- **Sample invitations** — single-create form, CSV batch upload with template download, CSV export with mail-merge URLs; admin Branding/Invitations tab; "Verified Reviewer" badge to distinguish from purchase-verified reviews.
+- **Per-variant + related reviews** — Shopify metafield `reviews.variant_handling = 'distinct'` per product; when set, reviews are filtered by variant on display and a "Customers also reviewed these variants" section surfaces sibling reviews.
+- **Storefront-customer review submission via Shopify App Proxy** — logged-in customers submit and edit reviews directly from product pages through a modal dialog; HMAC-verified customer identity from Shopify; verified_kind set to 'purchase' when the customer has a prior purchase of the product, null otherwise.
+- **Branding admin page** with Widget and Email tabs:
+  - Widget tab: star color, CTA background/foreground, border radius, with full hex picker + 13-color preset palette + Shopify-default inheritance + live in-admin mockup that updates as you edit + click-to-edit on mockup elements
+  - Email tab: shared email branding (logo, footer text, sender name, reply-to) + per-template editing (subject, body HTML, CTA enable/label, active flag) + "Preview in new tab" rendering with sample data
+- **Email template architecture** — `email_templates` table with shared shell-wrapper pattern; supports any number of templates keyed by string identifiers; default templates seeded on first boot.
+- **Multi-product email batching** — one email per (customer, order), with each product's CTA inline.
+- **Suppression audit logging** — dispatcher emits per-run breakdown of why purchases were excluded (globalOptOut, productOptOut, maxRequestsHit, cadenceTooSoon, alreadyReviewed).
+- **Re-subscribe with backlog clear** — admin re-subscribing a customer wipes their pending `due_at` values so they don't get a flood of backfill emails.
+- **"Dispatch immediately on fulfillment" dev toggle** — for testing without waiting 14 days.
+- **Dynamic-DOM-friendly widget** — MutationObserver picks up late-loading widget elements (related products, variant-change section re-renders, etc.), not just elements present at DOMContentLoaded.
+- **Configurable dispatcher schedule** — admin sets daily run time in their local timezone via a 12-hour-format dropdown; system stores UTC.
+- **Brand sync from Shopify** — admin button pulls shop.brand metafield (primary/secondary colors, logo, slogan) and caches; used as defaults for widget and email branding.
+- **Self-configuring widget bundle** — widget detects its API base at runtime from its own script src, so the same bundle works on dev and prod.
+- **Native HTML5 dialog** for the storefront-customer review modal (focus trap, backdrop, mobile-responsive — all built-in).
 
 ### Conventions adopted during build (deviations from earlier draft)
 
 - **All persisted timestamps are unix seconds**, matching SQLite's `unixepoch()`. Helpers in [src/lib/time.ts](src/lib/time.ts). The earlier scaffold mixed `Date.now()` (ms) and `unixepoch()` (s); standardized on seconds.
-- **Per-run dispatcher cap** is now stored in `settings.cadence_dispatcher_batch` (default 100), not hardcoded in the SQL. Adjustable from the admin settings page.
-- **Runtime CLI scripts** (install-webhooks, backfill, dispatch) live under [src/scripts/](src/scripts/) so they compile to `dist/scripts/` and run inside the container. Build-time scripts (esbuild config, copy-assets) stay in [scripts/](scripts/).
+- **Per-run dispatcher cap** is stored in `settings.cadence_dispatcher_batch` (default 100), not hardcoded in the SQL. Adjustable from the admin settings page.
+- **Runtime CLI scripts** (install-webhooks, backfill, dispatch, install-shopify) live under [src/scripts/](src/scripts/) so they compile to `dist/scripts/` and run inside the container. Build-time scripts (esbuild config, copy-assets) stay in [scripts/](scripts/).
+- **GDPR-mandatory webhook topics** (customers/data_request, customers/redact, shop/redact) are configured at the app-version level in dev.shopify.com, NOT subscribed via the GraphQL `webhookSubscriptionCreate` mutation. Shopify deprecated GraphQL-side subscription for these topics in late 2025.
+- **Shopify static-token install flow was deprecated for merchant-owned stores effective 2026-01-01.** We use the new Dev Dashboard's OAuth-grant install via a one-shot helper script (`install-shopify.ts`) that captures the permanent Admin API token. Token prefix is `shpua_` (new format), not the legacy `shpat_`.
+- **Product cache has a 1-hour TTL** in `products_cache.updated_at`; the manual "Refresh product cache" button on the Branding page flushes immediately for the impatient.
 
-### Remaining work (steps 12–14, all external configuration, not code)
+### What's left to ship before live-store launch
 
-- **Step 12** Google Cloud relay (Caddy + Tailscale) — needs GCP account, e2-micro Always-Free VM, A records added at Squarespace. See [external-accounts-setup.md](external-accounts-setup.md). Oracle Cloud was attempted first but its image catalog failed to populate; switched to GCP for a smoother signup. Cloudflare Tunnel was the original plan but Cloudflare's free-tier subdomain zone path is no longer available.
-- **Step 13** Yotpo cleanup on the live store — walk through with the owner.
-- **Step 14** Theme integration on the live store — walk through with the owner.
-
-Before any of those, the stack must deploy successfully to Mercury's dev environment with a working `.env` (Shopify dev-store token, Gmail app password, secrets generated). Verification gates per §7 should be exercised in order against the dev stack.
+1. Step 13 — Yotpo cleanup on the live brand store (theme code edits + metafield removal). Risky; walked through with owner, not autonomous.
+2. Step 14 — widget integration on the live (Trademark 1.7.3) theme. Different file paths than the dev-store Dawn-derivative theme.
+3. Install Reviews app on the live store (the dev.shopify.com Collaboration wrinkle — the live store is not currently in the Teraclay org).
+4. Stand up `/opt/stacks/shopify-reviews/` prod stack on Mercury with fresh secrets, live store domain, and port 8080.
+5. DNS A record for `reviews.<brand>` at Squarespace (already done for dev).
+6. App Proxy configuration on the live-store install for storefront-customer review submission.
 
 ---
 
 ## 15. Post-MVP Roadmap
 
-Features deferred to after MVP launch, in priority order based on impact-per-hour. Update this list as priorities shift; the order is a snapshot, not a contract.
+Features deferred to after MVP launch. Update this list as priorities shift; the order is a snapshot, not a contract.
 
-### Prioritized next (next ~4 items to tackle)
+### Roadmap items completed (chronological-ish)
 
-1. **Storefront-customer review submission.** Logged-in customers on the storefront submit reviews without an email-link token, and can edit their own existing reviews. Unblocks the interactive "Be the first to review" CTA and broadens the review-collection surface beyond email-triggered flows. Likely requires Shopify App Proxy for HMAC-signed customer identity (anything client-side without proxy is spoofable). Capped at one review per customer per product.
+- ✅ Storefront-customer review submission (Shopify App Proxy + modal dialog + edit-your-own-review)
+- ✅ Aggregate widget on collection cards (theme div added; widget renders inline)
+- ✅ Per-variant + related reviews (Shopify metafield-driven; sibling-variant "related" section)
+- ✅ Sample-invitation tooling (single + batch CSV + export with mail-merge URLs)
+- ✅ Branding admin page (widget visual customization + email template + shared email branding)
+- ✅ Multi-product email batching (one email per order with all products inline)
 
-2. **Aggregate widget on collection cards.** The widget already supports `data-reviews-widget="aggregate"` mode rendering filled stars + count in parentheses with no "Reviews" word. Just needs the placeholder `<div>` added to the storefront's product-card snippet. Quick theme work.
+### Prioritized next — Chunk A: Moderation, reporting, notifications
 
-3. **Visual polish — widget.** SVG-based star rendering (crisper at any size than text characters), refined review-card typography and spacing, smooth open/close animation on the collapsible details element, more deliberate empty-state. Pure CSS/SVG work in `widget.ts`'s inline styles.
+These share data-model and UI surfaces; cleanest as one focused build.
 
-4. **Per-variant + related reviews.** Schema already has `shopify_variant_id` on purchases and reviews. Add per-product config for whether variants share reviews (sizes — single review pool per product) or are treated as distinct products (flavors — review pool per variant). When distinct, optionally show "related reviews" from sibling variants below the main list.
+1. **Retract-with-reason + audit log.** Existing `status='rejected'` already exists; this adds a `moderation_reason` field (enum: profanity, spam, off-topic, not-a-customer, harassment, personal-info, legal-takedown), a `moderation_note` free-text field, and an audit log table capturing who retracted, when, and why. Optional: customer-facing email when their review is retracted, with reason; optional: a public "review moderation policy" page linked from the storefront widget footer.
+
+2. **Profanity wordlist (light filter only).** Admin-editable list of words to censor as `****` in submitted reviews before publishing. No held-pending state, no AI moderation; the trust model is publish-immediately. Configurable in Settings.
+
+3. **"Pause reviews" panic button.** Admin emergency control: pause all review display and submission with one click + significant confirmation + required reason. Auto-expires after 72 hours unless extended. While paused: widget shows "Reviews are temporarily unavailable" on the storefront; all submission paths (email-link, sample, App Proxy) return 503. Auto-emails the developer when activated. Audit log captures every pause/resume.
+
+4. **Reported reviews moderation queue.** New `review_reports` table; storefront adds a "Report this review" link → modal with reason dropdown + optional message + optional reporter email. Admin "Reports" page groups reports by review with quick actions: dismiss, retract review (sets moderation_reason), ban reporter email from future reports.
+
+5. **Configurable new-review notifications.** Master toggle, recipient email, star-rating checkboxes (any combination of 1-5 triggers). Routes through existing Gmail SMTP.
+
+### Prioritized next — Chunk B: Search, filters, storefront UX polish
+
+6. **Reviews list search + filters in admin** (full Reviews tab redesign):
+   - Filter by rating, date range, product, customer email, status, verified_kind, has-merchant-reply
+   - Full-text search across title and body (SQLite FTS5)
+   - Sort options
+7. **Storefront sort/filter on reviews list**:
+   - Content search box
+   - Sort by rating (high-to-low, low-to-high)
+   - Sort by date (newest, oldest)
+   - Filter by verified (any verification badge vs unverified)
+8. **Configurable widget pagination** — dropdown for page size (5/10/15/20/25), default 20. "Load more reviews" button at end of current page when more pages exist.
+9. **Per-product "skip review requests" metafield.** Same Shopify metafield pattern as `variant_handling`: namespace `reviews`, key `skip_requests` (boolean). When true, dispatcher excludes the product's purchases from eligibility. For gift cards, services, sensitive products, etc.
+10. **Configurable minimum review body length.** Default 0 (star-only allowed). Admin setting on Settings page.
+11. **Visual polish — widget.** SVG stars instead of text characters, smooth disclosure animation on `<details>`, refined typography hierarchy, polished empty-state. Pure CSS/SVG work.
+
+### Prioritized next — Chunk C: Operations, analytics, observability
+
+12. **Per-customer data export.** Admin action that downloads a customer's full data (reviews, purchases, email events, opt-out status, sample invitations they consumed) as JSON or CSV. Customer-facing GDPR/CCPA support tool. Build at admin level for now; layer a developer-level cross-store export when multi-tenant.
+13. **Backup management UI.** Backup container writes `/data/backup-status.json` after each run; admin Settings card surfaces: last-run timestamp, file size, last-success status. "Run backup now" button touches a trigger file the backup container watches.
+14. **System health card on Dashboard.** Store-facing info: dispatcher last-run timestamp + outcome, pending reports count, last review received, last backup. "Is the system OK at a glance" answer.
+15. **Analytics — trends over time.** Avg rating by month, review volume by month, response rate (% of email sends that produced a review). Data is already there in `reviews` and `email_events`; this is admin-UI work.
+16. **Analytics — per-product.** Which products get reviewed most/least, avg rating per product, response rate per product, products with many purchases but few reviews. Surfaces what's working and what's missing.
+17. **Analytics — email funnel.** Sent → opened (requires pixel; opt-in if added) → clicked (we already have the data via token clicks) → submitted. Useful for tuning subject lines and cadence.
 
 ### Held for later
 
-- **Visual polish — emails.** Logo header (we already pull `logoUrl` from Shopify brand sync), better typography hierarchy, on-brand spacing, branded footer.
+- **Visual polish — emails.** Logo header refinements, better typography hierarchy, on-brand spacing.
 - **Photos in reviews.** Schema is ready (`review_media` table). Need upload handling on submission, storage (Mercury filesystem to start, CDN-pluggable later), and display in widget.
 - **Q&A on products.** Schema is ready (`questions` table). Need submission UI, admin moderation, display on product page.
-- **Merchant replies on storefront.** Admin already has the form to write replies (`merchant_reply` column). Need the widget to surface them inline below each review.
-- **Admin UI polish.** Customer search, per-product analytics, batch moderation, email-events timeline per customer.
+- **Merchant replies on storefront widget.** Admin already has the form to write replies (`merchant_reply` column); the storefront widget needs to surface them inline below each review.
+- **Email-template trigger system (v2).** Replace the current "if customer has prior reviews use repeat else use first" heuristic with a configurable per-template trigger system: event (fulfilled, email sent, review submitted), delay, exclusion criteria. Substantial design work — only worth doing when we have more than 2-3 templates.
+- **Per-product cadence overrides.** Shopify metafield to override `request_delay_days` per product (e.g., 5 days for consumables, 30 for high-consideration purchases).
+- **Webhook replay v2.** Current `/admin/sync` does 90-day backfill blunt-instrument style. Future: selectable time range, per-order replay, per-webhook-type replay, visibility into what got synced.
 
 ### Future considerations (further out)
 
 - **Affiliate/influencer platform** as a separate self-hosted service alongside reviews on the same infrastructure (Mercury + GCP relay + Caddy).
-- **Multi-tenant retrofit** if the project ever serves more than one store. Memory notes estimate ~2-3 weeks with the email layer being the largest single piece.
+- **Multi-tenant retrofit** if the project ever serves more than one store. Estimated 2-3 weeks with the email layer being the largest single piece.
 - **Self-hosted small websites** on the same Mercury + GCP relay stack — would coexist via additional subdomains routed through the same Caddy instance.
+- **Outgoing webhooks** — fire events to external services (Klaviyo, Slack, custom integrations) when reviews submit or get reported. Build iteratively as specific integrations are requested rather than speculatively.
+
+### Explicitly NOT building (decisions made during planning)
+
+These were considered and turned down. Don't re-propose unless the user brings them up.
+
+- **Pre-publish moderation (auto-publish vs queue toggle).** Trust model: publish-immediately, retract-with-reason only. Brand-controlled pre-publish queues hurt the trust signal on reviews. Captured under Chunk A item 1.
+- **Auto-flag by rating.** Same reason — that's a form of pre-publish gating for negative reviews.
+- **Bulk moderation actions.** Without pre-publish moderation, bulk operations aren't needed; search/filter on the Reviews list serves the same goal.
+- **Reply-template snippets.** Encourage genuine, targeted merchant replies; if a brand wants to reuse text, they can copy-paste.
+- **Shopify customer tag sync.** Adds Shopify-write coupling and doesn't fit the brand's marketing flow. The underlying data is already queryable in our admin for manual segmentation.
+- **Reviewer attribution options beyond first-name-only.** First-name from Shopify customer record is the answer; sample-invite reviews use the first word of the invitation's intended_name.
 
 ---
 
