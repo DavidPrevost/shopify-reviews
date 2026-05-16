@@ -22,8 +22,16 @@ import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.j
 import { parse as parseCsv } from 'csv-parse/sync';
 import { getOrFetchProduct } from '../shopify/product-info.js';
 import { parseProductId } from '../shopify/parse-product-id.js';
+import {
+  resolveWidgetConfig,
+  getShopifyDefaults,
+  getWidgetOverrides,
+  isValidHexColor,
+  PRESET_PALETTE,
+  HARDCODED_DEFAULTS,
+} from '../shopify/widget-config.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
-import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
+import { fetchShopifyBrand } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { restartScheduler } from '../scheduler/cron.js';
 import {
@@ -49,6 +57,7 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     { href: '/admin/dashboard',           label: 'Dashboard',   key: 'dashboard' },
     { href: '/admin/reviews',             label: 'Reviews',     key: 'reviews' },
     { href: '/admin/sample-invitations',  label: 'Invitations', key: 'invitations' },
+    { href: '/admin/branding',            label: 'Branding',    key: 'branding' },
     { href: '/admin/settings',            label: 'Settings',    key: 'settings' },
   ];
   const navHtml = tabs
@@ -209,6 +218,14 @@ admin.use('/sample-invitations', async (c, next) => {
   await next();
 });
 admin.use('/sample-invitations/*', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/branding', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/branding/*', async (c, next) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
   await next();
 });
@@ -825,26 +842,227 @@ admin.post('/sample-invitations', async (c) => {
   return c.redirect(`/admin/sample-invitations?created=${encodeURIComponent(token)}`);
 });
 
-// --- Settings ---
+// --- Branding ---
 
-admin.get('/settings', (c) => {
-  const savedFlash = c.req.query('saved') === '1' ? '<div class="ok">Settings saved.</div>' : '';
-  const cacheFlash = c.req.query('cache_refreshed') !== undefined
-    ? `<div class="ok">Cleared ${escapeHtml(c.req.query('cache_refreshed') ?? '0')} cached product${c.req.query('cache_refreshed') === '1' ? '' : 's'}. The next storefront load (or admin operation) for each product will re-fetch from Shopify, picking up any updated metafields or product changes.</div>`
-    : '';
-  const flash = savedFlash + cacheFlash;
-  const cadenceMax = getSettingNumber('cadence_max_requests', 3);
-  const cadenceMin = getSettingNumber('cadence_min_days_between', 7);
-  const requestDelay = getSettingNumber('request_delay_days', 7);
-  const dispatcherBatch = getSettingNumber('cadence_dispatcher_batch', 100);
-  const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
-  const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
-  const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
+// Shared widget CSS snippet rendered into the admin Branding page so the
+// mockup looks pixel-identical to the live storefront widget. Keep this in
+// sync with the inlined STYLES string in src/widget/widget.ts whenever
+// widget visuals change; the alternative (loading the widget bundle into
+// the admin and running it for real) requires either real product data or
+// a mock-data branch in the bundle.
+const widgetMockupCss = `
+  .rv-mockup-frame {
+    background: #f6f6f6;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 32px;
+    margin-bottom: 24px;
+    min-height: 280px;
+  }
+  .rv-mockup-frame .rv-widget {
+    font-family: inherit;
+    color: #222;
+    font-size: 16px;
+    line-height: 1.5;
+    margin: 0 auto;
+    max-width: 720px;
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  }
+  .rv-mockup-frame .rv-stars {
+    display: inline-flex;
+    gap: 1px;
+    color: var(--reviews-star-color, #f5a623);
+    letter-spacing: 1px;
+    font-size: 1em;
+  }
+  .rv-mockup-frame .rv-star { opacity: 0.25; }
+  .rv-mockup-frame .rv-star-on { opacity: 1; }
+  .rv-mockup-frame .rv-aggregate {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+  }
+  .rv-mockup-frame .rv-aggregate-text {
+    font-size: 0.9em; opacity: 0.85;
+  }
+  .rv-mockup-frame .rv-header {
+    display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: space-between; gap: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid rgba(127,127,127,0.25);
+  }
+  .rv-mockup-frame .rv-cta-button {
+    background: var(--reviews-cta-bg, #222);
+    color: var(--reviews-cta-fg, #fff);
+    border: none;
+    border-radius: var(--reviews-border-radius, 6px);
+    padding: 8px 16px;
+    font-size: 0.9em;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .rv-mockup-frame .rv-list {
+    list-style: none !important; padding: 0; margin: 1rem 0 0;
+  }
+  .rv-mockup-frame .rv-review {
+    padding: 1rem 0;
+    border-bottom: 1px solid rgba(127,127,127,0.18);
+  }
+  .rv-mockup-frame .rv-review:last-child { border-bottom: none; }
+  .rv-mockup-frame .rv-review-head {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: 0.75rem; margin-bottom: 0.25rem;
+  }
+  .rv-mockup-frame .rv-review-title { font-size: 1em; font-weight: 600; }
+  .rv-mockup-frame .rv-review-meta {
+    display: flex; flex-wrap: wrap; gap: 0.75rem;
+    font-size: 0.85em; opacity: 0.85; margin-bottom: 0.5rem;
+  }
+  .rv-mockup-frame .rv-review-author { font-weight: 500; }
+  .rv-mockup-frame .rv-review-verified {
+    font-style: italic; font-weight: normal;
+    opacity: 0.7; font-size: 0.95em;
+  }
+  .rv-mockup-frame .rv-review-body {
+    font-size: 0.95em; line-height: 1.55;
+  }
+
+  /* Editor-specific styling */
+  .rv-mockup-target {
+    cursor: pointer;
+    transition: outline 0.15s;
+    outline: 1px dashed transparent;
+    outline-offset: 4px;
+    border-radius: 2px;
+  }
+  .rv-mockup-target:hover {
+    outline-color: #0a8a3a;
+  }
+  .rv-mockup-target.rv-mockup-active {
+    outline: 2px solid #0a8a3a;
+    outline-offset: 4px;
+  }
+  .color-field-row { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 16px; }
+  .color-field-inputs { display: flex; align-items: center; gap: 8px; }
+  .color-field-inputs input[type="color"] { width: 48px; height: 36px; padding: 0; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+  .color-field-inputs input[type="text"] { width: 110px; font-family: monospace; }
+  .color-field-default { font-size: 12px; color: #888; }
+  .color-field-reset { font-size: 11px; padding: 4px 8px; }
+  .color-presets { display: flex; flex-wrap: wrap; gap: 4px; }
+  .color-presets button {
+    width: 28px; height: 28px;
+    border: 1px solid rgba(0,0,0,0.15);
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.1s;
+  }
+  .color-presets button:hover { transform: scale(1.1); }
+  .range-field-inputs { display: flex; align-items: center; gap: 12px; }
+  .range-field-inputs input[type="range"] { flex: 1; max-width: 240px; }
+  .range-field-inputs .range-value { font-family: monospace; min-width: 40px; }
+`;
+
+const renderBrandingMockup = (): string => `
+  <div class="rv-mockup-frame">
+    <div class="rv-widget rv-widget-full">
+      <div class="rv-header">
+        <span class="rv-aggregate">
+          <span class="rv-stars rv-mockup-target" data-rv-edit="starColor" title="Click to edit star color">
+            <span class="rv-star rv-star-on">★</span>
+            <span class="rv-star rv-star-on">★</span>
+            <span class="rv-star rv-star-on">★</span>
+            <span class="rv-star rv-star-on">★</span>
+            <span class="rv-star rv-star-on">★</span>
+          </span>
+          <span class="rv-aggregate-text">4.8 (12)</span>
+        </span>
+        <button type="button" class="rv-cta-button rv-mockup-target" data-rv-edit="ctaBackground" title="Click to edit button color">Write a review</button>
+      </div>
+      <ul class="rv-list">
+        <li class="rv-review">
+          <div class="rv-review-head">
+            <span class="rv-stars rv-mockup-target" data-rv-edit="starColor" title="Click to edit star color">
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+            </span>
+            <strong class="rv-review-title">Excellent product</strong>
+          </div>
+          <div class="rv-review-meta">
+            <span class="rv-review-author">Maria</span>
+            <span>May 2026</span>
+            <span class="rv-review-verified">Verified Buyer</span>
+          </div>
+          <div class="rv-review-body">Exactly what I was hoping for. The quality is great and it arrived faster than expected. Will definitely buy from this brand again.</div>
+        </li>
+        <li class="rv-review">
+          <div class="rv-review-head">
+            <span class="rv-stars rv-mockup-target" data-rv-edit="starColor">
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star rv-star-on">★</span>
+              <span class="rv-star">★</span>
+            </span>
+            <strong class="rv-review-title">Good, with one small note</strong>
+          </div>
+          <div class="rv-review-meta">
+            <span class="rv-review-author">Alex</span>
+            <span>Apr 2026</span>
+            <span class="rv-review-verified">Verified Reviewer</span>
+          </div>
+          <div class="rv-review-body">Honestly really pleased. The packaging could be a bit nicer but the product itself is solid.</div>
+        </li>
+      </ul>
+    </div>
+  </div>
+`;
+
+admin.get('/branding', (c) => {
+  const overrides = getWidgetOverrides();
+  const shopify = getShopifyDefaults();
+  const resolved = resolveWidgetConfig();
+  const flash = c.req.query('saved') === '1' ? '<div class="ok">Branding saved.</div>' : '';
+
+  const presetSwatches = (fieldId: string) => PRESET_PALETTE
+    .map((p) => `<button type="button" data-preset-for="${fieldId}" data-color="${p.hex}" style="background:${p.hex};" title="${escapeHtml(p.name)} (${p.hex})" aria-label="${escapeHtml(p.name)}"></button>`)
+    .join('');
+
+  const colorField = (opts: {
+    id: string;
+    label: string;
+    description: string;
+    overrideValue: string | null;
+    shopifyValue: string | null;
+    hardcodedFallback: string;
+  }) => {
+    const effective = opts.overrideValue ?? opts.shopifyValue ?? opts.hardcodedFallback;
+    const hasOverride = opts.overrideValue !== null;
+    const defaultSource = opts.shopifyValue ? `Shopify default: <code>${escapeHtml(opts.shopifyValue)}</code>` : `Default: <code>${escapeHtml(opts.hardcodedFallback)}</code>`;
+    return `
+      <div class="color-field-row" data-field-row="${opts.id}">
+        <label for="cf-${opts.id}-color">${escapeHtml(opts.label)}</label>
+        <p class="muted" style="margin:0;">${opts.description}</p>
+        <div class="color-field-inputs">
+          <input type="color" id="cf-${opts.id}-color" data-color-input="${opts.id}" value="${escapeHtml(effective)}">
+          <input type="text"  id="cf-${opts.id}-text"  data-text-input="${opts.id}" value="${escapeHtml(effective)}" maxlength="7" pattern="^#[0-9a-fA-F]{6}$" placeholder="#RRGGBB">
+          <button type="button" class="color-field-reset" data-reset-for="${opts.id}" ${hasOverride ? '' : 'disabled'}>Reset to default</button>
+        </div>
+        <div class="color-field-default">${defaultSource}${hasOverride ? ' · <strong style="color:#0a8a3a;">overridden</strong>' : ''}</div>
+        <div class="color-presets">${presetSwatches(opts.id)}</div>
+        <input type="hidden" name="${opts.id}" data-hidden-for="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}">
+      </div>
+    `;
+  };
+
+  // Shopify brand sync block — moved here from Settings since brand info
+  // feeds the widget styling defaults. Mirrors the previous Settings block.
   const brandJsonRaw = getSetting('shop_brand_json') ?? '{}';
-  const resolvedColors = resolveBrandColors(brandJsonRaw);
-
-  // Try to extract whether Shopify-side brand info is actually populated for
-  // the preview block. If parsing fails, show no preview.
   let brandPreviewHtml = '';
   try {
     const parsed = JSON.parse(brandJsonRaw);
@@ -865,8 +1083,269 @@ admin.get('/settings', (c) => {
       brandPreviewHtml = `<p class="muted" style="margin: 8px 0 16px;">No brand info synced yet. Click below to fetch from Shopify, or set brand colors in your Shopify admin (Settings → Brand) first.</p>`;
     }
   } catch {
-    brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — sync to overwrite, or fix the JSON below)</p>';
+    brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — sync to overwrite)</p>';
   }
+
+  const widgetTab = `
+    <div class="card">
+      <h3 style="margin-top:0;">Shopify brand defaults</h3>
+      <p class="muted">These values are pulled from your Shopify store (Settings → Brand) and used as the defaults for every field below. Edit your brand colors on Shopify's side and click the sync button to pull updates.</p>
+      ${brandPreviewHtml}
+      <form method="POST" action="/admin/settings/sync-brand" style="margin:0;">
+        <button type="submit">Sync brand info from Shopify</button>
+      </form>
+    </div>
+
+    <p class="muted">Click any element on the mockup below to jump to its editor. Edit any field below the mockup to see changes reflected instantly. Fields default to Shopify brand colors when you haven't set a custom value; click "Reset to default" on any field to clear the override.</p>
+
+    ${renderBrandingMockup()}
+
+    <form method="POST" action="/admin/branding" id="branding-form">
+      <input type="hidden" name="tab" value="widget">
+      <h3 style="margin-top:0;">Widget colors and shape</h3>
+
+      ${colorField({
+        id: 'starColor',
+        label: 'Star color',
+        description: 'Used for review-rating stars throughout the storefront.',
+        overrideValue: overrides.starColor,
+        shopifyValue: shopify.starColor,
+        hardcodedFallback: HARDCODED_DEFAULTS.starColor,
+      })}
+
+      ${colorField({
+        id: 'ctaBackground',
+        label: 'CTA button background',
+        description: 'Background of the "Write a review" and "Submit" buttons.',
+        overrideValue: overrides.ctaBackground,
+        shopifyValue: shopify.ctaBackground,
+        hardcodedFallback: HARDCODED_DEFAULTS.ctaBackground,
+      })}
+
+      ${colorField({
+        id: 'ctaForeground',
+        label: 'CTA button text',
+        description: 'Text color on the "Write a review" and "Submit" buttons. Pick a color with strong contrast against the button background.',
+        overrideValue: overrides.ctaForeground,
+        shopifyValue: shopify.ctaForeground,
+        hardcodedFallback: HARDCODED_DEFAULTS.ctaForeground,
+      })}
+
+      <div class="color-field-row">
+        <label for="cf-borderRadius-range">Border radius</label>
+        <p class="muted" style="margin:0;">How rounded the CTA buttons appear. 0 is fully square; 20 is fully pill-shaped.</p>
+        <div class="range-field-inputs">
+          <input type="range" id="cf-borderRadius-range" min="0" max="20" step="1" value="${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}" data-range-input="borderRadius">
+          <span class="range-value" data-range-value="borderRadius">${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}px</span>
+          <button type="button" class="color-field-reset" data-reset-for="borderRadius" ${overrides.borderRadius !== null ? '' : 'disabled'}>Reset to default</button>
+        </div>
+        <input type="hidden" name="borderRadius" data-hidden-for="borderRadius" value="${overrides.borderRadius !== null ? overrides.borderRadius : ''}">
+      </div>
+
+      <div style="margin-top:24px;">
+        <button type="submit" class="primary">Save branding</button>
+      </div>
+    </form>
+  `;
+
+  const emailTab = `
+    <p class="muted">Email template customization is on the roadmap and lands next. For now, emails use the brand colors synced from Shopify (or the neutral fallback when none are set) and the default templates baked into the app.</p>
+    <div class="card" style="background:#fff8e1; border:1px solid #ffd54f;">
+      <p style="margin:0;">When this section launches you'll be able to edit subject lines, body copy, the CTA button label, the logo header, and the footer text — all with the same Shopify-default-plus-override pattern as the widget styling on the Widget tab.</p>
+    </div>
+  `;
+
+  return c.html(adminShell('Branding', `
+    ${flash}
+    <h2>Branding</h2>
+
+    <nav class="tabs" id="branding-tabs">
+      <a href="#widget" data-tab="widget">Widget</a>
+      <a href="#email"  data-tab="email">Email</a>
+    </nav>
+
+    <section id="tab-widget" class="tab-panel" data-tab="widget">${widgetTab}</section>
+    <section id="tab-email"  class="tab-panel" data-tab="email">${emailTab}</section>
+
+    <style>${widgetMockupCss}</style>
+
+    <script>
+      (function () {
+        // --- Initial CSS variables on the mockup, from server-rendered config ---
+        var resolved = ${JSON.stringify(resolved)};
+        var mockup = document.querySelector('.rv-mockup-frame');
+        function applyToMockup(field, value) {
+          if (field === 'starColor')      mockup.style.setProperty('--reviews-star-color', value);
+          if (field === 'ctaBackground')  mockup.style.setProperty('--reviews-cta-bg', value);
+          if (field === 'ctaForeground')  mockup.style.setProperty('--reviews-cta-fg', value);
+          if (field === 'borderRadius')   mockup.style.setProperty('--reviews-border-radius', value + 'px');
+        }
+        Object.keys(resolved).forEach(function (k) { applyToMockup(k, resolved[k]); });
+
+        // --- Tab nav (same pattern as Invitations) ---
+        var tabs = document.querySelectorAll('#branding-tabs a');
+        var panels = document.querySelectorAll('.tab-panel');
+        function showTab(name) {
+          tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
+          panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
+        }
+        var hash = (location.hash || '').replace('#', '');
+        showTab(hash || 'widget');
+        tabs.forEach(function (a) {
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var name = a.dataset.tab;
+            history.replaceState(null, '', '#' + name);
+            showTab(name);
+          });
+        });
+
+        // --- Color field wiring: color picker, text input, presets, reset ---
+        function setOverrideField(field, value) {
+          // value === null means "no override" (reset to default).
+          var hidden = document.querySelector('[data-hidden-for="' + field + '"]');
+          var resetBtn = document.querySelector('[data-reset-for="' + field + '"]');
+          var resolvedNote = document.querySelector('[data-field-row="' + field + '"] .color-field-default strong');
+          hidden.value = value === null ? '' : value;
+          if (resetBtn) resetBtn.disabled = value === null;
+        }
+        function syncColorField(field, value) {
+          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
+          var textInput = document.querySelector('[data-text-input="' + field + '"]');
+          if (colorInput) colorInput.value = value;
+          if (textInput)  textInput.value = value;
+        }
+        ['starColor', 'ctaBackground', 'ctaForeground'].forEach(function (field) {
+          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
+          var textInput  = document.querySelector('[data-text-input="' + field + '"]');
+          var resetBtn   = document.querySelector('[data-reset-for="' + field + '"]');
+
+          colorInput.addEventListener('input', function () {
+            var v = colorInput.value;
+            textInput.value = v;
+            applyToMockup(field, v);
+            setOverrideField(field, v);
+          });
+          textInput.addEventListener('input', function () {
+            var v = textInput.value.trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+              colorInput.value = v;
+              applyToMockup(field, v);
+              setOverrideField(field, v);
+            }
+          });
+          resetBtn.addEventListener('click', function () {
+            // Reset to whatever the resolved default was at page load.
+            var v = resolved[field];
+            colorInput.value = v;
+            textInput.value = v;
+            applyToMockup(field, v);
+            setOverrideField(field, null);
+            // Reload the page after save to re-render the "overridden" tag.
+            // For now, just visually clear it.
+            var note = document.querySelector('[data-field-row="' + field + '"] .color-field-default strong');
+            if (note) note.remove();
+          });
+
+          // Preset swatches
+          document.querySelectorAll('[data-preset-for="' + field + '"]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+              var v = btn.dataset.color;
+              colorInput.value = v;
+              textInput.value = v;
+              applyToMockup(field, v);
+              setOverrideField(field, v);
+            });
+          });
+        });
+
+        // --- Border-radius range slider ---
+        var rangeInput = document.querySelector('[data-range-input="borderRadius"]');
+        var rangeValue = document.querySelector('[data-range-value="borderRadius"]');
+        var rangeReset = document.querySelector('[data-reset-for="borderRadius"]');
+        rangeInput.addEventListener('input', function () {
+          var v = Number(rangeInput.value);
+          rangeValue.textContent = v + 'px';
+          applyToMockup('borderRadius', v);
+          setOverrideField('borderRadius', v);
+        });
+        rangeReset.addEventListener('click', function () {
+          var v = resolved.borderRadius;
+          rangeInput.value = v;
+          rangeValue.textContent = v + 'px';
+          applyToMockup('borderRadius', v);
+          setOverrideField('borderRadius', null);
+        });
+
+        // --- Click-to-edit on the mockup: scroll the relevant form field
+        //     into view and flash a highlight so the user knows where to go. ---
+        document.querySelectorAll('.rv-mockup-target').forEach(function (el) {
+          el.addEventListener('click', function (e) {
+            e.preventDefault();
+            var field = el.dataset.rvEdit;
+            var row = document.querySelector('[data-field-row="' + field + '"]');
+            if (!row) return;
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Brief highlight flash so it's clear which row matches.
+            row.style.transition = 'background-color 0.4s';
+            row.style.backgroundColor = '#fffbcc';
+            setTimeout(function () { row.style.backgroundColor = ''; }, 800);
+            // Focus the text input for immediate editing.
+            var textInput = row.querySelector('[data-text-input="' + field + '"]');
+            if (textInput) textInput.focus();
+          });
+        });
+      })();
+    </script>
+  `, 'branding'));
+});
+
+admin.post('/branding', async (c) => {
+  const form = await c.req.formData();
+
+  const readColor = (key: string): string | null => {
+    const raw = String(form.get(key) ?? '').trim();
+    if (raw === '') return null;
+    return isValidHexColor(raw) ? raw : null;
+  };
+
+  const readNumber = (key: string, min: number, max: number): number | null => {
+    const raw = String(form.get(key) ?? '').trim();
+    if (raw === '') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    const clamped = Math.max(min, Math.min(max, Math.round(n)));
+    return clamped;
+  };
+
+  const overrides = {
+    starColor:     readColor('starColor'),
+    ctaBackground: readColor('ctaBackground'),
+    ctaForeground: readColor('ctaForeground'),
+    borderRadius:  readNumber('borderRadius', 0, 20),
+  };
+
+  setSetting('widget_config_json', JSON.stringify(overrides));
+  log('info', 'admin saved widget branding', overrides);
+
+  return c.redirect('/admin/branding?saved=1');
+});
+
+// --- Settings ---
+
+admin.get('/settings', (c) => {
+  const savedFlash = c.req.query('saved') === '1' ? '<div class="ok">Settings saved.</div>' : '';
+  const cacheFlash = c.req.query('cache_refreshed') !== undefined
+    ? `<div class="ok">Cleared ${escapeHtml(c.req.query('cache_refreshed') ?? '0')} cached product${c.req.query('cache_refreshed') === '1' ? '' : 's'}. The next storefront load (or admin operation) for each product will re-fetch from Shopify, picking up any updated metafields or product changes.</div>`
+    : '';
+  const flash = savedFlash + cacheFlash;
+  const cadenceMax = getSettingNumber('cadence_max_requests', 3);
+  const cadenceMin = getSettingNumber('cadence_min_days_between', 7);
+  const requestDelay = getSettingNumber('request_delay_days', 7);
+  const dispatcherBatch = getSettingNumber('cadence_dispatcher_batch', 100);
+  const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
+  const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
+  const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
 
   // Hour dropdown: 1-12
   const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -910,18 +1389,7 @@ admin.get('/settings', (c) => {
         <input type="hidden" name="dispatcher_hour" id="dispatcher_hour" value="${dispatcherHour}">
         <input type="hidden" name="dispatcher_minute" id="dispatcher_minute" value="${dispatcherMinute}">
 
-        <label>Brand info (synced from Shopify, applied to email button colors)</label>
-        ${brandPreviewHtml}
-        <p class="muted" style="margin: 4px 0 8px;">Resolved CTA color: <code>${escapeHtml(resolvedColors.ctaBackground)}</code> background, <code>${escapeHtml(resolvedColors.ctaForeground)}</code> text. Falls back to neutral defaults when Shopify has nothing configured.</p>
-
-        <details style="margin: 8px 0 16px;">
-          <summary style="cursor:pointer; font-size: 13px; color:#666;">Advanced: edit raw JSON</summary>
-          <textarea id="shop_brand_json" name="shop_brand_json" rows="6" style="margin-top:8px;">${escapeHtml(brandJsonRaw)}</textarea>
-        </details>
-
-        <p>
-          <button type="submit" formaction="/admin/settings/sync-brand" formnovalidate>Sync brand info from Shopify</button>
-        </p>
+        <p class="muted" style="margin: 8px 0;">Shopify brand colors and the widget appearance live on the <a href="/admin/branding">Branding</a> page.</p>
 
         <div style="margin-top:24px; padding:16px; background:#fff8e1; border:1px solid #ffd54f; border-radius:6px;">
           <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">

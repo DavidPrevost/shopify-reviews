@@ -214,7 +214,7 @@ const STYLES = `
   background: var(--reviews-cta-bg, #222);
   color: var(--reviews-cta-fg, #fff);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--reviews-border-radius, 6px);
   padding: 8px 16px;
   font-size: 0.9em;
   font-weight: 600;
@@ -348,6 +348,36 @@ const injectStylesOnce = (): void => {
   style.id = 'rv-widget-styles';
   style.textContent = STYLES;
   document.head.appendChild(style);
+};
+
+// Fetch admin-configured visual settings and apply them as CSS custom
+// properties on :root so the inline STYLES above pick them up. Best-effort:
+// any failure leaves widgets rendered with the default values baked into
+// var(...) fallbacks. Cached by the server for 5 minutes, so changes from
+// the admin Branding page propagate within that window.
+const applyWidgetConfig = async (): Promise<void> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/widget/config`, {
+      method: 'GET',
+      credentials: 'omit',
+    });
+    if (!res.ok) return;
+    const cfg = await res.json() as {
+      starColor?: string;
+      ctaBackground?: string;
+      ctaForeground?: string;
+      borderRadius?: number;
+    };
+    const root = document.documentElement;
+    if (cfg.starColor) root.style.setProperty('--reviews-star-color', cfg.starColor);
+    if (cfg.ctaBackground) root.style.setProperty('--reviews-cta-bg', cfg.ctaBackground);
+    if (cfg.ctaForeground) root.style.setProperty('--reviews-cta-fg', cfg.ctaForeground);
+    if (typeof cfg.borderRadius === 'number') {
+      root.style.setProperty('--reviews-border-radius', `${cfg.borderRadius}px`);
+    }
+  } catch {
+    // ignore — defaults stay in effect
+  }
 };
 
 const escapeHtml = (s: string): string =>
@@ -827,6 +857,7 @@ const initializeElement = (el: HTMLElement): void => {
 
 const init = (): void => {
   injectStylesOnce();
+  void applyWidgetConfig();
 
   // Initial scan — picks up widget elements that are in the DOM at
   // DOMContentLoaded.

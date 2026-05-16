@@ -13,6 +13,7 @@ import {
 } from '../db/queries.js';
 import { verifyReviewToken } from '../email/tokens.js';
 import { getOrFetchProduct } from '../shopify/product-info.js';
+import { resolveWidgetConfig } from '../shopify/widget-config.js';
 import { log } from '../lib/logger.js';
 
 const api = new Hono();
@@ -84,6 +85,15 @@ api.get('/products/:productId/reviews', async (c) => {
 api.get('/products/:productId/aggregate', (c) => {
   const productId = c.req.param('productId');
   return c.json(getProductAggregate(productId));
+});
+
+// Visual config the widget applies on init. Fully resolved: each field is a
+// concrete value (override → Shopify default → hardcoded fallback). Cached
+// for 5 minutes — config changes propagate within that window. No customer
+// data so safe to cache shared.
+api.get('/widget/config', (c) => {
+  c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
+  return c.json(resolveWidgetConfig());
 });
 
 interface SubmitBody {
