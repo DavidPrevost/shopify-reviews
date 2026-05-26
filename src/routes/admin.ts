@@ -1827,12 +1827,14 @@ const widgetMockupCss = `
   }
   .rv-mockup-frame .rv-widget {
     font-family: inherit;
-    color: #222;
+    /* Mirror the live widget: inherit shows a representative neutral card,
+       an explicit override shows the real color. */
+    color: var(--reviews-text, #222);
     font-size: 16px;
     line-height: 1.5;
     margin: 0 auto;
     max-width: 720px;
-    background: #fff;
+    background: var(--reviews-bg, #fff);
     padding: 20px;
     border-radius: 8px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.05);
@@ -2026,6 +2028,35 @@ admin.get('/branding', (c) => {
     `;
   };
 
+  // Like colorField, but for fields that inherit from the storefront theme by
+  // default (no Shopify-brand equivalent). When there's no override the text
+  // input is empty and the row reads "Inherits your storefront theme"; the
+  // color picker shows a neutral display value just so it has something to show.
+  const inheritColorField = (opts: {
+    id: string;
+    label: string;
+    description: string;
+    overrideValue: string | null;
+    displayWhenInherit: string;
+  }) => {
+    const hasOverride = opts.overrideValue !== null;
+    const display = opts.overrideValue ?? opts.displayWhenInherit;
+    return `
+      <div class="color-field-row" data-field-row="${opts.id}">
+        <label for="cf-${opts.id}-color">${escapeHtml(opts.label)}</label>
+        <p class="muted" style="margin:0;">${opts.description}</p>
+        <div class="color-field-inputs">
+          <input type="color" id="cf-${opts.id}-color" data-color-input="${opts.id}" value="${escapeHtml(display)}">
+          <input type="text"  id="cf-${opts.id}-text"  data-text-input="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}" maxlength="7" pattern="^#[0-9a-fA-F]{6}$" placeholder="inherit (theme)">
+          <button type="button" class="color-field-reset" data-reset-for="${opts.id}" ${hasOverride ? '' : 'disabled'}>Reset to inherit</button>
+        </div>
+        <div class="color-field-default">${hasOverride ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Inherits your storefront theme'}</div>
+        <div class="color-presets">${presetSwatches(opts.id)}</div>
+        <input type="hidden" name="${opts.id}" data-hidden-for="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}">
+      </div>
+    `;
+  };
+
   // Shopify brand sync block — moved here from Settings since brand info
   // feeds the widget styling defaults. Mirrors the previous Settings block.
   const brandJsonRaw = getSetting('shop_brand_json') ?? '{}';
@@ -2108,9 +2139,37 @@ admin.get('/branding', (c) => {
         <input type="hidden" name="borderRadius" data-hidden-for="borderRadius" value="${overrides.borderRadius !== null ? overrides.borderRadius : ''}">
       </div>
 
+      ${inheritColorField({
+        id: 'background',
+        label: 'Widget background',
+        description: 'Background of the reviews widget container. By default it inherits your theme — the preview shows a neutral card because the live storefront background cannot be seen here. Set a color to override.',
+        overrideValue: overrides.background,
+        displayWhenInherit: '#ffffff',
+      })}
+
+      ${inheritColorField({
+        id: 'text',
+        label: 'Widget text',
+        description: 'Text color inside the widget. Inherits your theme by default.',
+        overrideValue: overrides.text,
+        displayWhenInherit: '#222222',
+      })}
+
+      <div class="color-field-row" data-field-row="ctaLabel">
+        <label for="cf-ctaLabel">"Write a review" button text</label>
+        <p class="muted" style="margin:0;">The label on the review call-to-action button shown to logged-in customers.</p>
+        <input type="text" id="cf-ctaLabel" name="ctaLabel" value="${escapeHtml(overrides.ctaLabel ?? '')}" maxlength="40" placeholder="Write a review">
+        <div class="color-field-default">${overrides.ctaLabel ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Default: <code>Write a review</code>'}</div>
+      </div>
+
       <div style="margin-top:24px;">
         <button type="submit" class="primary">Save branding</button>
       </div>
+    </form>
+
+    <form method="POST" action="/admin/branding/reset" style="margin-top:12px;" onsubmit="return confirm('Reset all widget styling to the Shopify-synced brand defaults? This clears every override above.');">
+      <button type="submit">Reset all widget styling to Shopify defaults</button>
+      <p class="muted" style="font-size:12px;margin-top:4px;">Clears every override on this tab so colors fall back to your synced Shopify brand colors (and background/text return to inheriting the theme).</p>
     </form>
   `;
 
@@ -2260,6 +2319,10 @@ admin.get('/branding', (c) => {
           if (field === 'ctaBackground')  mockup.style.setProperty('--reviews-cta-bg', value);
           if (field === 'ctaForeground')  mockup.style.setProperty('--reviews-cta-fg', value);
           if (field === 'borderRadius')   mockup.style.setProperty('--reviews-border-radius', value + 'px');
+          // background/text: null = inherit, so remove the var to fall back.
+          if (field === 'background') { if (value) mockup.style.setProperty('--reviews-bg', value); else mockup.style.removeProperty('--reviews-bg'); }
+          if (field === 'text')       { if (value) mockup.style.setProperty('--reviews-text', value); else mockup.style.removeProperty('--reviews-text'); }
+          if (field === 'ctaLabel')   { var b = mockup.querySelector('.rv-cta-button'); if (b && value) b.textContent = value; }
         }
         Object.keys(resolved).forEach(function (k) { applyToMockup(k, resolved[k]); });
 
@@ -2357,6 +2420,61 @@ admin.get('/branding', (c) => {
           applyToMockup('borderRadius', v);
           setOverrideField('borderRadius', null);
         });
+
+        // --- Background / text: inherit-by-default color fields ---
+        ['background', 'text'].forEach(function (field) {
+          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
+          var textInput  = document.querySelector('[data-text-input="' + field + '"]');
+          var resetBtn   = document.querySelector('[data-reset-for="' + field + '"]');
+          function setNote(isOverride) {
+            var noteEl = document.querySelector('[data-field-row="' + field + '"] .color-field-default');
+            if (noteEl) noteEl.innerHTML = isOverride
+              ? '<strong style="color:#0a8a3a;">overridden</strong>'
+              : 'Inherits your storefront theme';
+          }
+          colorInput.addEventListener('input', function () {
+            var v = colorInput.value;
+            textInput.value = v;
+            applyToMockup(field, v);
+            setOverrideField(field, v);
+            setNote(true);
+          });
+          textInput.addEventListener('input', function () {
+            var v = textInput.value.trim();
+            if (v === '') { applyToMockup(field, null); setOverrideField(field, null); setNote(false); return; }
+            if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+              colorInput.value = v;
+              applyToMockup(field, v);
+              setOverrideField(field, v);
+              setNote(true);
+            }
+          });
+          resetBtn.addEventListener('click', function () {
+            textInput.value = '';
+            applyToMockup(field, null);
+            setOverrideField(field, null);
+            setNote(false);
+          });
+          document.querySelectorAll('[data-preset-for="' + field + '"]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+              var v = btn.dataset.color;
+              colorInput.value = v;
+              textInput.value = v;
+              applyToMockup(field, v);
+              setOverrideField(field, v);
+              setNote(true);
+            });
+          });
+        });
+
+        // --- CTA button label: live-update the mockup button text ---
+        var ctaLabelInput = document.getElementById('cf-ctaLabel');
+        if (ctaLabelInput) {
+          ctaLabelInput.addEventListener('input', function () {
+            var b = mockup.querySelector('.rv-cta-button');
+            if (b) b.textContent = ctaLabelInput.value.trim() || 'Write a review';
+          });
+        }
 
         // --- Click-to-edit on the mockup: scroll the relevant form field
         //     into view and flash a highlight so the user knows where to go. ---
@@ -2550,16 +2668,29 @@ admin.post('/branding', async (c) => {
     return clamped;
   };
 
+  const ctaLabelRaw = String(form.get('ctaLabel') ?? '').trim();
   const overrides = {
     starColor:     readColor('starColor'),
     ctaBackground: readColor('ctaBackground'),
     ctaForeground: readColor('ctaForeground'),
     borderRadius:  readNumber('borderRadius', 0, 20),
+    background:    readColor('background'),
+    text:          readColor('text'),
+    ctaLabel:      ctaLabelRaw === '' ? null : ctaLabelRaw.slice(0, 40),
   };
 
   setSetting('widget_config_json', JSON.stringify(overrides));
   log('info', 'admin saved widget branding', overrides);
 
+  return c.redirect('/admin/branding?saved=1');
+});
+
+admin.post('/branding/reset', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  // Clears every widget override so resolution falls back to Shopify brand
+  // colors (and background/text return to inheriting the theme).
+  setSetting('widget_config_json', '{}');
+  log('info', 'admin reset widget branding to defaults');
   return c.redirect('/admin/branding?saved=1');
 });
 

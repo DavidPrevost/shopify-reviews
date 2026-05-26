@@ -18,6 +18,11 @@ export interface ResolvedWidgetConfig {
   ctaBackground: string;
   ctaForeground: string;
   borderRadius: number;
+  // null = inherit from the storefront theme (the widget's default behavior).
+  // A hex string here is an explicit override that the widget applies.
+  background: string | null;
+  text: string | null;
+  ctaLabel: string;
 }
 
 export interface WidgetConfigOverrides {
@@ -25,6 +30,9 @@ export interface WidgetConfigOverrides {
   ctaBackground: string | null;
   ctaForeground: string | null;
   borderRadius: number | null;
+  background: string | null;
+  text: string | null;
+  ctaLabel: string | null;
 }
 
 export interface ShopifyDefaults {
@@ -38,7 +46,14 @@ export const HARDCODED_DEFAULTS: ResolvedWidgetConfig = {
   ctaBackground: '#222222',
   ctaForeground: '#ffffff',
   borderRadius: 6,
+  // Background and text inherit from the theme by default — this is the
+  // "survives a theme redesign" behavior. Explicit overrides opt out of it.
+  background: null,
+  text: null,
+  ctaLabel: 'Write a review',
 };
+
+export const DEFAULT_CTA_LABEL = 'Write a review';
 
 // Curated preset palette offered to admin users alongside the full color
 // picker. Keys match the names the user listed; values are chosen to render
@@ -91,6 +106,9 @@ export const getWidgetOverrides = (): WidgetConfigOverrides => {
     ctaBackground: raw?.ctaBackground ?? null,
     ctaForeground: raw?.ctaForeground ?? null,
     borderRadius: typeof raw?.borderRadius === 'number' ? raw.borderRadius : null,
+    background: raw?.background ?? null,
+    text: raw?.text ?? null,
+    ctaLabel: typeof raw?.ctaLabel === 'string' && raw.ctaLabel.trim() ? raw.ctaLabel.trim() : null,
   };
 };
 
@@ -102,6 +120,11 @@ export const resolveWidgetConfig = (): ResolvedWidgetConfig => {
     ctaBackground: overrides.ctaBackground ?? shopify.ctaBackground ?? HARDCODED_DEFAULTS.ctaBackground,
     ctaForeground: overrides.ctaForeground ?? shopify.ctaForeground ?? HARDCODED_DEFAULTS.ctaForeground,
     borderRadius: overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius,
+    // Background/text have no Shopify-brand equivalent that maps to the widget
+    // container, so they're either an explicit override or null (inherit).
+    background: overrides.background,
+    text: overrides.text,
+    ctaLabel: overrides.ctaLabel ?? HARDCODED_DEFAULTS.ctaLabel,
   };
 };
 

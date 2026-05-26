@@ -71,7 +71,10 @@ const API_BASE = detectApiBase();
 const STYLES = `
 .rv-widget {
   font-family: inherit;
-  color: inherit;
+  /* color/background inherit from the theme by default; an admin override sets
+     the --reviews-text / --reviews-bg custom properties to opt out. */
+  color: var(--reviews-text, inherit);
+  background: var(--reviews-bg, transparent);
   font-size: inherit;
   line-height: 1.5;
   margin: 2rem auto;
@@ -379,6 +382,12 @@ const injectStylesOnce = (): void => {
   document.head.appendChild(style);
 };
 
+// Admin-configurable label for the "Write a review" call-to-action. Unlike the
+// colors (which ride on CSS custom properties and apply whenever they land),
+// this is rendered as text, so init() awaits applyWidgetConfig() before the
+// first render to make sure the configured label is in place.
+let widgetCtaLabel = 'Write a review';
+
 // Fetch admin-configured visual settings and apply them as CSS custom
 // properties on :root so the inline STYLES above pick them up. Best-effort:
 // any failure leaves widgets rendered with the default values baked into
@@ -396,6 +405,9 @@ const applyWidgetConfig = async (): Promise<void> => {
       ctaBackground?: string;
       ctaForeground?: string;
       borderRadius?: number;
+      background?: string | null;
+      text?: string | null;
+      ctaLabel?: string;
     };
     const root = document.documentElement;
     if (cfg.starColor) root.style.setProperty('--reviews-star-color', cfg.starColor);
@@ -403,6 +415,13 @@ const applyWidgetConfig = async (): Promise<void> => {
     if (cfg.ctaForeground) root.style.setProperty('--reviews-cta-fg', cfg.ctaForeground);
     if (typeof cfg.borderRadius === 'number') {
       root.style.setProperty('--reviews-border-radius', `${cfg.borderRadius}px`);
+    }
+    // background/text are null = inherit; only set the var when an explicit
+    // override is present, so the default falls through to the theme.
+    if (cfg.background) root.style.setProperty('--reviews-bg', cfg.background);
+    if (cfg.text) root.style.setProperty('--reviews-text', cfg.text);
+    if (typeof cfg.ctaLabel === 'string' && cfg.ctaLabel.trim()) {
+      widgetCtaLabel = cfg.ctaLabel.trim();
     }
   } catch {
     // ignore — defaults stay in effect
@@ -855,7 +874,7 @@ const renderFull = async (
       if (!m) return '';
       const token = decodeURIComponent(m[1] ?? '');
       const url = `${API_BASE}/r/${encodeURIComponent(token)}`;
-      return `<a class="rv-write-link" href="${url}">Write a review</a>`;
+      return `<a class="rv-write-link" href="${url}">${escapeHtml(widgetCtaLabel)}</a>`;
     })();
 
     // Header CTA:
@@ -868,7 +887,7 @@ const renderFull = async (
         return `<a class="rv-cta-link" href="/account/login?return_url=${encodeURIComponent(returnUrl)}">Log in to write a review</a>`;
       }
       if (myReview) return `<button type="button" class="rv-cta-link" data-rv-edit="${myReview.id}">Edit your review</button>`;
-      return `<button type="button" class="rv-cta-button" data-rv-write="1">Write a review</button>`;
+      return `<button type="button" class="rv-cta-button" data-rv-write="1">${escapeHtml(widgetCtaLabel)}</button>`;
     })();
 
     // The "related" section surfaces when the product is variant-distinct
@@ -901,7 +920,7 @@ const renderFull = async (
 
     if (orderedReviews.length === 0) {
       const emptyCta = customerId && !myReview
-        ? `<div class="rv-empty-cta"><button type="button" class="rv-cta-button" data-rv-write="1">Write a review</button></div>`
+        ? `<div class="rv-empty-cta"><button type="button" class="rv-cta-button" data-rv-write="1">${escapeHtml(widgetCtaLabel)}</button></div>`
         : '';
       el.innerHTML = `
         <div class="rv-widget rv-widget-full">
@@ -1009,9 +1028,11 @@ const initializeElement = (el: HTMLElement): void => {
   else if (mode === 'aggregate') void renderAggregate(el, productId);
 };
 
-const init = (): void => {
+const init = async (): Promise<void> => {
   injectStylesOnce();
-  void applyWidgetConfig();
+  // Await config before the first render so the configured CTA label (text,
+  // not a CSS var) is in place. Colors would apply either way via CSS vars.
+  await applyWidgetConfig();
 
   // Initial scan — picks up widget elements that are in the DOM at
   // DOMContentLoaded.
@@ -1038,7 +1059,7 @@ const init = (): void => {
 };
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('DOMContentLoaded', () => { void init(); });
 } else {
-  init();
+  void init();
 }
