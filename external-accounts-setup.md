@@ -339,11 +339,11 @@ Replace the existing contents with (substituting your real domain for `brandname
 
 ```
 reviews-dev.brandname.com {
-    reverse_proxy 100.117.6.18:8081
+    reverse_proxy 100.117.6.18:8071
 }
 
 reviews.brandname.com {
-    reverse_proxy 100.117.6.18:8080
+    reverse_proxy 100.117.6.18:8070
 }
 ```
 
@@ -363,7 +363,7 @@ From any machine on the public internet (your phone on cellular, or your laptop)
 curl https://reviews-dev.brandname.com/health
 ```
 
-Once the dev stack is deployed on Mercury this should return `{"status":"ok"}`. Until then, you'll get a 502 from Caddy — that's expected and confirms ingress is working end-to-end (it's reaching Mercury but Mercury isn't running anything yet on port 8081).
+Once the dev stack is deployed on Mercury this should return `{"status":"ok"}`. Until then, you'll get a 502 from Caddy — that's expected and confirms ingress is working end-to-end (it's reaching Mercury but Mercury isn't running anything yet on port 8071).
 
 ---
 
