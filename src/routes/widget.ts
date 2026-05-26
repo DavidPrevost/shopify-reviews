@@ -22,6 +22,7 @@ import { getOrFetchProduct } from '../shopify/product-info.js';
 import { sanitizeReviewText } from '../lib/profanity.js';
 import { isReviewsPaused } from '../lib/panic.js';
 import { notifyOnNewReview } from '../email/notify-new-review.js';
+import { readUpload } from '../lib/uploads.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,6 +44,19 @@ widget.get('/widget.js', async (c) => {
   c.header('Content-Type', 'application/javascript; charset=utf-8');
   c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
   return c.body(body);
+});
+
+// Self-hosted uploaded assets (currently just the branding logo). Public and
+// unauthenticated — the logo is referenced by <img src> in emails opened by
+// anyone. nosniff + a known image content-type; long cache since filenames are
+// content-unique (a new upload gets a new name).
+widget.get('/uploads/:name', (c) => {
+  const file = readUpload(c.req.param('name'));
+  if (!file) return c.text('not found', 404);
+  c.header('Content-Type', file.contentType);
+  c.header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  c.header('X-Content-Type-Options', 'nosniff');
+  return c.body(file.body);
 });
 
 // /widget.css is no longer served — styles are inlined into widget.js and

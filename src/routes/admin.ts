@@ -96,6 +96,7 @@ import { log } from '../lib/logger.js';
 import { config } from '../config.js';
 import { nowSec, daysToSec } from '../lib/time.js';
 import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_THEME } from '../lib/admin-theme.js';
+import { saveLogo } from '../lib/uploads.js';
 
 const admin = new Hono();
 
@@ -1995,7 +1996,9 @@ admin.get('/branding', (c) => {
   const overrides = getWidgetOverrides();
   const shopify = getShopifyDefaults();
   const resolved = resolveWidgetConfig();
-  const flash = c.req.query('saved') === '1' ? '<div class="ok">Branding saved.</div>' : '';
+  const logoErr = c.req.query('logo_error');
+  const flash = (c.req.query('saved') === '1' ? '<div class="ok">Branding saved.</div>' : '')
+    + (logoErr ? `<div class="err">Logo upload failed: ${escapeHtml(logoErr)}</div>` : '');
 
   const presetSwatches = (fieldId: string) => PRESET_PALETTE
     .map((p) => `<button type="button" data-preset-for="${fieldId}" data-color="${p.hex}" style="background:${p.hex};" title="${escapeHtml(p.name)} (${p.hex})" aria-label="${escapeHtml(p.name)}"></button>`)
@@ -2243,6 +2246,16 @@ admin.get('/branding', (c) => {
 
     <h3>Shared email branding</h3>
     <p class="muted">These fields apply to every email the dispatcher sends. Leave a field blank to use the default shown.</p>
+
+    <div class="card" style="background:var(--surface-alt);">
+      <h4 style="margin:0 0 8px;">Logo</h4>
+      <p class="muted" style="margin:0 0 8px;">Upload a logo to host it here (PNG or JPG, max 250&nbsp;KB) — or paste an external URL in the "Logo URL" field below. Uploading sets the Logo URL to the hosted file. Keep it small: it's fetched every time a customer opens an email.</p>
+      ${resolvedEmail.logoUrl ? `<p style="margin:0 0 8px;"><img src="${escapeHtml(resolvedEmail.logoUrl)}" alt="Current logo" style="max-height:48px;max-width:180px;vertical-align:middle;background:#fff;padding:4px;border:1px solid var(--border);border-radius:4px;"></p>` : ''}
+      <form method="POST" action="/admin/branding/logo" enctype="multipart/form-data">
+        <input type="file" name="logo" accept="image/png,image/jpeg" required>
+        <button type="submit" class="primary" style="margin-left:8px;">Upload logo</button>
+      </form>
+    </div>
 
     <form method="POST" action="/admin/branding/email-branding">
       ${textField({
@@ -2692,6 +2705,28 @@ admin.post('/branding/reset', async (c) => {
   setSetting('widget_config_json', '{}');
   log('info', 'admin reset widget branding to defaults');
   return c.redirect('/admin/branding?saved=1');
+});
+
+// Self-hosted logo upload. On success, points the email branding logoUrl at
+// the hosted file (so it flows through the existing shared-branding pipeline);
+// the external-URL text field remains available for those who prefer hosting
+// their own. PNG/JPG, max 250 KB — enforced in saveLogo.
+admin.post('/branding/logo', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const body = await c.req.parseBody();
+  const file = body['logo'];
+  if (!(file instanceof File) || file.size === 0) {
+    return c.redirect(`/admin/branding?logo_error=${encodeURIComponent('No file selected.')}#email`);
+  }
+  const result = await saveLogo(file);
+  if (!result.ok) {
+    return c.redirect(`/admin/branding?logo_error=${encodeURIComponent(result.error)}#email`);
+  }
+  const url = `${config.publicUrl.replace(/\/+$/, '')}/uploads/${result.filename}`;
+  const current = getEmailBrandingOverrides();
+  setSetting('email_branding_json', JSON.stringify({ ...current, logoUrl: url }));
+  log('info', 'admin uploaded branding logo', { filename: result.filename });
+  return c.redirect('/admin/branding?saved=1#email');
 });
 
 // --- Settings ---
