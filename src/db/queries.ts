@@ -936,6 +936,7 @@ export interface EmailTemplateRow {
   body_html: string;
   cta_enabled: number;
   cta_label: string;
+  trigger_event: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -952,6 +953,19 @@ export const listEmailTemplates = (): EmailTemplateRow[] => {
     .all() as EmailTemplateRow[];
 };
 
+// First active template bound to a trigger, or null. The dispatcher and
+// moderation flows select templates this way (not by hardcoded key). If a
+// merchant marks two templates with the same trigger active, the lowest id
+// wins — deterministic and good enough; the UI nudges toward one-per-trigger.
+export const findActiveTemplateForTrigger = (trigger: string): EmailTemplateRow | null => {
+  return (getDb()
+    .prepare(`SELECT * FROM email_templates WHERE trigger_event = ? AND is_active = 1 ORDER BY id ASC LIMIT 1`)
+    .get(trigger) as EmailTemplateRow | undefined) ?? null;
+};
+
+// Upsert by key. Used by the seed and by content edits. triggerEvent is
+// optional on update: passing null preserves the existing trigger (so a plain
+// content edit doesn't clear it), while the seed and create paths set it.
 export const upsertEmailTemplate = (input: {
   templateKey: string;
   displayName: string;
@@ -960,21 +974,23 @@ export const upsertEmailTemplate = (input: {
   ctaEnabled: boolean;
   ctaLabel: string;
   isActive: boolean;
+  triggerEvent?: string | null;
 }): EmailTemplateRow => {
   const now = nowSec();
   const db = getDb();
   db.prepare(`
     INSERT INTO email_templates
-      (template_key, display_name, is_active, subject, body_html, cta_enabled, cta_label, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (template_key, display_name, is_active, subject, body_html, cta_enabled, cta_label, trigger_event, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(template_key) DO UPDATE SET
-      display_name = excluded.display_name,
-      is_active    = excluded.is_active,
-      subject      = excluded.subject,
-      body_html    = excluded.body_html,
-      cta_enabled  = excluded.cta_enabled,
-      cta_label    = excluded.cta_label,
-      updated_at   = excluded.updated_at
+      display_name  = excluded.display_name,
+      is_active     = excluded.is_active,
+      subject       = excluded.subject,
+      body_html     = excluded.body_html,
+      cta_enabled   = excluded.cta_enabled,
+      cta_label     = excluded.cta_label,
+      trigger_event = COALESCE(excluded.trigger_event, email_templates.trigger_event),
+      updated_at    = excluded.updated_at
   `).run(
     input.templateKey,
     input.displayName,
@@ -983,10 +999,35 @@ export const upsertEmailTemplate = (input: {
     input.bodyHtml,
     input.ctaEnabled ? 1 : 0,
     input.ctaLabel,
+    input.triggerEvent ?? null,
     now,
     now,
   );
   return findEmailTemplate(input.templateKey)!;
+};
+
+// Creates a brand-new merchant-authored template with a generated unique key.
+// Returns the new row.
+export const createEmailTemplate = (input: {
+  displayName: string;
+  triggerEvent: string | null;
+  subject: string;
+  bodyHtml: string;
+  ctaEnabled: boolean;
+  ctaLabel: string;
+  isActive: boolean;
+}): EmailTemplateRow => {
+  const slug = input.displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'template';
+  const key = `custom-${slug}-${crypto.randomBytes(3).toString('hex')}`;
+  return upsertEmailTemplate({ ...input, templateKey: key });
+};
+
+// Deletes a template by key. The seed re-creates the four defaults on next
+// boot if they're missing, so deleting a default is not permanent across a
+// restart unless the merchant also recreates it; merchant-authored templates
+// (custom-*) stay deleted.
+export const deleteEmailTemplate = (templateKey: string): void => {
+  getDb().prepare('DELETE FROM email_templates WHERE template_key = ?').run(templateKey);
 };
 
 // --- Sample invitations ---

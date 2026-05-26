@@ -48,7 +48,7 @@ import {
   type ReviewReportRow,
   type ReportReason,
 } from '../db/queries.js';
-import { sendTemplateEmail } from '../email/send-template.js';
+import { sendTemplateEmail, sendTemplateEmailByTrigger } from '../email/send-template.js';
 import { getProfanityWordlist, setProfanityWordlist } from '../lib/profanity.js';
 import { getNewReviewNotifyConfig, setNewReviewNotifyConfig } from '../email/notify-new-review.js';
 import {
@@ -1018,20 +1018,20 @@ admin.post('/reviews/:id/status', async (c) => {
 // the source of truth; the notification is a courtesy. If SMTP is down we
 // still want the review off the storefront.
 const sendModerationEmail = async (input: {
-  templateKey: 'review_retracted' | 'review_restored';
+  trigger: 'review_removed' | 'review_restored';
   to: string;
   context: Record<string, string | number>;
   reviewId: number;
 }): Promise<void> => {
   try {
-    const result = await sendTemplateEmail({
-      templateKey: input.templateKey,
+    const result = await sendTemplateEmailByTrigger({
+      trigger: input.trigger,
       to: input.to,
       context: input.context,
     });
     log('info', 'moderation email dispatched', {
       reviewId: input.reviewId,
-      templateKey: input.templateKey,
+      trigger: input.trigger,
       to: input.to,
       sent: result.sent,
       reason: result.reason,
@@ -1039,7 +1039,7 @@ const sendModerationEmail = async (input: {
   } catch (err) {
     log('error', 'moderation email send failed', {
       reviewId: input.reviewId,
-      templateKey: input.templateKey,
+      trigger: input.trigger,
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -1084,14 +1084,14 @@ admin.post('/reviews/:id/retract', async (c) => {
     const productTitle = product?.title ?? 'your purchase';
     const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
     await sendModerationEmail({
-      templateKey: 'review_retracted',
+      trigger: 'review_removed',
       to: review.reviewer_email,
       reviewId: id,
       context: {
         firstName: escapeHtml(firstName),
         brandName: escapeHtml(config.email.brandName),
         productName: escapeHtml(productTitle),
-        reasonPhrase: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
+        retractionReason: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
       },
     });
   }
@@ -1131,7 +1131,7 @@ admin.post('/reviews/:id/restore', async (c) => {
     const productTitle = product?.title ?? 'your purchase';
     const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
     await sendModerationEmail({
-      templateKey: 'review_restored',
+      trigger: 'review_restored',
       to: review.reviewer_email,
       reviewId: id,
       context: {
@@ -1321,14 +1321,14 @@ admin.post('/reports/by-review/:reviewId/retract', async (c) => {
       const productTitle = product?.title ?? 'your purchase';
       const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
       await sendModerationEmail({
-        templateKey: 'review_retracted',
+        trigger: 'review_removed',
         to: review.reviewer_email,
         reviewId,
         context: {
           firstName: escapeHtml(firstName),
           brandName: escapeHtml(config.email.brandName),
           productName: escapeHtml(productTitle),
-          reasonPhrase: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
+          retractionReason: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
         },
       });
     }

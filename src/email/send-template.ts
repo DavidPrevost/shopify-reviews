@@ -12,7 +12,7 @@
 // the template is missing or inactive — caller decides whether that's an
 // error or just a "no-op, the merchant disabled this notification."
 
-import { findEmailTemplate } from '../db/queries.js';
+import { findEmailTemplate, findActiveTemplateForTrigger, type EmailTemplateRow } from '../db/queries.js';
 import { renderString, renderTemplate, escapeHtml } from './render.js';
 import { sendMail } from './smtp-client.js';
 import { resolveEmailBranding } from './email-config.js';
@@ -39,7 +39,31 @@ export const sendTemplateEmail = async (
     log('info', 'sendTemplateEmail: template inactive, skipping', { templateKey: input.templateKey });
     return { sent: false, reason: 'template-inactive' };
   }
+  return sendFromTemplate(template, input.to, input.context);
+};
 
+// Sends the active template bound to a trigger (the trigger-based equivalent of
+// sendTemplateEmail). Used by the moderation flows so merchant-created
+// templates for review_removed / review_restored are honored.
+export const sendTemplateEmailByTrigger = async (input: {
+  trigger: string;
+  to: string;
+  context: Record<string, string | number>;
+}): Promise<{ sent: boolean; reason?: string }> => {
+  const template = findActiveTemplateForTrigger(input.trigger);
+  if (!template) {
+    log('info', 'sendTemplateEmailByTrigger: no active template for trigger', { trigger: input.trigger });
+    return { sent: false, reason: 'no-active-template' };
+  }
+  return sendFromTemplate(template, input.to, input.context);
+};
+
+const sendFromTemplate = async (
+  template: EmailTemplateRow,
+  to: string,
+  context: Record<string, string | number>,
+): Promise<{ sent: boolean; reason?: string }> => {
+  const input = { to, context };
   const branding = resolveEmailBranding();
 
   const renderedSubject = renderString(template.subject, input.context);

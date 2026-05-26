@@ -4,7 +4,7 @@
 // hardcoded fallback. The per-template content (subject, body, CTA) lives in
 // the email_templates table, not here.
 
-import { getSetting, listEmailTemplates, upsertEmailTemplate } from '../db/queries.js';
+import { getSetting, setSetting, listEmailTemplates, upsertEmailTemplate } from '../db/queries.js';
 import { config } from '../config.js';
 import { log } from '../lib/logger.js';
 
@@ -84,6 +84,7 @@ export const resolveEmailBranding = (): ResolvedEmailBranding => {
 interface SeedTemplate {
   templateKey: string;
   displayName: string;
+  triggerEvent: string;
   subject: string;
   bodyHtml: string;
   ctaEnabled: boolean;
@@ -93,7 +94,8 @@ interface SeedTemplate {
 const DEFAULT_TEMPLATES: SeedTemplate[] = [
   {
     templateKey: 'request_first',
-    displayName: 'First-time review request',
+    displayName: 'Review Request',
+    triggerEvent: 'review_request',
     subject: 'How was your recent order from {{ brandName }}?',
     bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
@@ -110,8 +112,28 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
     ctaLabel: 'Write a review',
   },
   {
+    templateKey: 'request_followup',
+    displayName: 'Review Request Followup',
+    triggerEvent: 'review_request_followup',
+    subject: 'A quick reminder — share your thoughts with {{ brandName }}?',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  A little while ago we asked what you thought of your order from {{ brandName }}. If you have a spare minute, we'd still love to hear from you.
+</p>
+<p style="margin:0 0 24px; font-size:16px; line-height:1.55;">
+  Your review helps other customers decide — and helps us keep improving.
+</p>
+{{ productsHtml }}
+<p style="margin:16px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  No pressure — if now isn't a good time, you can ignore this email.
+</p>`,
+    ctaEnabled: true,
+    ctaLabel: 'Write a review',
+  },
+  {
     templateKey: 'request_repeat',
-    displayName: 'Repeat-customer review request',
+    displayName: 'Repeat Customer Review',
+    triggerEvent: 'repeat_customer_review',
     subject: 'One more review for your recent order from {{ brandName }}?',
     bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
@@ -126,14 +148,15 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
   },
   {
     templateKey: 'review_retracted',
-    displayName: 'Review retracted notification',
+    displayName: 'Review Removed',
+    triggerEvent: 'review_removed',
     subject: 'Your review of {{ productName }} was removed',
     bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
   We're writing to let you know that your review of <strong>{{ productName }}</strong> on {{ brandName }} has been removed.
 </p>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
-  Reason: your review {{ reasonPhrase }}.
+  Reason: your review {{ retractionReason }}.
 </p>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
   If you believe this was a mistake, please reply to this email and we'll take another look. You're welcome to submit a new review at any time.
@@ -146,7 +169,8 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
   },
   {
     templateKey: 'review_restored',
-    displayName: 'Review restored notification',
+    displayName: 'Review Restored',
+    triggerEvent: 'review_restored',
     subject: 'Your review of {{ productName }} is back online',
     bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
 <p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
@@ -163,20 +187,38 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
   },
 ];
 
+// Seeds default templates once each. We track which default keys have been
+// seeded in a setting so that *deleting* a default sticks (it won't reappear on
+// the next boot) while a genuinely new default added in a later version still
+// seeds on existing installs. On the first run after this was introduced, any
+// pre-existing default is marked seeded (without re-inserting) so future
+// deletes of it also stick.
 export const seedDefaultEmailTemplates = (): void => {
-  const existing = listEmailTemplates();
-  const existingKeys = new Set(existing.map((t) => t.template_key));
-  for (const t of DEFAULT_TEMPLATES) {
-    if (existingKeys.has(t.templateKey)) continue;
-    upsertEmailTemplate({
-      templateKey: t.templateKey,
-      displayName: t.displayName,
-      subject: t.subject,
-      bodyHtml: t.bodyHtml,
-      ctaEnabled: t.ctaEnabled,
-      ctaLabel: t.ctaLabel,
-      isActive: true,
-    });
-    log('info', 'seeded default email template', { templateKey: t.templateKey });
+  const seededRaw = getSetting('seeded_template_keys');
+  let seeded: Set<string>;
+  try {
+    seeded = new Set<string>(seededRaw ? (JSON.parse(seededRaw) as string[]) : []);
+  } catch {
+    seeded = new Set<string>();
   }
+  const existingKeys = new Set(listEmailTemplates().map((t) => t.template_key));
+
+  for (const t of DEFAULT_TEMPLATES) {
+    if (seeded.has(t.templateKey)) continue; // already seeded once — respect deletes
+    if (!existingKeys.has(t.templateKey)) {
+      upsertEmailTemplate({
+        templateKey: t.templateKey,
+        displayName: t.displayName,
+        triggerEvent: t.triggerEvent,
+        subject: t.subject,
+        bodyHtml: t.bodyHtml,
+        ctaEnabled: t.ctaEnabled,
+        ctaLabel: t.ctaLabel,
+        isActive: true,
+      });
+      log('info', 'seeded default email template', { templateKey: t.templateKey, trigger: t.triggerEvent });
+    }
+    seeded.add(t.templateKey);
+  }
+  setSetting('seeded_template_keys', JSON.stringify([...seeded]));
 };

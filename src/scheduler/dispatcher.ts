@@ -4,7 +4,7 @@ import {
   customerHasAnyReviews,
   recordRequestSentBatch,
   logEmailFailure,
-  findEmailTemplate,
+  findActiveTemplateForTrigger,
   getSetting,
   getSettingNumber,
   auditSuppressions,
@@ -197,20 +197,20 @@ const dispatchGroup = async (
   const colors = resolveBrandColors(getSetting('shop_brand_json'));
   const branding = resolveEmailBranding();
 
-  // Look up the right template for this dispatch context. Falls back to the
-  // other variant if the chosen one is missing or inactive (defensive — the
-  // seed function inserts both on first boot, but in case the admin
-  // explicitly disabled one).
-  const preferredKey = isRepeat ? 'request_repeat' : 'request_first';
-  const fallbackKey = isRepeat ? 'request_first' : 'request_repeat';
-  let template = findEmailTemplate(preferredKey);
-  if (!template || template.is_active === 0) {
-    template = findEmailTemplate(fallbackKey);
-  }
+  // Select the template by trigger. A purchase that's already been asked at
+  // least once uses the follow-up template (if one is active); otherwise it's
+  // the repeat-customer or first-time template based on review history. Each
+  // step falls back to the plain review_request template so a send never fails
+  // just because the merchant disabled a specific variant.
+  const isFollowup = rows.some((r) => r.p_request_count >= 1);
+  const template =
+    (isFollowup ? findActiveTemplateForTrigger('review_request_followup') : null) ??
+    findActiveTemplateForTrigger(isRepeat ? 'repeat_customer_review' : 'review_request') ??
+    findActiveTemplateForTrigger('review_request');
   if (!template) {
-    // Both templates missing — shouldn't happen post-seed. Log and skip the
-    // group so we don't send a malformed email or crash the dispatcher.
-    log('error', 'no active email template found, skipping group', {
+    // No active request template at all — shouldn't happen post-seed. Log and
+    // skip the group so we don't send a malformed email or crash the dispatcher.
+    log('error', 'no active review-request template found, skipping group', {
       customerId,
       orderId: first.p_shopify_order_id,
     });
@@ -233,6 +233,7 @@ const dispatchGroup = async (
     productCount: items.length,
     productsHtml,
     unsubGlobalUrl,
+    unsubscribeUrl: unsubGlobalUrl,
   };
 
   const renderedBody = renderString(template.body_html, ctx);
@@ -297,7 +298,7 @@ const dispatchGroup = async (
     purchaseIds: items.map((i) => i.purchaseId),
     customerId,
     metadata: {
-      template: isRepeat ? 'repeat' : 'first',
+      template: template.template_key,
       orderId: first.p_shopify_order_id,
       productCount: items.length,
     },
@@ -306,7 +307,7 @@ const dispatchGroup = async (
   log('info', 'dispatch sent', {
     customerId,
     orderId: first.p_shopify_order_id,
-    template: isRepeat ? 'repeat' : 'first',
+    template: template.template_key,
     purchaseIds: items.map((i) => i.purchaseId),
   });
   return 'sent';
