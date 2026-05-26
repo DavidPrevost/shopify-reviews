@@ -1,4 +1,4 @@
-import { shopifyAdmin } from './admin-client.js';
+import { shopifyStorefront } from './storefront-client.js';
 
 export interface BrandColorPair {
   background: string | null;
@@ -49,7 +49,7 @@ interface RawResponse {
 }
 
 export const fetchShopifyBrand = async (): Promise<BrandInfo> => {
-  const data = await shopifyAdmin<RawResponse>(brandQuery);
+  const data = await shopifyStorefront<RawResponse>(brandQuery);
   const brand = data.shop.brand;
   return {
     shortDescription: brand?.shortDescription ?? null,
@@ -60,6 +60,11 @@ export const fetchShopifyBrand = async (): Promise<BrandInfo> => {
     syncedAt: Math.floor(Date.now() / 1000),
   };
 };
+
+// `shop.brand` is a Storefront API field — it does not exist on the Admin
+// API's Shop type. We query it via the Storefront client (which mints a public
+// storefront token from the Admin token on first use). The query shape below
+// is the Storefront `Brand` type.
 
 // Defaults used when shop_brand_json is empty, unparseable, or missing fields.
 // Neutral dark grey + white = legible across all email clients.

@@ -1202,6 +1202,38 @@ export const emailEventStats = (sinceSec: number): Record<string, number> => {
   return out;
 };
 
+export interface EmailEventDetail {
+  id: number;
+  kind: string;
+  created_at: number;
+  customer_id: number | null;
+  customer_email: string | null;
+  customer_first_name: string | null;
+  customer_last_name: string | null;
+  metadata_json: string | null;
+}
+
+// Lists email_events of one kind since a cutoff, joined to the customer so the
+// dashboard activity drill-downs ("who unsubscribed?", "who got a send
+// failure?") can show people, not just a count. Most recent first.
+export const listEmailEventsByKind = (
+  kind: string,
+  sinceSec: number,
+  limit: number,
+): EmailEventDetail[] => {
+  return getDb().prepare(`
+    SELECT e.id, e.kind, e.created_at, e.customer_id, e.metadata_json,
+           c.email      AS customer_email,
+           c.first_name AS customer_first_name,
+           c.last_name  AS customer_last_name
+      FROM email_events e
+      LEFT JOIN customers c ON c.id = e.customer_id
+     WHERE e.kind = ? AND e.created_at >= ?
+     ORDER BY e.created_at DESC
+     LIMIT ?
+  `).all(kind, sinceSec, limit) as EmailEventDetail[];
+};
+
 // --- Product cache (for email rendering and storefront fallbacks) ---
 
 export interface ProductCacheRow {

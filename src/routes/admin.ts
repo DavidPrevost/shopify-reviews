@@ -8,6 +8,7 @@ import {
   setMerchantReply,
   getCustomerDetail,
   emailEventStats,
+  listEmailEventsByKind,
   setSetting,
   getSetting,
   getSettingNumber,
@@ -89,6 +90,7 @@ import { escapeHtml } from '../email/render.js';
 import { log } from '../lib/logger.js';
 import { config } from '../config.js';
 import { nowSec, daysToSec } from '../lib/time.js';
+import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_THEME } from '../lib/admin-theme.js';
 
 const admin = new Hono();
 
@@ -153,6 +155,7 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     .join('');
 
   const pauseBanner = renderPauseBannerHtml();
+  const themeVars = renderAdminThemeVars(getActiveAdminTheme());
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -161,18 +164,19 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)} — Reviews admin</title>
   <style>
+    ${themeVars}
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 0; background:#f6f6f6; color:#222; }
-    header { background:#222; color:#fff; padding: 12px 24px; display:flex; align-items:center; justify-content:space-between; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 0; background:var(--bg); color:var(--text); }
+    header { background:var(--header-bg); color:var(--header-text); padding: 12px 24px; display:flex; align-items:center; justify-content:space-between; }
     header h1 { margin:0; font-size: 18px; font-weight: 600; }
-    header nav a { color:#bbb; text-decoration:none; margin-right: 18px; font-size: 14px; }
-    header nav a.active, header nav a:hover { color:#fff; }
-    header .logout { color:#bbb; text-decoration:none; font-size:13px; }
+    header nav a { color:var(--header-nav); text-decoration:none; margin-right: 18px; font-size: 14px; }
+    header nav a.active, header nav a:hover { color:var(--header-nav-active); }
+    header .logout { color:var(--header-nav); text-decoration:none; font-size:13px; }
     main { max-width: 1100px; margin: 32px auto; padding: 0 24px; }
     h2 { margin-top: 0; }
-    table { width:100%; border-collapse: collapse; background:#fff; border-radius:6px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
-    th, td { padding: 10px 12px; text-align:left; border-bottom: 1px solid #eee; vertical-align: top; font-size: 14px; }
-    th { background:#fafafa; font-weight: 600; font-size: 12px; text-transform: uppercase; color:#666; }
+    table { width:100%; border-collapse: collapse; background:var(--surface); border-radius:6px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
+    th, td { padding: 10px 12px; text-align:left; border-bottom: 1px solid var(--border); vertical-align: top; font-size: 14px; }
+    th { background:var(--surface-alt); font-weight: 600; font-size: 12px; text-transform: uppercase; color:var(--muted); }
     tr:last-child td { border-bottom: none; }
     .stars { color: #f5a623; letter-spacing: 1px; }
     .pill { display:inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; text-transform: uppercase; font-weight: 600; }
@@ -180,27 +184,31 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     .pill-pending { background: #fff3cd; color: #856404; }
     .pill-rejected { background: #f8d7da; color: #721c24; }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 32px; }
-    .stat { background:#fff; padding: 16px; border-radius: 6px; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
+    .stat { background:var(--surface); padding: 16px; border-radius: 6px; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
     .stat .num { font-size: 24px; font-weight: 600; }
-    .stat .label { font-size: 12px; color:#888; text-transform: uppercase; }
+    .stat .label { font-size: 12px; color:var(--muted); text-transform: uppercase; }
+    a.stat-link { display:block; text-decoration:none; color:inherit; transition: box-shadow .15s ease, transform .15s ease; }
+    a.stat-link:hover { box-shadow:0 2px 10px rgba(0,0,0,0.12); transform: translateY(-1px); opacity:1; }
     form.inline { display:inline; }
-    button { padding: 6px 12px; font-size: 13px; border: 1px solid #ccc; background:#fff; border-radius:4px; cursor:pointer; }
-    button.primary { background: #222; color: #fff; border-color: #222; }
+    button { padding: 6px 12px; font-size: 13px; border: 1px solid var(--border-strong); background:var(--surface); color:var(--text); border-radius:4px; cursor:pointer; }
+    button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); opacity: 1; }
     button.danger { color: #b00; border-color: #faa; }
     button:hover { opacity: 0.85; }
     label { display:block; font-size: 13px; font-weight: 600; margin-top: 12px; }
-    input[type=text], input[type=number], input[type=password], textarea { width:100%; padding: 8px 10px; border:1px solid #ccc; border-radius: 4px; font-size: 14px; }
-    .card { background:#fff; padding: 24px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.05); margin-bottom: 24px; }
+    input[type=text], input[type=number], input[type=password], textarea, select { width:100%; padding: 8px 10px; border:1px solid var(--border-strong); border-radius: 4px; font-size: 14px; background:var(--surface); color:var(--text); }
+    .card { background:var(--surface); padding: 24px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.05); margin-bottom: 24px; }
     .filter-row { margin-bottom: 16px; display:flex; gap: 8px; align-items: center; }
-    .filter-row a { padding:6px 12px; border-radius:4px; text-decoration:none; color:#222; border:1px solid #ddd; background:#fff; font-size:13px; }
-    .filter-row a.active { background:#222; color:#fff; border-color:#222; }
+    .filter-row a { padding:6px 12px; border-radius:4px; text-decoration:none; color:var(--text); border:1px solid var(--border); background:var(--surface); font-size:13px; }
+    .filter-row a.active { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
     .err { background:#fee; border:1px solid #fcc; color:#933; padding:12px; border-radius:4px; margin-bottom:16px; }
     .ok  { background:#efe; border:1px solid #cdc; color:#363; padding:12px; border-radius:4px; margin-bottom:16px; }
-    .muted { color:#888; font-size: 13px; }
-    .tabs { display:flex; border-bottom: 2px solid #ddd; margin-bottom: 24px; gap: 0; flex-wrap: wrap; }
-    .tabs a { padding: 12px 20px; text-decoration: none; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; font-size: 14px; font-weight: 500; cursor: pointer; }
-    .tabs a:hover { color: #222; }
-    .tabs a.active { color: #222; border-bottom-color: #222; font-weight: 600; }
+    .muted { color:var(--muted); font-size: 13px; }
+    a { color: var(--accent); }
+    .tabs { display:flex; border-bottom: 2px solid var(--border); margin-bottom: 24px; gap: 0; flex-wrap: wrap; }
+    .tabs a { padding: 12px 20px; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -2px; font-size: 14px; font-weight: 500; cursor: pointer; }
+    .tabs a:hover { color: var(--text); }
+    .tabs a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
     .nav-badge { display:inline-block; background:#b00; color:#fff; font-size:11px; padding:1px 6px; border-radius:8px; margin-left:4px; font-weight:600; }
@@ -351,17 +359,17 @@ admin.get('/dashboard', (c) => {
   const recentReviews = listReviews({ limit: 10, offset: 0 });
 
   const statBlocks = [
-    { label: 'Published', n: counts.published ?? 0 },
-    { label: 'Pending',   n: counts.pending ?? 0 },
-    { label: 'Rejected',  n: counts.rejected ?? 0 },
-    { label: 'Sent (30d)',        n: stats.request_sent ?? 0 },
-    { label: 'Submitted (30d)',   n: stats.review_submitted ?? 0 },
-    { label: 'Unsubscribed (30d)', n: stats.unsubscribed ?? 0 },
-    { label: 'Send failed (30d)', n: stats.send_failed ?? 0 },
+    { label: 'Published', n: counts.published ?? 0, href: '/admin/reviews?status=published' },
+    { label: 'Pending',   n: counts.pending ?? 0,   href: '/admin/reviews?status=pending' },
+    { label: 'Rejected',  n: counts.rejected ?? 0,  href: '/admin/reviews?status=rejected' },
+    { label: 'Sent (30d)',         n: stats.request_sent ?? 0,     href: '/admin/activity?kind=request_sent' },
+    { label: 'Submitted (30d)',    n: stats.review_submitted ?? 0, href: '/admin/activity?kind=review_submitted' },
+    { label: 'Unsubscribed (30d)', n: stats.unsubscribed ?? 0,     href: '/admin/activity?kind=unsubscribed' },
+    { label: 'Send failed (30d)',  n: stats.send_failed ?? 0,      href: '/admin/activity?kind=send_failed' },
   ];
 
   const statsHtml = `<div class="stats">${statBlocks
-    .map((s) => `<div class="stat"><div class="num">${s.n}</div><div class="label">${s.label}</div></div>`)
+    .map((s) => `<a class="stat stat-link" href="${s.href}"><div class="num">${s.n}</div><div class="label">${s.label}</div></a>`)
     .join('')}</div>`;
 
   const recentHtml = recentReviews.length === 0
@@ -386,6 +394,52 @@ admin.get('/dashboard', (c) => {
       </form>
       <p class="muted" style="margin-top:12px;">The dispatcher normally runs daily at 14:00 UTC. Use this to force a run for testing.</p>
     </div>
+  `, 'dashboard'));
+});
+
+// Dashboard stat cards for email-event kinds link here to show the people
+// behind the number (the review-status cards link to /admin/reviews instead).
+const ACTIVITY_KINDS: Record<string, string> = {
+  request_sent: 'Review requests sent',
+  review_submitted: 'Reviews submitted',
+  unsubscribed: 'Unsubscribed',
+  send_failed: 'Send failures',
+  resubscribed: 'Re-subscribed',
+};
+
+admin.get('/activity', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const kind = c.req.query('kind') ?? '';
+  const title = ACTIVITY_KINDS[kind];
+  if (!title) {
+    return c.html(adminShell('Activity', `<div class="err">Unknown activity type.</div><p><a href="/admin/dashboard">Back to dashboard</a></p>`, 'dashboard'), 400);
+  }
+  const since30d = nowSec() - daysToSec(30);
+  const events = listEmailEventsByKind(kind, since30d, 500);
+  const rowsHtml = events.length === 0
+    ? '<p class="muted">Nothing in the last 30 days.</p>'
+    : `<table>
+        <thead><tr><th>When</th><th>Customer</th><th>Details</th></tr></thead>
+        <tbody>${events.map((e) => {
+          const name = [e.customer_first_name, e.customer_last_name].filter(Boolean).join(' ').trim();
+          const who = e.customer_email
+            ? `<a href="/admin/customers/${encodeURIComponent(e.customer_email)}">${escapeHtml(name || e.customer_email)}</a>`
+            : '<span class="muted">—</span>';
+          let detail = '';
+          if (e.metadata_json) {
+            try {
+              const meta = JSON.parse(e.metadata_json) as Record<string, unknown>;
+              if (meta.error) detail = escapeHtml(String(meta.error));
+              else if (meta.scope) detail = `scope: ${escapeHtml(String(meta.scope))}`;
+            } catch { /* leave detail blank on unparseable metadata */ }
+          }
+          return `<tr><td class="muted">${formatTs(e.created_at)}</td><td>${who}</td><td class="muted">${detail}</td></tr>`;
+        }).join('')}</tbody>
+       </table>`;
+  return c.html(adminShell(title, `
+    <p><a href="/admin/dashboard">← Dashboard</a></p>
+    <h2>${escapeHtml(title)} <span class="muted" style="font-size:14px;font-weight:normal;">· last 30 days · ${events.length}</span></h2>
+    ${rowsHtml}
   `, 'dashboard'));
 });
 
@@ -2401,6 +2455,11 @@ admin.get('/settings', (c) => {
   const panicEvents = listPanicEvents(20);
   const notifyConfig = getNewReviewNotifyConfig();
 
+  const activeTheme = getActiveAdminTheme();
+  const themeOptions = Object.entries(ADMIN_THEMES)
+    .map(([key, t]) => `<option value="${key}"${key === activeTheme ? ' selected' : ''}>${escapeHtml(t.label)}</option>`)
+    .join('');
+
   // Hour dropdown: 1-12
   const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
     .map((h) => `<option value="${h}">${h}</option>`)
@@ -2411,8 +2470,17 @@ admin.get('/settings', (c) => {
     .join('');
 
   return c.html(adminShell('Settings', `
-    <h2>Cadence</h2>
     ${flash}
+    <nav class="tabs" id="settings-tabs">
+      <a href="#cadence"       data-tab="cadence">Cadence</a>
+      <a href="#notifications" data-tab="notifications">Notifications</a>
+      <a href="#moderation"    data-tab="moderation">Moderation</a>
+      <a href="#appearance"    data-tab="appearance">Appearance</a>
+      <a href="#setup"         data-tab="setup">Setup</a>
+    </nav>
+
+    <section id="tab-cadence" class="tab-panel" data-tab="cadence">
+    <h2>Cadence</h2>
     <div class="card">
       <form method="POST" action="/admin/settings" id="settings-form">
         <label for="cadence_max_requests">Max requests per purchase</label>
@@ -2460,7 +2528,9 @@ admin.get('/settings', (c) => {
         </div>
       </form>
     </div>
+    </section>
 
+    <section id="tab-moderation" class="tab-panel" data-tab="moderation">
     <div class="card">
       <h3 style="margin-top:0;">Profanity filter</h3>
       <p class="muted">Words listed here are censored to <code>****</code> in review titles and bodies at submission time. Whole-word match, case-insensitive. One word per line. Lines starting with <code>#</code> are comments. Reviewer display names are never censored. This is a light filter, not a held-pending queue — reviews still publish immediately; if a censored review needs full removal, retract it from the Reviews page.</p>
@@ -2474,6 +2544,10 @@ admin.get('/settings', (c) => {
       </form>
     </div>
 
+    ${renderPanicCard(pauseState, panicEvents)}
+    </section>
+
+    <section id="tab-notifications" class="tab-panel" data-tab="notifications">
     <div class="card">
       <h3 style="margin-top:0;">New review notifications</h3>
       <p class="muted">Get an email when a customer submits a review. Useful for catching low-star reviews early. Sent from the same Gmail SMTP as customer emails — no separate config.</p>
@@ -2502,9 +2576,9 @@ admin.get('/settings', (c) => {
         </div>
       </form>
     </div>
+    </section>
 
-    ${renderPanicCard(pauseState, panicEvents)}
-
+    <section id="tab-setup" class="tab-panel" data-tab="setup">
     <div class="card">
       <h3 style="margin-top:0;">Per-variant reviews (optional setup)</h3>
       <p class="muted">By default, all reviews on a product apply to every variant of that product (sizes, colors, etc. share one review pool). For products where variants are genuinely different — e.g., flavors or scents — you can opt that specific product into per-variant review pools so each variant has its own reviews, with a "Customers also reviewed these variants" section surfacing sibling-variant reviews below the main list.</p>
@@ -2574,6 +2648,19 @@ admin.get('/settings', (c) => {
 
       <p class="muted" style="font-size:12px;margin-top:12px;">Once App Proxy is configured, logged-in customers see a "Write a review" button in the widget header (and on empty-state cards). It opens a modal with the review form. Customers with an existing review see "Edit your review" instead, and their own review is highlighted with a "Your review" tag at the top of the list.</p>
     </div>
+    </section>
+
+    <section id="tab-appearance" class="tab-panel" data-tab="appearance">
+    <h2>Appearance</h2>
+    <div class="card">
+      <form method="POST" action="/admin/settings/theme">
+        <label for="admin_theme">Dashboard theme</label>
+        <select id="admin_theme" name="admin_theme">${themeOptions}</select>
+        <p class="muted" style="margin:8px 0 12px;">Changes the look of this admin dashboard only. Five accent colors in light and dark, all chosen for readability. (A "match my Shopify brand" option will appear here once brand sync is connected.)</p>
+        <button type="submit" class="primary">Apply theme</button>
+      </form>
+    </div>
+    </section>
 
     <script>
       (function() {
@@ -2625,6 +2712,30 @@ admin.get('/settings', (c) => {
           var utc = localToUtc(h24, mLocal);
           document.getElementById('dispatcher_hour').value = String(utc.h);
           document.getElementById('dispatcher_minute').value = String(utc.m);
+        });
+      })();
+    </script>
+    <script>
+      (function () {
+        var tabs = document.querySelectorAll('#settings-tabs a');
+        var panels = document.querySelectorAll('.tab-panel');
+        function show(name) {
+          tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
+          panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
+        }
+        var hash = (location.hash || '').replace('#', '');
+        var search = location.search;
+        var initial = hash || 'cadence';
+        // Panic actions redirect with ?paused/extended/resumed — land on Moderation so the result is visible.
+        if (search.indexOf('paused=') !== -1 || search.indexOf('extended=') !== -1 || search.indexOf('resumed=') !== -1) initial = 'moderation';
+        show(initial);
+        tabs.forEach(function (a) {
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var name = a.dataset.tab;
+            history.replaceState(null, '', '#' + name);
+            show(name);
+          });
         });
       })();
     </script>
@@ -2811,6 +2922,16 @@ admin.post('/settings/profanity', async (c) => {
 });
 
 // --- Brand info sync from Shopify ---
+
+admin.post('/settings/theme', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const theme = String(form.get('admin_theme') ?? '');
+  if (theme in ADMIN_THEMES) {
+    setSetting('admin_theme', theme);
+  }
+  return c.redirect('/admin/settings?saved=1');
+});
 
 admin.post('/settings/sync-brand', async (c) => {
   try {
