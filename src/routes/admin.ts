@@ -25,6 +25,8 @@ import {
   listEmailTemplates,
   findEmailTemplate,
   upsertEmailTemplate,
+  createEmailTemplate,
+  deleteEmailTemplate,
   retractReview,
   restoreReview,
   listModerationEvents,
@@ -97,6 +99,8 @@ import { config } from '../config.js';
 import { nowSec, daysToSec } from '../lib/time.js';
 import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_THEME } from '../lib/admin-theme.js';
 import { saveLogo } from '../lib/uploads.js';
+import { EMAIL_TRIGGERS, isEmailTrigger, triggerLabel } from '../email/triggers.js';
+import { EMAIL_VARIABLES } from '../email/variables.js';
 
 const admin = new Hono();
 
@@ -2206,43 +2210,114 @@ admin.get('/branding', (c) => {
     `;
   };
 
+  const triggerSelectOptions = (selected: string | null) => EMAIL_TRIGGERS
+    .map((tr) => `<option value="${tr.event}"${tr.event === selected ? ' selected' : ''}>${escapeHtml(tr.label)}${tr.wired ? '' : ' — not sent automatically yet'}</option>`)
+    .join('');
+  const variableInsertOptions = EMAIL_VARIABLES
+    .map((v) => `<option value="${v.key}">${escapeHtml(v.label)} — {{ ${v.key} }}${v.expands ? ' (expands)' : ''}</option>`)
+    .join('');
+  const variableHelpList = EMAIL_VARIABLES
+    .map((v) => `<li><code>{{ ${v.key} }}</code> — ${escapeHtml(v.description)}</li>`)
+    .join('');
+
+  const templateSelectorOptions = templates
+    .map((t) => `<option value="${escapeHtml(t.template_key)}">${escapeHtml(t.display_name)} — ${escapeHtml(triggerLabel(t.trigger_event))}${t.is_active ? '' : ' (inactive)'}</option>`)
+    .join('');
+
+  const templatePanels = templates.map((t) => `
+    <div class="tmpl-panel" data-tmpl-panel="${escapeHtml(t.template_key)}" style="display:none;">
+      <form method="POST" action="/admin/branding/email-template/${encodeURIComponent(t.template_key)}" class="tmpl-form" data-dirty="0">
+        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+          <div style="flex:1; min-width:220px;">
+            <label>Template name</label>
+            <input type="text" name="display_name" value="${escapeHtml(t.display_name)}" maxlength="80" data-dirty-watch>
+          </div>
+          <div style="flex:1; min-width:220px;">
+            <label>Trigger — when this sends</label>
+            <select name="trigger_event" data-dirty-watch>${triggerSelectOptions(t.trigger_event)}</select>
+          </div>
+        </div>
+
+        <label>Subject</label>
+        <input type="text" name="subject" value="${escapeHtml(t.subject)}" maxlength="200" data-dirty-watch>
+
+        <label>Body</label>
+        <div class="tmpl-toolbar">
+          <button type="button" data-cmd="bold" title="Bold"><strong>B</strong></button>
+          <button type="button" data-cmd="italic" title="Italic"><em>I</em></button>
+          <button type="button" data-cmd="formatBlock" data-arg="H2" title="Heading">H</button>
+          <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">• List</button>
+          <button type="button" data-cmd="createLink" title="Insert link">Link</button>
+          <button type="button" data-insert-logo title="Insert logo image">Logo</button>
+          <select data-insert-var aria-label="Insert variable"><option value="">Insert variable…</option>${variableInsertOptions}</select>
+          <button type="button" data-toggle-source title="Edit raw HTML">&lt;/&gt; HTML</button>
+        </div>
+        <div class="tmpl-editor" contenteditable="true" data-editor data-dirty-watch>${t.body_html}</div>
+        <textarea class="tmpl-source" name="body_html" data-source style="display:none;">${escapeHtml(t.body_html)}</textarea>
+
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" name="cta_enabled" value="1" ${t.cta_enabled ? 'checked' : ''} style="width:auto;" data-dirty-watch>
+          <span>Show the review button on each product card</span>
+        </label>
+        <label>Button label</label>
+        <input type="text" name="cta_label" value="${escapeHtml(t.cta_label)}" maxlength="60" data-dirty-watch>
+
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" name="is_active" value="1" ${t.is_active ? 'checked' : ''} style="width:auto;" data-dirty-watch>
+          <span>Active — the system sends this when its trigger fires</span>
+        </label>
+
+        <div style="margin-top:16px; display:flex; gap:8px; align-items:center;">
+          <button type="submit" class="primary">Save template</button>
+          <a href="/admin/branding/email-template/${encodeURIComponent(t.template_key)}/preview" target="_blank" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;text-decoration:none;color:var(--text);font-size:13px;background:var(--surface);">Preview in new tab</a>
+          <code style="font-size:11px;color:var(--muted);margin-left:auto;">${escapeHtml(t.template_key)}</code>
+        </div>
+      </form>
+      <form method="POST" action="/admin/branding/email-template/${encodeURIComponent(t.template_key)}/delete" onsubmit="return confirm('Delete this template? This cannot be undone.');" style="margin-top:8px;">
+        <button type="submit" class="danger">Delete this template</button>
+      </form>
+    </div>
+  `).join('');
+
   const templateCards = templates.length === 0
     ? '<p class="muted">No email templates found. (They should have been seeded on first boot — try restarting the container if this is unexpected.)</p>'
-    : templates.map((t) => `
-      <div class="card" id="template-${escapeHtml(t.template_key)}">
-        <h4 style="margin:0 0 8px;">${escapeHtml(t.display_name)} <code style="font-size:0.75em;color:#888;font-weight:normal;">${escapeHtml(t.template_key)}</code></h4>
-        <form method="POST" action="/admin/branding/email-template/${encodeURIComponent(t.template_key)}">
-          <label for="t-${t.id}-subject">Subject</label>
-          <input type="text" id="t-${t.id}-subject" name="subject" value="${escapeHtml(t.subject)}" maxlength="200">
-          <p class="muted" style="font-size:12px;margin:4px 0 0;">Variables: <code>{{ brandName }}</code>, <code>{{ firstName }}</code>, <code>{{ productName }}</code>, <code>{{ productCount }}</code></p>
-
-          <label for="t-${t.id}-body">Body (HTML)</label>
-          <textarea id="t-${t.id}-body" name="body_html" rows="14" style="font-family:monospace;font-size:13px;">${escapeHtml(t.body_html)}</textarea>
-          <p class="muted" style="font-size:12px;margin:4px 0 0;">Variables: same as subject, plus <code>{{ productsHtml }}</code> (renders the per-product cards). Put <code>{{ productsHtml }}</code> wherever you want the product list to appear in the email.</p>
-
-          <label style="display:flex; align-items:center; gap:8px;">
-            <input type="checkbox" name="cta_enabled" value="1" ${t.cta_enabled ? 'checked' : ''} style="width:auto;">
-            <span>Show "Write a review" button on each product card</span>
-          </label>
-
-          <label for="t-${t.id}-cta-label">Button label</label>
-          <input type="text" id="t-${t.id}-cta-label" name="cta_label" value="${escapeHtml(t.cta_label)}" maxlength="60">
-
-          <label style="display:flex; align-items:center; gap:8px;">
-            <input type="checkbox" name="is_active" value="1" ${t.is_active ? 'checked' : ''} style="width:auto;">
-            <span>Template is active (dispatcher will use this template when its key matches)</span>
-          </label>
-
-          <div style="margin-top:16px; display:flex; gap:8px;">
-            <button type="submit" class="primary">Save template</button>
-            <a href="/admin/branding/email-template/${encodeURIComponent(t.template_key)}/preview" target="_blank" style="padding:6px 12px;border:1px solid #ccc;border-radius:4px;text-decoration:none;color:#222;font-size:13px;background:#fff;">Preview in new tab</a>
+    : `
+      <div class="card">
+        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+          <div style="flex:1; min-width:240px;">
+            <label for="tmpl-select">Template to edit</label>
+            <select id="tmpl-select">${templateSelectorOptions}</select>
           </div>
-        </form>
+          <button type="button" id="tmpl-new-toggle">+ New template</button>
+        </div>
       </div>
-    `).join('');
+
+      <form method="POST" action="/admin/branding/email-template/new" class="card" id="tmpl-new-form" style="display:none;">
+        <h4 style="margin:0 0 8px;">New template</h4>
+        <label>Template name</label>
+        <input type="text" name="display_name" maxlength="80" placeholder="e.g. Thank-you after review" required>
+        <label>Trigger — when this sends</label>
+        <select name="trigger_event">${triggerSelectOptions(null)}</select>
+        <label>Subject</label>
+        <input type="text" name="subject" maxlength="200" placeholder="Subject line">
+        <p class="muted" style="font-size:12px;">Created inactive with a starter body — edit and activate it after creating.</p>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <button type="submit" class="primary">Create template</button>
+          <button type="button" id="tmpl-new-cancel">Cancel</button>
+        </div>
+      </form>
+
+      <details class="card" style="margin-bottom:16px;">
+        <summary style="cursor:pointer;font-weight:600;">Available variables</summary>
+        <p class="muted" style="margin-top:8px;">Insert these in a subject or body via the editor's "Insert variable" menu. Any variable an email doesn't have a value for is left blank.</p>
+        <ul class="muted" style="font-size:13px; line-height:1.7;">${variableHelpList}</ul>
+      </details>
+
+      ${templatePanels}
+    `;
 
   const emailTab = `
-    <p class="muted">Email templates ship with sensible defaults that use your Shopify brand colors (CTA button) and logo (when synced). Edit the shared branding fields below — they wrap every template — or open a specific template to customize its subject, body copy, and CTA. Designed to scale to many templates: today the dispatcher uses two (<code>request_first</code> for new customers, <code>request_repeat</code> for returning ones); future templates plug into the same system.</p>
+    <p class="muted">Email templates ship with sensible defaults that use your Shopify brand colors (CTA button) and logo (when synced). Edit the shared branding fields below — they wrap every template — then pick a template to customize its name, trigger, subject, body, and CTA. Each template is bound to a <strong>trigger</strong> (the event that sends it); the system uses the active template for each trigger. You can create your own templates and delete ones you don't need.</p>
 
     <h3>Shared email branding</h3>
     <p class="muted">These fields apply to every email the dispatcher sends. Leave a field blank to use the default shown.</p>
@@ -2304,7 +2379,7 @@ admin.get('/branding', (c) => {
     </form>
 
     <h3 style="margin-top:32px;">Templates</h3>
-    <p class="muted">Edit the per-template content. Customers receive <code>request_first</code> the first time they're asked, <code>request_repeat</code> on subsequent asks. Adding new templates programmatically is supported — the dispatcher's "which template to use" logic is the next thing to extend when you want template-by-cohort or per-product variations.</p>
+    <p class="muted">Pick a template from the dropdown to edit it. The visual editor has a toolbar plus "Insert variable" and "Insert logo" — or switch to raw HTML with the <code>&lt;/&gt; HTML</code> button. Switching templates with unsaved changes will prompt before discarding.</p>
     ${templateCards}
   `;
 
@@ -2509,6 +2584,96 @@ admin.get('/branding', (c) => {
         });
       })();
     </script>
+
+    <style>
+      .tmpl-toolbar { display:flex; gap:4px; flex-wrap:wrap; align-items:center; border:1px solid var(--border-strong); border-bottom:none; border-radius:4px 4px 0 0; padding:6px; background:var(--surface-alt); }
+      .tmpl-toolbar button { padding:4px 9px; font-size:13px; }
+      .tmpl-toolbar select { width:auto; padding:4px 6px; font-size:13px; }
+      .tmpl-editor { border:1px solid var(--border-strong); border-radius:0 0 4px 4px; padding:12px; min-height:220px; background:var(--surface); color:var(--text); font-size:14px; line-height:1.5; overflow:auto; }
+      .tmpl-editor:focus { outline:2px solid var(--accent); outline-offset:-2px; }
+      .tmpl-source { border-radius:0 0 4px 4px; font-family:monospace; font-size:13px; min-height:220px; }
+    </style>
+    <script>
+      (function () {
+        var select = document.getElementById('tmpl-select');
+        if (!select) return;
+        var logoUrl = ${JSON.stringify(resolvedEmail.logoUrl ?? '')};
+        var panels = document.querySelectorAll('[data-tmpl-panel]');
+        function panelFor(key) { return document.querySelector('[data-tmpl-panel="' + key + '"]'); }
+        function showPanel(key) {
+          panels.forEach(function (p) { p.style.display = p.getAttribute('data-tmpl-panel') === key ? 'block' : 'none'; });
+        }
+        function insertAtCaret(ta, text) {
+          var start = ta.selectionStart || 0, end = ta.selectionEnd || 0;
+          ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+          ta.selectionStart = ta.selectionEnd = start + text.length;
+          ta.focus();
+        }
+        document.querySelectorAll('.tmpl-form').forEach(function (form) {
+          function markDirty() { form.setAttribute('data-dirty', '1'); }
+          form.querySelectorAll('[data-dirty-watch]').forEach(function (el) {
+            el.addEventListener('input', markDirty);
+            el.addEventListener('change', markDirty);
+          });
+          var editor = form.querySelector('[data-editor]');
+          var source = form.querySelector('[data-source]');
+          // Keep the named body_html textarea in sync from the visual editor on submit.
+          form.addEventListener('submit', function () {
+            if (editor && source && editor.style.display !== 'none') source.value = editor.innerHTML;
+            form.setAttribute('data-dirty', '0');
+          });
+          form.querySelectorAll('[data-cmd]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+              if (editor) editor.focus();
+              var cmd = btn.getAttribute('data-cmd');
+              var arg = btn.getAttribute('data-arg') || null;
+              if (cmd === 'createLink') { var url = prompt('Link URL:'); if (url) document.execCommand('createLink', false, url); markDirty(); return; }
+              document.execCommand(cmd, false, arg);
+              markDirty();
+            });
+          });
+          var logoBtn = form.querySelector('[data-insert-logo]');
+          if (logoBtn) logoBtn.addEventListener('click', function () {
+            if (editor) editor.focus();
+            var url = logoUrl || '{{ logoUrl }}';
+            document.execCommand('insertHTML', false, '<img src="' + url + '" alt="logo" style="max-width:140px;height:auto;" />');
+            markDirty();
+          });
+          var varSel = form.querySelector('[data-insert-var]');
+          if (varSel) varSel.addEventListener('change', function () {
+            var key = varSel.value; if (!key) return;
+            var token = '{{ ' + key + ' }}';
+            if (editor && editor.style.display !== 'none') { editor.focus(); document.execCommand('insertText', false, token); }
+            else if (source) insertAtCaret(source, token);
+            markDirty();
+            varSel.value = '';
+          });
+          var toggleBtn = form.querySelector('[data-toggle-source]');
+          if (toggleBtn) toggleBtn.addEventListener('click', function () {
+            if (!editor || !source) return;
+            if (editor.style.display === 'none') { editor.innerHTML = source.value; editor.style.display = ''; source.style.display = 'none'; }
+            else { source.value = editor.innerHTML; source.style.display = ''; editor.style.display = 'none'; }
+          });
+        });
+        select.addEventListener('change', function () {
+          var prev = select.getAttribute('data-current');
+          var prevPanel = prev ? panelFor(prev) : null;
+          var prevForm = prevPanel ? prevPanel.querySelector('.tmpl-form') : null;
+          if (prevForm && prevForm.getAttribute('data-dirty') === '1') {
+            if (!confirm('You have unsaved changes in the current template. Switch and discard them?')) { select.value = prev; return; }
+          }
+          select.setAttribute('data-current', select.value);
+          showPanel(select.value);
+        });
+        select.setAttribute('data-current', select.value);
+        showPanel(select.value);
+        var newToggle = document.getElementById('tmpl-new-toggle');
+        var newForm = document.getElementById('tmpl-new-form');
+        var newCancel = document.getElementById('tmpl-new-cancel');
+        if (newToggle && newForm) newToggle.addEventListener('click', function () { newForm.style.display = newForm.style.display === 'none' ? 'block' : 'none'; });
+        if (newCancel && newForm) newCancel.addEventListener('click', function () { newForm.style.display = 'none'; });
+      })();
+    </script>
   `, 'branding'));
 });
 
@@ -2551,6 +2716,9 @@ admin.post('/branding/email-template/:key', async (c) => {
   const ctaLabel = String(form.get('cta_label') ?? '').trim();
   const ctaEnabled = form.get('cta_enabled') === '1';
   const isActive   = form.get('is_active') === '1';
+  const displayNameRaw = String(form.get('display_name') ?? '').trim();
+  const triggerRaw = String(form.get('trigger_event') ?? '');
+  const triggerEvent = isEmailTrigger(triggerRaw) ? triggerRaw : existing.trigger_event;
 
   if (!subject) {
     return c.html(adminShell('Invalid input', `<div class="err">Subject can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
@@ -2561,14 +2729,45 @@ admin.post('/branding/email-template/:key', async (c) => {
 
   upsertEmailTemplate({
     templateKey: key,
-    displayName: existing.display_name,
+    displayName: displayNameRaw || existing.display_name,
     subject,
     bodyHtml,
     ctaEnabled,
     ctaLabel: ctaLabel || 'Write a review',
     isActive,
+    triggerEvent,
   });
-  log('info', 'admin saved email template', { templateKey: key, isActive, ctaEnabled });
+  log('info', 'admin saved email template', { templateKey: key, isActive, ctaEnabled, triggerEvent });
+  return c.redirect('/admin/branding?saved=1#email');
+});
+
+admin.post('/branding/email-template/new', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const displayName = String(form.get('display_name') ?? '').trim();
+  const triggerRaw = String(form.get('trigger_event') ?? '');
+  const subject = String(form.get('subject') ?? '').trim() || 'New email subject';
+  if (!displayName) {
+    return c.html(adminShell('Invalid input', `<div class="err">Template name can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
+  }
+  const created = createEmailTemplate({
+    displayName,
+    triggerEvent: isEmailTrigger(triggerRaw) ? triggerRaw : null,
+    subject,
+    bodyHtml: `<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Hi {{ firstName }},</p>\n<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Write your email here.</p>`,
+    ctaEnabled: false,
+    ctaLabel: 'Write a review',
+    isActive: false,
+  });
+  log('info', 'admin created email template', { templateKey: created.template_key });
+  return c.redirect('/admin/branding?saved=1#email');
+});
+
+admin.post('/branding/email-template/:key/delete', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const key = c.req.param('key');
+  deleteEmailTemplate(key);
+  log('info', 'admin deleted email template', { templateKey: key });
   return c.redirect('/admin/branding?saved=1#email');
 });
 
@@ -2615,6 +2814,12 @@ admin.get('/branding/email-template/:key/preview', (c) => {
       </table>
     `,
     unsubGlobalUrl: '#preview',
+    // Flat global variables — sample values so any template (request, removed,
+    // etc.) previews with content rather than blanks.
+    unsubscribeUrl: '#preview',
+    reviewUrl: '#preview',
+    retractionReason: 'contained content that violates our review guidelines',
+    logoUrl: branding.logoUrl ?? '',
   };
   const renderedBody = renderString(template.body_html, sampleCtx);
   const renderedSubject = renderString(template.subject, sampleCtx);
