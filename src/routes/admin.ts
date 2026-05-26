@@ -19,8 +19,44 @@ import {
   listEmailTemplates,
   findEmailTemplate,
   upsertEmailTemplate,
+  retractReview,
+  restoreReview,
+  listModerationEvents,
+  isModerationReason,
+  MODERATION_REASONS,
+  MODERATION_REASON_LABELS,
+  MODERATION_REASON_CUSTOMER_PHRASES,
+  listOpenReportsGroupedByReview,
+  countOpenReports,
+  listReportsForReview,
+  findReviewReportById,
+  resolveReports,
+  resolveAllOpenReportsForReview,
+  banReporter,
+  unbanReporter,
+  listBannedReporters,
+  REPORT_REASON_LABELS,
   type ReviewRow,
+  type ModerationEventRow,
+  type ModerationReason,
+  type ReviewReportRow,
+  type ReportReason,
 } from '../db/queries.js';
+import { sendTemplateEmail } from '../email/send-template.js';
+import { getProfanityWordlist, setProfanityWordlist } from '../lib/profanity.js';
+import { getNewReviewNotifyConfig, setNewReviewNotifyConfig } from '../email/notify-new-review.js';
+import {
+  getPauseState,
+  pauseReviews,
+  extendPause,
+  resumeReviews,
+  listPanicEvents,
+  PAUSE_DEFAULT_HOURS,
+  PAUSE_MIN_HOURS,
+  PAUSE_MAX_HOURS,
+  type PanicEventRow,
+} from '../lib/panic.js';
+import { sendMail } from '../email/smtp-client.js';
 import { signSampleInviteToken, SAMPLE_INVITE_TTL_DAYS } from '../email/tokens.js';
 import { parse as parseCsv } from 'csv-parse/sync';
 import { getOrFetchProduct } from '../shopify/product-info.js';
@@ -61,10 +97,51 @@ const requireAuth = async (c: import('hono').Context): Promise<boolean> => {
   return verifySessionCookie(cookie);
 };
 
+const formatRemaining = (sec: number): string => {
+  if (sec <= 0) return 'now';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h >= 24) {
+    const d = Math.floor(h / 24);
+    const remH = h % 24;
+    return `${d}d ${remH}h`;
+  }
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+};
+
+// Global pause banner injected into adminShell. Surfaces at the top of every
+// admin page when the panic button is active, with a one-click resume form
+// and an at-a-glance countdown. Designed to be hard to ignore.
+const renderPauseBannerHtml = (): string => {
+  const state = getPauseState();
+  if (!state.paused) return '';
+  const reason = state.reason ?? '(no reason recorded)';
+  const remaining = formatRemaining(state.secondsRemaining);
+  return `
+    <div class="pause-banner">
+      <div class="pause-banner-text">
+        <strong>REVIEWS ARE PAUSED</strong> — auto-resumes in ${escapeHtml(remaining)}. Reason: <em>${escapeHtml(reason)}</em>
+      </div>
+      <form method="POST" action="/admin/panic/resume" class="pause-banner-actions">
+        <button type="submit" class="pause-resume-btn">Resume now</button>
+      </form>
+    </div>
+  `;
+};
+
 const adminShell = (title: string, body: string, navActive?: string): string => {
+  // Open-reports count drives the "Reports" tab badge. Cheap query — single
+  // COUNT(*) on an indexed column — so we run it on every admin page.
+  const openReportsCount = countOpenReports();
+  const reportsBadge = openReportsCount > 0
+    ? ` <span class="nav-badge">${openReportsCount}</span>`
+    : '';
+
   const tabs = [
     { href: '/admin/dashboard',           label: 'Dashboard',   key: 'dashboard' },
     { href: '/admin/reviews',             label: 'Reviews',     key: 'reviews' },
+    { href: '/admin/reports',             label: `Reports${reportsBadge}`, key: 'reports' },
     { href: '/admin/sample-invitations',  label: 'Invitations', key: 'invitations' },
     { href: '/admin/branding',            label: 'Branding',    key: 'branding' },
     { href: '/admin/settings',            label: 'Settings',    key: 'settings' },
@@ -74,6 +151,8 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
       (t) => `<a href="${t.href}" class="${t.key === navActive ? 'active' : ''}">${t.label}</a>`,
     )
     .join('');
+
+  const pauseBanner = renderPauseBannerHtml();
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -124,9 +203,17 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     .tabs a.active { color: #222; border-bottom-color: #222; font-weight: 600; }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
+    .nav-badge { display:inline-block; background:#b00; color:#fff; font-size:11px; padding:1px 6px; border-radius:8px; margin-left:4px; font-weight:600; }
+    .pause-banner { background: #b00; color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 14px; }
+    .pause-banner-text strong { letter-spacing: 1px; margin-right: 8px; }
+    .pause-banner-text em { font-style: italic; opacity: 0.95; }
+    .pause-resume-btn { background:#fff; color:#b00; border: none; border-radius: 4px; padding: 6px 12px; font-weight: 600; font-size: 13px; cursor: pointer; }
+    .pause-resume-btn:hover { background:#fde; }
+    @media (max-width: 600px) { .pause-banner { flex-direction: column; align-items: stretch; text-align: center; } }
   </style>
 </head>
 <body>
+  ${pauseBanner}
   <header>
     <h1>Reviews admin</h1>
     <nav>${navHtml}</nav>
@@ -238,6 +325,22 @@ admin.use('/branding/*', async (c, next) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
   await next();
 });
+admin.use('/reports', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/reports/*', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/panic/*', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
+admin.use('/settings/*', async (c, next) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  await next();
+});
 
 // --- Dashboard ---
 
@@ -302,6 +405,128 @@ const reviewRowHtml = (r: ReviewRow): string => `
   </tr>
 `;
 
+// --- Panic-button UI helpers ---
+
+const renderPanicCard = (
+  state: ReturnType<typeof getPauseState>,
+  events: PanicEventRow[],
+): string => {
+  const historyHtml = events.length === 0
+    ? '<p class="muted">No pause history yet.</p>'
+    : `<table>
+        <thead><tr><th>When</th><th>Event</th><th>Reason</th><th>Until</th><th>Actor</th></tr></thead>
+        <tbody>${events.map((ev) => `
+          <tr>
+            <td class="muted">${formatTs(ev.created_at)}</td>
+            <td><span class="pill ${ev.event_type === 'resume' ? 'pill-published' : 'pill-rejected'}">${escapeHtml(ev.event_type)}</span></td>
+            <td>${ev.reason ? escapeHtml(ev.reason) : '<span class="muted">—</span>'}</td>
+            <td class="muted">${ev.paused_until ? formatTs(ev.paused_until) : '—'}</td>
+            <td class="muted">${escapeHtml(ev.actor)}</td>
+          </tr>
+        `).join('')}</tbody>
+       </table>`;
+
+  if (state.paused) {
+    const remaining = formatRemaining(state.secondsRemaining);
+    const untilText = state.pausedUntil
+      ? new Date(state.pausedUntil * 1000).toUTCString()
+      : 'unknown';
+    const pausedAtText = state.pausedAt
+      ? formatTs(state.pausedAt)
+      : 'unknown';
+    return `
+      <div class="card" id="panic-card" style="border:2px solid #b00;">
+        <h3 style="margin-top:0;color:#b00;">⏸ Reviews are paused</h3>
+        <p><strong>Auto-resumes in ${escapeHtml(remaining)}</strong> (at ${escapeHtml(untilText)}).</p>
+        <p>Paused at ${escapeHtml(pausedAtText)} · Reason: <em>${escapeHtml(state.reason ?? '(none)')}</em></p>
+
+        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:16px; align-items:flex-end;">
+          <form method="POST" action="/admin/panic/extend" style="display:flex; gap:8px; align-items:flex-end;">
+            <div>
+              <label for="extend-hours">Extend by</label>
+              <input id="extend-hours" name="hours" type="number" min="${PAUSE_MIN_HOURS}" max="${PAUSE_MAX_HOURS}" value="${PAUSE_DEFAULT_HOURS}" style="width:90px;"> hours
+            </div>
+            <button type="submit">Extend pause</button>
+          </form>
+
+          <form method="POST" action="/admin/panic/resume">
+            <button type="submit" class="primary">Resume reviews now</button>
+          </form>
+        </div>
+
+        <h4 style="margin-top:24px;">Pause history</h4>
+        ${historyHtml}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="card" id="panic-card">
+      <h3 style="margin-top:0;">Pause reviews (panic button)</h3>
+      <p class="muted">One-click emergency stop. When activated:</p>
+      <ul class="muted" style="margin:0 0 16px 24px; font-size:13px; line-height:1.7;">
+        <li>The storefront widget shows "Reviews are temporarily unavailable" instead of reviews and aggregate stars.</li>
+        <li>All review submission paths (email-link, sample invitation, App Proxy) return 503.</li>
+        <li>The daily dispatcher skips its run so new request emails aren't sent.</li>
+        <li>The developer is automatically notified by email${config.email.devNotificationEmail ? '' : ' (currently disabled — set <code>DEV_NOTIFICATION_EMAIL</code>)'}.</li>
+        <li>Auto-expires after the duration you set (max ${PAUSE_MAX_HOURS}h). Reviews resume automatically with no further action.</li>
+      </ul>
+      <button type="button" data-open-dialog="#panic-dialog" class="danger">Pause reviews now</button>
+
+      <h4 style="margin-top:24px;">Pause history</h4>
+      ${historyHtml}
+
+      <dialog class="retract-modal" id="panic-dialog">
+        <form method="POST" action="/admin/panic/pause">
+          <div class="modal-body">
+            <h3 style="color:#b00;">Pause reviews</h3>
+            <p class="muted" style="margin:0;font-size:13px;">This takes effect immediately and shows a non-alarming notice to storefront visitors. It will auto-resume after the duration you set unless you resume earlier.</p>
+
+            <label for="panic-reason">Reason <span style="color:#b00;">(required)</span></label>
+            <textarea id="panic-reason" name="reason" rows="3" maxlength="1000" required placeholder="e.g. Discovered coordinated fake reviews; pausing while we investigate."></textarea>
+
+            <label for="panic-hours">Duration (hours)</label>
+            <input id="panic-hours" name="hours" type="number" min="${PAUSE_MIN_HOURS}" max="${PAUSE_MAX_HOURS}" value="${PAUSE_DEFAULT_HOURS}" required style="width:120px;">
+            <p class="muted" style="margin:4px 0 0;font-size:12px;">Default ${PAUSE_DEFAULT_HOURS}h, max ${PAUSE_MAX_HOURS}h. You can extend or resume early at any time.</p>
+
+            <label for="panic-confirm">Type <code>${CONFIRM_PHRASE}</code> to confirm</label>
+            <input id="panic-confirm" name="confirm" type="text" required placeholder="${CONFIRM_PHRASE}" style="font-family:monospace;letter-spacing:1px;">
+
+            <div class="modal-actions">
+              <button type="button" data-close-dialog>Cancel</button>
+              <button type="submit" class="danger">Pause reviews</button>
+            </div>
+          </div>
+        </form>
+      </dialog>
+
+      <script>
+        (function () {
+          // Reuse the same dialog-open/close handlers used on the review-detail page.
+          document.querySelectorAll('[data-open-dialog]').forEach(function (btn) {
+            if (btn.dataset.panicWired === '1') return;
+            btn.dataset.panicWired = '1';
+            btn.addEventListener('click', function (e) {
+              e.preventDefault();
+              var target = document.querySelector(btn.getAttribute('data-open-dialog'));
+              if (target && typeof target.showModal === 'function') target.showModal();
+            });
+          });
+          document.querySelectorAll('[data-close-dialog]').forEach(function (btn) {
+            if (btn.dataset.panicWired === '1') return;
+            btn.dataset.panicWired = '1';
+            btn.addEventListener('click', function (e) {
+              e.preventDefault();
+              var dlg = btn.closest('dialog');
+              if (dlg) dlg.close();
+            });
+          });
+        })();
+      </script>
+    </div>
+  `;
+};
+
 // --- Reviews list ---
 
 admin.get('/reviews', (c) => {
@@ -341,7 +566,30 @@ admin.get('/reviews/:id', (c) => {
   const review = findReviewById(id);
   if (!review) return c.html(adminShell('Not found', `<p>Review ${id} not found.</p>`), 404);
 
+  const events = listModerationEvents(id);
+
+  // Flash banner reflecting query-string outcomes from the retract/restore
+  // redirects. Lightweight and stateless — survives a reload, fades when the
+  // user navigates away.
+  const flashBanner = (() => {
+    if (c.req.query('retracted') === '1') {
+      return `<div class="flash flash-ok">Review retracted.${
+        events[0]?.customer_notified ? ' Notification email sent to the reviewer.' : ''
+      }</div>`;
+    }
+    if (c.req.query('restored') === '1') {
+      return `<div class="flash flash-ok">Review restored.${
+        events[0]?.customer_notified ? ' Notification email sent to the reviewer.' : ''
+      }</div>`;
+    }
+    return '';
+  })();
+
+  const moderationCard = renderModerationCard(review);
+  const auditCard = renderAuditCard(events);
+
   return c.html(adminShell(`Review #${review.id}`, `
+    ${flashBanner}
     <h2>Review #${review.id}</h2>
     <div class="card">
       <p><span class="stars">${stars(review.rating)}</span> &nbsp; ${statusPill(review.status)}</p>
@@ -350,21 +598,9 @@ admin.get('/reviews/:id', (c) => {
       <p style="white-space: pre-wrap;">${escapeHtml(review.body)}</p>
     </div>
 
-    <div class="card">
-      <h3>Moderation</h3>
-      <form class="inline" method="POST" action="/admin/reviews/${review.id}/status">
-        <input type="hidden" name="status" value="published">
-        <button type="submit" class="primary">Publish</button>
-      </form>
-      <form class="inline" method="POST" action="/admin/reviews/${review.id}/status" style="margin-left:8px;">
-        <input type="hidden" name="status" value="pending">
-        <button type="submit">Hold for review</button>
-      </form>
-      <form class="inline" method="POST" action="/admin/reviews/${review.id}/status" style="margin-left:8px;">
-        <input type="hidden" name="status" value="rejected">
-        <button type="submit" class="danger">Reject</button>
-      </form>
-    </div>
+    ${moderationCard}
+
+    ${auditCard}
 
     <div class="card">
       <h3>Merchant reply</h3>
@@ -376,19 +612,351 @@ admin.get('/reviews/:id', (c) => {
       </form>
       <p class="muted" style="margin-top:12px;">Replies are stored now; a future update will surface them on the storefront.</p>
     </div>
+
+    <style>
+      .flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
+      .flash-ok { background: #dfe9d9; color: #2d572c; }
+      .retract-banner { background: #fdecea; border:1px solid #f5c2c0; color:#7a1f1c; padding:12px 14px; border-radius:6px; margin-bottom:16px; }
+      .retract-banner .retract-reason { font-weight: 600; margin-bottom: 4px; }
+      .retract-banner .retract-note { white-space: pre-wrap; font-size: 13px; color: #5a1815; margin-top: 6px; }
+      .audit-list { list-style: none; padding: 0; margin: 0; }
+      .audit-list li { border-left: 3px solid #ddd; padding: 8px 12px; margin-bottom: 10px; background: #fafafa; border-radius: 0 4px 4px 0; }
+      .audit-list li.event-retract { border-left-color: #b00; }
+      .audit-list li.event-restore { border-left-color: #2d572c; }
+      .audit-list .audit-ts { font-size: 12px; color: #888; }
+      .audit-list .audit-headline { font-weight: 600; margin: 2px 0; }
+      .audit-list .audit-note { white-space: pre-wrap; font-size: 13px; color: #444; margin-top: 4px; }
+      dialog.retract-modal { border: none; border-radius: 8px; padding: 0; max-width: 520px; width: 90vw; box-shadow: 0 10px 40px rgba(0,0,0,0.2); }
+      dialog.retract-modal::backdrop { background: rgba(0,0,0,0.4); }
+      dialog.retract-modal .modal-body { padding: 24px; }
+      dialog.retract-modal h3 { margin-top: 0; }
+      dialog.retract-modal label { display: block; font-size: 13px; font-weight: 600; margin-top: 14px; margin-bottom: 6px; }
+      dialog.retract-modal select, dialog.retract-modal textarea { width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }
+      dialog.retract-modal .checkbox-row { display:flex; align-items:flex-start; gap:8px; margin-top: 16px; font-weight: normal; }
+      dialog.retract-modal .checkbox-row input { width: auto; margin-top: 2px; }
+      dialog.retract-modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+    </style>
+
+    <script>
+      (function () {
+        document.querySelectorAll('[data-open-dialog]').forEach(function (btn) {
+          btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            var target = document.querySelector(btn.getAttribute('data-open-dialog'));
+            if (target && typeof target.showModal === 'function') target.showModal();
+          });
+        });
+        document.querySelectorAll('[data-close-dialog]').forEach(function (btn) {
+          btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            var dlg = btn.closest('dialog');
+            if (dlg) dlg.close();
+          });
+        });
+      })();
+    </script>
   `, 'reviews'));
 });
 
+// --- Review-detail UI helpers ---
+
+const renderModerationCard = (review: ReviewRow): string => {
+  if (review.status === 'rejected') {
+    const reasonLabel = review.moderation_reason
+      ? MODERATION_REASON_LABELS[review.moderation_reason as ModerationReason]
+        ?? review.moderation_reason
+      : 'No reason recorded';
+    const noteBlock = review.moderation_note
+      ? `<div class="retract-note">${escapeHtml(review.moderation_note)}</div>`
+      : '';
+    return `
+      <div class="card">
+        <h3>Moderation</h3>
+        <div class="retract-banner">
+          <div class="retract-reason">Retracted — ${escapeHtml(reasonLabel)}</div>
+          ${noteBlock || '<div class="muted" style="font-size:13px;">No internal note.</div>'}
+        </div>
+        <button type="button" data-open-dialog="#restore-dialog-${review.id}" class="primary">Restore review</button>
+        <p class="muted" style="margin-top:10px;font-size:13px;">Restoring puts the review back on the storefront. The retract history (with reason and note) stays in the audit log below.</p>
+
+        ${renderRestoreDialog(review)}
+      </div>
+    `;
+  }
+
+  // Published or pending: offer retract + the other workflow flip.
+  const otherStatus = review.status === 'pending' ? 'published' : 'pending';
+  const otherLabel  = review.status === 'pending' ? 'Publish'   : 'Hold for review';
+
+  return `
+    <div class="card">
+      <h3>Moderation</h3>
+      <button type="button" data-open-dialog="#retract-dialog-${review.id}" class="danger">Retract review</button>
+      <form class="inline" method="POST" action="/admin/reviews/${review.id}/status" style="margin-left:8px;">
+        <input type="hidden" name="status" value="${otherStatus}">
+        <button type="submit">${otherLabel}</button>
+      </form>
+      <p class="muted" style="margin-top:10px;font-size:13px;">Retracting removes the review from the storefront. A reason is required; the optional note stays internal. You can notify the reviewer by email if you want.</p>
+
+      ${renderRetractDialog(review)}
+    </div>
+  `;
+};
+
+const renderRetractDialog = (review: ReviewRow): string => {
+  const reasonOptions = MODERATION_REASONS
+    .map((key) => `<option value="${key}">${escapeHtml(MODERATION_REASON_LABELS[key])}</option>`)
+    .join('');
+  return `
+    <dialog class="retract-modal" id="retract-dialog-${review.id}">
+      <form method="POST" action="/admin/reviews/${review.id}/retract">
+        <div class="modal-body">
+          <h3>Retract review #${review.id}</h3>
+          <p class="muted" style="margin:0;font-size:13px;">This removes the review from the storefront immediately. The action is logged and reversible — you can restore it later.</p>
+
+          <label for="retract-reason-${review.id}">Reason</label>
+          <select id="retract-reason-${review.id}" name="reason" required>
+            ${reasonOptions}
+          </select>
+
+          <label for="retract-note-${review.id}">Internal note (optional)</label>
+          <textarea id="retract-note-${review.id}" name="note" rows="3" maxlength="2000" placeholder="Context for the audit log. Never shown to the customer."></textarea>
+
+          <label class="checkbox-row">
+            <input type="checkbox" name="notify_customer" value="1" checked>
+            <span>Email the reviewer to let them know (recommended; uncheck for legal-takedown or harassment cases where notification could escalate). The email uses the friendly version of the reason; the internal note is never sent.</span>
+          </label>
+
+          <div class="modal-actions">
+            <button type="button" data-close-dialog>Cancel</button>
+            <button type="submit" class="danger">Retract review</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+  `;
+};
+
+const renderRestoreDialog = (review: ReviewRow): string => {
+  return `
+    <dialog class="retract-modal" id="restore-dialog-${review.id}">
+      <form method="POST" action="/admin/reviews/${review.id}/restore">
+        <div class="modal-body">
+          <h3>Restore review #${review.id}</h3>
+          <p class="muted" style="margin:0;font-size:13px;">This puts the review back on the storefront. The audit log keeps the original retract event and adds this restore.</p>
+
+          <label for="restore-note-${review.id}">Internal note (optional)</label>
+          <textarea id="restore-note-${review.id}" name="note" rows="3" maxlength="2000" placeholder="Why are you restoring? Stays internal."></textarea>
+
+          <label class="checkbox-row">
+            <input type="checkbox" name="notify_customer" value="1">
+            <span>Email the reviewer to let them know their review is back. Off by default — most restores are routine and the email reads as noise.</span>
+          </label>
+
+          <div class="modal-actions">
+            <button type="button" data-close-dialog>Cancel</button>
+            <button type="submit" class="primary">Restore review</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+  `;
+};
+
+const renderAuditCard = (events: ModerationEventRow[]): string => {
+  if (events.length === 0) {
+    return `
+      <div class="card">
+        <h3>Moderation history</h3>
+        <p class="muted">No moderation actions yet.</p>
+      </div>
+    `;
+  }
+  const items = events.map((ev) => {
+    const reasonText = ev.reason
+      ? (MODERATION_REASON_LABELS[ev.reason as ModerationReason] ?? ev.reason)
+      : null;
+    const headline = ev.event_type === 'retract'
+      ? `Retracted (${escapeHtml(ev.from_status)} → rejected)`
+      : `Restored (${escapeHtml(ev.from_status)} → published)`;
+    const reasonLine = reasonText
+      ? `<div>Reason: ${escapeHtml(reasonText)}</div>`
+      : '';
+    const noteLine = ev.note
+      ? `<div class="audit-note">${escapeHtml(ev.note)}</div>`
+      : '';
+    const notifyLine = ev.customer_notified
+      ? '<div style="font-size:12px;color:#2d572c;margin-top:4px;">Customer notified by email</div>'
+      : '<div style="font-size:12px;color:#888;margin-top:4px;">Customer not notified</div>';
+    return `
+      <li class="event-${escapeHtml(ev.event_type)}">
+        <div class="audit-ts">${formatTs(ev.created_at)} · ${escapeHtml(ev.actor)}</div>
+        <div class="audit-headline">${headline}</div>
+        ${reasonLine}
+        ${noteLine}
+        ${notifyLine}
+      </li>
+    `;
+  }).join('');
+  return `
+    <div class="card">
+      <h3>Moderation history</h3>
+      <ul class="audit-list">${items}</ul>
+    </div>
+  `;
+};
+
+// Light-touch status change: published ↔ pending only. Going to 'rejected'
+// requires a reason and goes through /retract. Restoring from 'rejected'
+// goes through /restore. This route doesn't touch the audit log because
+// publish↔pending isn't a moderation decision (it's a workflow nudge).
 admin.post('/reviews/:id/status', async (c) => {
   const id = Number(c.req.param('id'));
   const form = await c.req.formData();
   const next = String(form.get('status') ?? '');
-  if (!['published', 'pending', 'rejected'].includes(next)) {
-    return c.text('invalid status', 400);
+  if (!['published', 'pending'].includes(next)) {
+    return c.text('invalid status (use /retract or /restore for rejected transitions)', 400);
   }
-  updateReviewStatus(id, next as 'published' | 'pending' | 'rejected');
+  const existing = findReviewById(id);
+  if (!existing) return c.text('review not found', 404);
+  if (existing.status === 'rejected') {
+    return c.text('use /restore to bring a rejected review back', 400);
+  }
+  updateReviewStatus(id, next as 'published' | 'pending');
   log('info', 'admin review status changed', { id, status: next });
   return c.redirect(`/admin/reviews/${id}`);
+});
+
+// Fire-and-log helper: send the retract/restore notification email. Failures
+// are logged but do NOT roll back the moderation action — the moderation is
+// the source of truth; the notification is a courtesy. If SMTP is down we
+// still want the review off the storefront.
+const sendModerationEmail = async (input: {
+  templateKey: 'review_retracted' | 'review_restored';
+  to: string;
+  context: Record<string, string | number>;
+  reviewId: number;
+}): Promise<void> => {
+  try {
+    const result = await sendTemplateEmail({
+      templateKey: input.templateKey,
+      to: input.to,
+      context: input.context,
+    });
+    log('info', 'moderation email dispatched', {
+      reviewId: input.reviewId,
+      templateKey: input.templateKey,
+      to: input.to,
+      sent: result.sent,
+      reason: result.reason,
+    });
+  } catch (err) {
+    log('error', 'moderation email send failed', {
+      reviewId: input.reviewId,
+      templateKey: input.templateKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
+
+admin.post('/reviews/:id/retract', async (c) => {
+  const id = Number(c.req.param('id'));
+  const review = findReviewById(id);
+  if (!review) return c.text('review not found', 404);
+  if (review.status === 'rejected') {
+    return c.redirect(`/admin/reviews/${id}?already=rejected`);
+  }
+
+  const form = await c.req.formData();
+  const reasonRaw = String(form.get('reason') ?? '');
+  if (!isModerationReason(reasonRaw)) {
+    return c.text('invalid or missing reason', 400);
+  }
+  const noteRaw = String(form.get('note') ?? '').trim();
+  const note = noteRaw === '' ? null : noteRaw.slice(0, 2000);
+  const notifyCustomer = form.get('notify_customer') === '1';
+
+  retractReview({
+    reviewId: id,
+    fromStatus: review.status,
+    reason: reasonRaw,
+    note,
+    actor: 'admin',
+    customerNotified: notifyCustomer,
+  });
+
+  log('info', 'admin retracted review', {
+    id,
+    fromStatus: review.status,
+    reason: reasonRaw,
+    hasNote: note !== null,
+    notifyCustomer,
+  });
+
+  if (notifyCustomer && review.reviewer_email) {
+    const product = await getOrFetchProduct(review.shopify_product_id);
+    const productTitle = product?.title ?? 'your purchase';
+    const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
+    await sendModerationEmail({
+      templateKey: 'review_retracted',
+      to: review.reviewer_email,
+      reviewId: id,
+      context: {
+        firstName: escapeHtml(firstName),
+        brandName: escapeHtml(config.email.brandName),
+        productName: escapeHtml(productTitle),
+        reasonPhrase: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
+      },
+    });
+  }
+
+  return c.redirect(`/admin/reviews/${id}?retracted=1`);
+});
+
+admin.post('/reviews/:id/restore', async (c) => {
+  const id = Number(c.req.param('id'));
+  const review = findReviewById(id);
+  if (!review) return c.text('review not found', 404);
+  if (review.status !== 'rejected') {
+    return c.redirect(`/admin/reviews/${id}?already=not-rejected`);
+  }
+
+  const form = await c.req.formData();
+  const noteRaw = String(form.get('note') ?? '').trim();
+  const note = noteRaw === '' ? null : noteRaw.slice(0, 2000);
+  // Restore notifications are off by default — most restores are routine
+  // (admin changed their mind, mistaken retract, false-positive on profanity
+  // filter) and a "your review is back" email reads as noise. Merchant can
+  // opt in per-restore.
+  const notifyCustomer = form.get('notify_customer') === '1';
+
+  restoreReview({
+    reviewId: id,
+    fromStatus: review.status,
+    note,
+    actor: 'admin',
+    customerNotified: notifyCustomer,
+  });
+
+  log('info', 'admin restored review', { id, hasNote: note !== null, notifyCustomer });
+
+  if (notifyCustomer && review.reviewer_email) {
+    const product = await getOrFetchProduct(review.shopify_product_id);
+    const productTitle = product?.title ?? 'your purchase';
+    const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
+    await sendModerationEmail({
+      templateKey: 'review_restored',
+      to: review.reviewer_email,
+      reviewId: id,
+      context: {
+        firstName: escapeHtml(firstName),
+        brandName: escapeHtml(config.email.brandName),
+        productName: escapeHtml(productTitle),
+      },
+    });
+  }
+
+  return c.redirect(`/admin/reviews/${id}?restored=1`);
 });
 
 admin.post('/reviews/:id/reply', async (c) => {
@@ -398,6 +966,210 @@ admin.post('/reviews/:id/reply', async (c) => {
   setMerchantReply(id, replyRaw === '' ? null : replyRaw);
   log('info', 'admin merchant reply saved', { id, hasReply: replyRaw !== '' });
   return c.redirect(`/admin/reviews/${id}`);
+});
+
+// --- Reports queue (storefront-flagged reviews) ---
+
+const reportRowHtml = (r: ReviewReportRow): string => {
+  const reasonLabel = REPORT_REASON_LABELS[r.reason as ReportReason] ?? r.reason;
+  const msg = r.message
+    ? `<div style="margin-top:6px;font-size:13px;white-space:pre-wrap;background:#fafafa;padding:8px;border-radius:4px;">${escapeHtml(r.message)}</div>`
+    : '';
+  const email = r.reporter_email ? escapeHtml(r.reporter_email) : '<span class="muted">anonymous</span>';
+  const banForm = r.reporter_email
+    ? `<form method="POST" action="/admin/reports/${r.id}/ban-reporter" class="inline" onsubmit="return confirm('Ban this email from filing future reports?');">
+         <button type="submit" class="danger" style="font-size:12px;padding:3px 8px;">Ban reporter</button>
+       </form>`
+    : '';
+  return `
+    <div style="border-top:1px solid #eee;padding:10px 0;">
+      <div style="font-size:13px;">
+        <strong>${escapeHtml(reasonLabel)}</strong> ·
+        <span class="muted">${formatTs(r.created_at)}</span> ·
+        Reporter: ${email}
+        ${banForm}
+      </div>
+      ${msg}
+      <form method="POST" action="/admin/reports/${r.id}/dismiss" class="inline" style="margin-top:8px;">
+        <button type="submit" style="font-size:12px;padding:3px 10px;">Dismiss this report</button>
+      </form>
+    </div>
+  `;
+};
+
+admin.get('/reports', (c) => {
+  const dismissedFlash = c.req.query('dismissed') === '1' ? '<div class="ok">Report dismissed.</div>' : '';
+  const retractedFlash = c.req.query('retracted') === '1' ? '<div class="ok">Review retracted and reports cleared.</div>' : '';
+  const bannedFlash = c.req.query('banned') ? `<div class="ok">Banned <code>${escapeHtml(c.req.query('banned') ?? '')}</code> from filing future reports.</div>` : '';
+  const unbannedFlash = c.req.query('unbanned') ? `<div class="ok">Unbanned <code>${escapeHtml(c.req.query('unbanned') ?? '')}</code>.</div>` : '';
+  const flash = dismissedFlash + retractedFlash + bannedFlash + unbannedFlash;
+
+  const groups = listOpenReportsGroupedByReview();
+  const banned = listBannedReporters();
+
+  const groupsHtml = groups.length === 0
+    ? '<div class="card"><p class="muted">No open reports. The storefront\'s "Report this review" links file new entries here.</p></div>'
+    : groups.map((g) => {
+        const reasonOptions = MODERATION_REASONS
+          .map((key) => `<option value="${key}">${escapeHtml(MODERATION_REASON_LABELS[key])}</option>`)
+          .join('');
+        const reportsHtml = g.reports.map(reportRowHtml).join('');
+        const reportCount = g.reports.length;
+        return `
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;">
+              <div style="flex:1;">
+                <p style="margin:0 0 6px;">
+                  <span class="stars">${stars(g.review.rating)}</span>
+                  ${statusPill(g.review.status)}
+                  · <a href="/admin/reviews/${g.review.id}">Open review #${g.review.id}</a>
+                  · <span class="muted">${reportCount} open report${reportCount === 1 ? '' : 's'}</span>
+                </p>
+                <p class="muted" style="margin:0 0 6px;font-size:13px;">Product ${escapeHtml(g.review.shopify_product_id)} · ${escapeHtml(g.review.reviewer_email)} · ${formatTs(g.review.created_at)}</p>
+                ${g.review.title ? `<p style="margin:0 0 6px;font-weight:600;">${escapeHtml(g.review.title)}</p>` : ''}
+                <p style="white-space:pre-wrap;font-size:14px;margin:0;background:#fafafa;padding:10px;border-radius:4px;">${escapeHtml(g.review.body)}</p>
+              </div>
+
+              <div style="min-width:260px;">
+                <form method="POST" action="/admin/reports/by-review/${g.review.id}/retract">
+                  <p style="font-size:13px;margin:0 0 6px;font-weight:600;">Retract this review</p>
+                  <select name="reason" required style="margin-bottom:6px;">${reasonOptions}</select>
+                  <textarea name="note" rows="2" maxlength="2000" placeholder="Internal note (optional)" style="margin-bottom:6px;font-size:13px;"></textarea>
+                  <label style="display:flex;align-items:center;gap:6px;font-weight:normal;font-size:12px;margin:6px 0;">
+                    <input type="checkbox" name="notify_customer" value="1" checked style="width:auto;">
+                    <span>Email reviewer</span>
+                  </label>
+                  <button type="submit" class="danger" style="width:100%;font-size:13px;">Retract review</button>
+                </form>
+                <form method="POST" action="/admin/reports/by-review/${g.review.id}/dismiss-all" style="margin-top:8px;">
+                  <button type="submit" style="width:100%;font-size:13px;">Dismiss all reports for this review</button>
+                </form>
+              </div>
+            </div>
+
+            <h4 style="margin:16px 0 4px;font-size:14px;">Individual reports</h4>
+            ${reportsHtml}
+          </div>
+        `;
+      }).join('');
+
+  const bannedHtml = banned.length === 0
+    ? '<p class="muted" style="font-size:13px;">No banned reporters.</p>'
+    : `<table>
+        <thead><tr><th>Email</th><th>Banned</th><th>By</th><th></th></tr></thead>
+        <tbody>${banned.map((b) => `
+          <tr>
+            <td><code>${escapeHtml(b.email)}</code></td>
+            <td class="muted">${formatTs(b.banned_at)}</td>
+            <td class="muted">${escapeHtml(b.banned_by)}</td>
+            <td><form method="POST" action="/admin/reports/unban-reporter" class="inline">
+              <input type="hidden" name="email" value="${escapeHtml(b.email)}">
+              <button type="submit" style="font-size:12px;padding:3px 8px;">Unban</button>
+            </form></td>
+          </tr>
+        `).join('')}</tbody>
+       </table>`;
+
+  return c.html(adminShell('Reports', `
+    ${flash}
+    <h2>Reports</h2>
+    <p class="muted">Storefront visitors flag reviews via the "Report" link on each review card. Dismiss reports that are noise; retract reviews that shouldn't be on the store; ban repeat-offender reporter emails.</p>
+
+    ${groupsHtml}
+
+    <h3 style="margin-top:32px;">Banned reporters</h3>
+    <p class="muted">Banned email addresses can still submit reports, but they're silently dropped — no DB row, no signal back to the reporter.</p>
+    ${bannedHtml}
+  `, 'reports'));
+});
+
+admin.post('/reports/:id/dismiss', (c) => {
+  const id = Number(c.req.param('id'));
+  const report = findReviewReportById(id);
+  if (!report) return c.text('report not found', 404);
+  resolveReports({ reportIds: [id], newStatus: 'dismissed', resolvedBy: 'admin' });
+  log('info', 'admin dismissed report', { id, reviewId: report.review_id });
+  return c.redirect('/admin/reports?dismissed=1');
+});
+
+admin.post('/reports/by-review/:reviewId/dismiss-all', (c) => {
+  const reviewId = Number(c.req.param('reviewId'));
+  const changes = resolveAllOpenReportsForReview({ reviewId, newStatus: 'dismissed', resolvedBy: 'admin' });
+  log('info', 'admin dismissed all reports for review', { reviewId, changes });
+  return c.redirect('/admin/reports?dismissed=1');
+});
+
+// Retract via the Reports page. Goes through the same retract path as the
+// review-detail page so the moderation_events audit log is consistent, and
+// closes all open reports for the review as 'retracted'.
+admin.post('/reports/by-review/:reviewId/retract', async (c) => {
+  const reviewId = Number(c.req.param('reviewId'));
+  const review = findReviewById(reviewId);
+  if (!review) return c.text('review not found', 404);
+
+  const form = await c.req.formData();
+  const reasonRaw = String(form.get('reason') ?? '');
+  if (!isModerationReason(reasonRaw)) {
+    return c.text('invalid or missing reason', 400);
+  }
+  const noteRaw = String(form.get('note') ?? '').trim();
+  const note = noteRaw === '' ? null : noteRaw.slice(0, 2000);
+  const notifyCustomer = form.get('notify_customer') === '1';
+
+  if (review.status !== 'rejected') {
+    retractReview({
+      reviewId,
+      fromStatus: review.status,
+      reason: reasonRaw,
+      note,
+      actor: 'admin',
+      customerNotified: notifyCustomer,
+    });
+    log('info', 'admin retracted review via reports page', {
+      reviewId,
+      reason: reasonRaw,
+      notifyCustomer,
+    });
+    if (notifyCustomer && review.reviewer_email) {
+      const product = await getOrFetchProduct(review.shopify_product_id);
+      const productTitle = product?.title ?? 'your purchase';
+      const firstName = review.reviewer_name?.trim().split(/\s+/)[0] || 'there';
+      await sendModerationEmail({
+        templateKey: 'review_retracted',
+        to: review.reviewer_email,
+        reviewId,
+        context: {
+          firstName: escapeHtml(firstName),
+          brandName: escapeHtml(config.email.brandName),
+          productName: escapeHtml(productTitle),
+          reasonPhrase: escapeHtml(MODERATION_REASON_CUSTOMER_PHRASES[reasonRaw]),
+        },
+      });
+    }
+  }
+
+  resolveAllOpenReportsForReview({ reviewId, newStatus: 'retracted', resolvedBy: 'admin' });
+  return c.redirect('/admin/reports?retracted=1');
+});
+
+admin.post('/reports/:id/ban-reporter', (c) => {
+  const id = Number(c.req.param('id'));
+  const report = findReviewReportById(id);
+  if (!report || !report.reporter_email) return c.text('no email to ban', 400);
+  banReporter({ email: report.reporter_email, bannedBy: 'admin' });
+  // Also dismiss this specific report — banning means we're not acting on it.
+  resolveReports({ reportIds: [id], newStatus: 'dismissed', resolvedBy: 'admin' });
+  log('warn', 'admin banned reporter', { email: report.reporter_email });
+  return c.redirect(`/admin/reports?banned=${encodeURIComponent(report.reporter_email)}`);
+});
+
+admin.post('/reports/unban-reporter', async (c) => {
+  const form = await c.req.formData();
+  const email = String(form.get('email') ?? '').trim();
+  if (!email) return c.text('email required', 400);
+  unbanReporter(email);
+  log('info', 'admin unbanned reporter', { email });
+  return c.redirect(`/admin/reports?unbanned=${encodeURIComponent(email)}`);
 });
 
 // --- Customer detail (manage opt-outs) ---
@@ -1613,7 +2385,10 @@ admin.get('/settings', (c) => {
   const cacheFlash = c.req.query('cache_refreshed') !== undefined
     ? `<div class="ok">Cleared ${escapeHtml(c.req.query('cache_refreshed') ?? '0')} cached product${c.req.query('cache_refreshed') === '1' ? '' : 's'}. The next storefront load (or admin operation) for each product will re-fetch from Shopify, picking up any updated metafields or product changes.</div>`
     : '';
-  const flash = savedFlash + cacheFlash;
+  const pausedFlash = c.req.query('paused') === '1' ? '<div class="ok">Reviews paused. The widget and submission paths now return an "unavailable" notice.</div>' : '';
+  const extendedFlash = c.req.query('extended') === '1' ? '<div class="ok">Pause extended.</div>' : '';
+  const resumedFlash = c.req.query('resumed') === '1' ? '<div class="ok">Reviews resumed.</div>' : '';
+  const flash = savedFlash + cacheFlash + pausedFlash + extendedFlash + resumedFlash;
   const cadenceMax = getSettingNumber('cadence_max_requests', 3);
   const cadenceMin = getSettingNumber('cadence_min_days_between', 7);
   const requestDelay = getSettingNumber('request_delay_days', 7);
@@ -1621,6 +2396,10 @@ admin.get('/settings', (c) => {
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
+  const profanityList = getProfanityWordlist();
+  const pauseState = getPauseState();
+  const panicEvents = listPanicEvents(20);
+  const notifyConfig = getNewReviewNotifyConfig();
 
   // Hour dropdown: 1-12
   const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -1681,6 +2460,50 @@ admin.get('/settings', (c) => {
         </div>
       </form>
     </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Profanity filter</h3>
+      <p class="muted">Words listed here are censored to <code>****</code> in review titles and bodies at submission time. Whole-word match, case-insensitive. One word per line. Lines starting with <code>#</code> are comments. Reviewer display names are never censored. This is a light filter, not a held-pending queue — reviews still publish immediately; if a censored review needs full removal, retract it from the Reviews page.</p>
+      <form method="POST" action="/admin/settings/profanity">
+        <label for="profanity_wordlist">Wordlist</label>
+        <textarea id="profanity_wordlist" name="profanity_wordlist" rows="8" style="font-family:monospace;font-size:13px;" placeholder="One word per line, e.g.&#10;spam&#10;scam&#10;# comment lines like this are ignored">${escapeHtml(profanityList.join('\n'))}</textarea>
+        <p class="muted" style="margin-top:4px;font-size:12px;">${profanityList.length === 0 ? 'No words configured. Filter is inactive.' : `${profanityList.length} word${profanityList.length === 1 ? '' : 's'} active.`}</p>
+        <div style="margin-top:12px;">
+          <button type="submit" class="primary">Save wordlist</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">New review notifications</h3>
+      <p class="muted">Get an email when a customer submits a review. Useful for catching low-star reviews early. Sent from the same Gmail SMTP as customer emails — no separate config.</p>
+      <form method="POST" action="/admin/settings/new-review-notify">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" name="enabled" value="1" ${notifyConfig.enabled ? 'checked' : ''} style="width:auto;">
+          <span>Enable new-review notifications</span>
+        </label>
+
+        <label for="notify-email">Recipient email</label>
+        <input type="text" id="notify-email" name="email" value="${escapeHtml(notifyConfig.email)}" placeholder="you@brandname.com" maxlength="200">
+
+        <label>Send notifications for these ratings</label>
+        <div style="display:flex; gap:16px; margin-top:6px; flex-wrap:wrap;">
+          ${[1,2,3,4,5].map((n) => `
+            <label style="display:flex;align-items:center;gap:6px;font-weight:normal;font-size:14px;">
+              <input type="checkbox" name="ratings" value="${n}" ${notifyConfig.ratings.includes(n) ? 'checked' : ''} style="width:auto;">
+              <span>${'★'.repeat(n)} (${n})</span>
+            </label>
+          `).join('')}
+        </div>
+        <p class="muted" style="margin-top:4px;font-size:12px;">Common settings: just <code>1, 2, 3</code> to catch problems, or <code>1–5</code> for every review.</p>
+
+        <div style="margin-top:16px;">
+          <button type="submit" class="primary">Save notification settings</button>
+        </div>
+      </form>
+    </div>
+
+    ${renderPanicCard(pauseState, panicEvents)}
 
     <div class="card">
       <h3 style="margin-top:0;">Per-variant reviews (optional setup)</h3>
@@ -1856,6 +2679,134 @@ admin.post('/settings', async (c) => {
   }
 
   log('info', 'admin settings updated', { scheduleChanged, immediateOnFulfillment: immediateChecked });
+  return c.redirect('/admin/settings?saved=1');
+});
+
+// --- Panic button: pause / extend / resume ---
+
+const CONFIRM_PHRASE = 'PAUSE REVIEWS';
+
+const notifyDevOfPause = async (input: {
+  eventType: 'pause' | 'extend' | 'resume';
+  reason: string | null;
+  actor: string;
+  pausedUntil: number | null;
+}): Promise<void> => {
+  const to = config.email.devNotificationEmail;
+  if (!to) {
+    log('info', 'panic event: dev notification skipped (DEV_NOTIFICATION_EMAIL not set)', input);
+    return;
+  }
+  const brand = config.email.brandName;
+  const verb = input.eventType === 'pause' ? 'PAUSED' : input.eventType === 'extend' ? 'EXTENDED' : 'RESUMED';
+  const subject = `[Reviews / ${brand}] Panic button ${verb}`;
+  const untilLine = input.pausedUntil
+    ? `Paused until: ${new Date(input.pausedUntil * 1000).toISOString()} (UTC)`
+    : 'Paused until: cleared';
+  const reasonLine = input.reason ? `Reason: ${input.reason}` : 'Reason: (n/a)';
+  const adminUrl = `${config.publicUrl.replace(/\/+$/, '')}/admin/settings`;
+  const text = [
+    `Reviews system event: ${verb}`,
+    '',
+    `Store: ${brand}`,
+    `Actor: ${input.actor}`,
+    reasonLine,
+    untilLine,
+    '',
+    `Admin: ${adminUrl}`,
+  ].join('\n');
+  const html = `<p><strong>Reviews system event: ${escapeHtml(verb)}</strong></p>
+<p>Store: ${escapeHtml(brand)}<br>
+Actor: ${escapeHtml(input.actor)}<br>
+${escapeHtml(reasonLine)}<br>
+${escapeHtml(untilLine)}</p>
+<p><a href="${adminUrl}">Open admin</a></p>`;
+  try {
+    await sendMail({ to, subject, html, text });
+    log('info', 'panic event: dev notified', { to, eventType: input.eventType });
+  } catch (err) {
+    log('error', 'panic event: dev notification failed', {
+      to,
+      eventType: input.eventType,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
+
+admin.post('/panic/pause', async (c) => {
+  const form = await c.req.formData();
+  const reason = String(form.get('reason') ?? '').trim().slice(0, 1000);
+  const confirm = String(form.get('confirm') ?? '').trim();
+  const hoursRaw = Number(form.get('hours') ?? PAUSE_DEFAULT_HOURS);
+
+  if (!reason) {
+    return c.text('reason required', 400);
+  }
+  if (confirm !== CONFIRM_PHRASE) {
+    return c.text(`confirmation phrase must be "${CONFIRM_PHRASE}"`, 400);
+  }
+  const state = pauseReviews({ reason, actor: 'admin', hours: hoursRaw });
+  log('warn', 'admin paused reviews', { hoursRaw, pausedUntil: state.pausedUntil });
+  await notifyDevOfPause({
+    eventType: 'pause',
+    reason,
+    actor: 'admin',
+    pausedUntil: state.pausedUntil,
+  });
+  return c.redirect('/admin/settings?paused=1');
+});
+
+admin.post('/panic/extend', async (c) => {
+  const form = await c.req.formData();
+  const hoursRaw = Number(form.get('hours') ?? PAUSE_DEFAULT_HOURS);
+  const state = extendPause({ actor: 'admin', hours: hoursRaw });
+  log('warn', 'admin extended pause', { hoursRaw, pausedUntil: state.pausedUntil });
+  await notifyDevOfPause({
+    eventType: 'extend',
+    reason: state.reason,
+    actor: 'admin',
+    pausedUntil: state.pausedUntil,
+  });
+  return c.redirect('/admin/settings?extended=1');
+});
+
+admin.post('/panic/resume', async (c) => {
+  resumeReviews({ actor: 'admin' });
+  log('warn', 'admin resumed reviews');
+  await notifyDevOfPause({
+    eventType: 'resume',
+    reason: null,
+    actor: 'admin',
+    pausedUntil: null,
+  });
+  return c.redirect('/admin/settings?resumed=1');
+});
+
+admin.post('/settings/new-review-notify', async (c) => {
+  const form = await c.req.formData();
+  const enabled = form.get('enabled') === '1';
+  const email = String(form.get('email') ?? '').trim();
+  const ratings = form.getAll('ratings')
+    .map((v) => parseInt(String(v), 10))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 5);
+  setNewReviewNotifyConfig({ enabled, email, ratings });
+  log('info', 'admin updated new-review notification config', {
+    enabled,
+    hasEmail: email.length > 0,
+    ratings,
+  });
+  return c.redirect('/admin/settings?saved=1');
+});
+
+admin.post('/settings/profanity', async (c) => {
+  const form = await c.req.formData();
+  const raw = String(form.get('profanity_wordlist') ?? '');
+  const words = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+  setProfanityWordlist(words);
+  log('info', 'admin updated profanity wordlist', { wordCount: words.length });
   return c.redirect('/admin/settings?saved=1');
 });
 

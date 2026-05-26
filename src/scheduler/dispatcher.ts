@@ -18,6 +18,7 @@ import { resolveEmailBranding } from '../email/email-config.js';
 import { log } from '../lib/logger.js';
 import { resolveBrandColors, type ResolvedBrandColors } from '../shopify/brand-info.js';
 import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
+import { isReviewsPaused } from '../lib/panic.js';
 
 export interface DispatchResult {
   considered: number;          // total purchase rows considered eligible
@@ -319,6 +320,21 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
     ['SMTP_FROM',           config.email.smtp.from],
     ['PUBLIC_URL',          config.publicUrl],
   );
+
+  // Panic-button gate: skip sending entirely while paused. Eligible purchases
+  // simply wait until the pause lifts — their due_at is preserved, so they'll
+  // be picked up on the next normal run.
+  if (isReviewsPaused()) {
+    log('warn', 'dispatcher skipped: reviews are paused');
+    return {
+      considered: 0,
+      groupsConsidered: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      suppressed: { globalOptOut: 0, productOptOut: 0, maxRequestsHit: 0, cadenceTooSoon: 0, alreadyReviewed: 0 },
+    };
+  }
 
   const batchSize = getSettingNumber('cadence_dispatcher_batch', 100);
   const rows = findEligiblePurchases(batchSize);

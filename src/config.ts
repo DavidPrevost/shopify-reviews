@@ -24,6 +24,9 @@ export const config = {
       from: process.env.SMTP_FROM ?? '',
     },
     brandName: process.env.BRAND_NAME ?? 'the brand',
+    // Operational notifications (panic-button activations, future ops alerts).
+    // Sent to the developer/operator, not the merchant. Leave empty to skip.
+    devNotificationEmail: process.env.DEV_NOTIFICATION_EMAIL ?? '',
   },
   admin: {
     passwordHash: process.env.ADMIN_PASSWORD_HASH ?? '',

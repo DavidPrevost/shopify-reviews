@@ -24,6 +24,7 @@ interface ReviewItem {
 interface Aggregate {
   avg: number | null;
   count: number;
+  paused?: boolean;
 }
 
 interface ReviewsResponse {
@@ -36,6 +37,10 @@ interface ReviewsResponse {
   variantHandling: 'distinct' | 'shared';
   page: number;
   size: number;
+  // Set when the merchant has activated the "pause reviews" panic button.
+  // When true, reviews/aggregate are empty stubs and the widget renders a
+  // "temporarily unavailable" notice instead of the normal UI.
+  paused?: boolean;
 }
 
 // The widget calls back to whichever origin served widget.js, so the same
@@ -87,6 +92,30 @@ const STYLES = `
   font-style: italic;
   opacity: 0.7;
 }
+.rv-paused {
+  padding: 16px;
+  background: rgba(0,0,0,0.04);
+  border-radius: 6px;
+  font-size: 14px;
+  text-align: center;
+  opacity: 0.85;
+}
+.rv-review-actions {
+  margin-top: 6px;
+  text-align: right;
+}
+.rv-report-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.rv-report-link:hover { opacity: 0.85; }
 .rv-stars {
   display: inline-flex;
   gap: 1px;
@@ -446,8 +475,13 @@ const renderReviewItem = (r: ReviewItem, isOwn: boolean = false): string => {
     return '';
   })();
   const ownTag = isOwn ? '<span class="rv-your-review-tag">Your review</span>' : '';
+  // Customers can't report their own review — that's just a self-edit
+  // scenario, and the storefront-customer edit modal already exists for it.
+  const reportLink = isOwn
+    ? ''
+    : `<button type="button" class="rv-report-link" data-rv-report="${r.id}">Report</button>`;
   return `
-    <li class="rv-review">
+    <li class="rv-review" data-rv-review-id="${r.id}">
       <div class="rv-review-head">
         ${renderStars(r.rating)}
         ${r.title ? `<strong class="rv-review-title">${escapeHtml(r.title)}</strong>` : ''}
@@ -459,6 +493,7 @@ const renderReviewItem = (r: ReviewItem, isOwn: boolean = false): string => {
         ${verifiedBadge}
       </div>
       <div class="rv-review-body">${escapeHtml(r.body).replace(/\n/g, '<br>')}</div>
+      <div class="rv-review-actions">${reportLink}</div>
     </li>
   `;
 };
@@ -685,6 +720,107 @@ const openReviewModal = (opts: OpenModalOptions): void => {
   d.showModal();
 };
 
+const REPORT_REASON_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'inappropriate', label: 'Inappropriate / offensive content' },
+  { value: 'spam-or-fake',  label: 'Spam or fake review' },
+  { value: 'off-topic',     label: 'Not about the product' },
+  { value: 'pii',           label: 'Contains personal information' },
+  { value: 'other',         label: 'Something else' },
+];
+
+const openReportModal = (reviewId: number): void => {
+  const d = ensureModal();
+  const optionsHtml = REPORT_REASON_OPTIONS
+    .map((o) => `<option value="${o.value}">${escapeHtml(o.label)}</option>`)
+    .join('');
+
+  d.innerHTML = `
+    <div class="rv-dialog-content">
+      <div class="rv-dialog-header">
+        <h2 class="rv-dialog-title">Report this review</h2>
+        <button type="button" class="rv-dialog-close" aria-label="Close">×</button>
+      </div>
+      <form>
+        <p class="rv-dialog-muted" style="margin-top:0;">Thanks for flagging this. The merchant will see your report and decide whether to remove the review.</p>
+
+        <label for="rv-report-reason">Reason</label>
+        <select id="rv-report-reason" name="reason" required>${optionsHtml}</select>
+
+        <label for="rv-report-message">Additional context (optional)</label>
+        <textarea id="rv-report-message" name="message" maxlength="1000" rows="3" placeholder="What's wrong with this review?"></textarea>
+
+        <label for="rv-report-email">Your email (optional)</label>
+        <input type="email" id="rv-report-email" name="email" maxlength="200" placeholder="So the merchant can follow up if needed">
+
+        <div class="rv-dialog-error" hidden></div>
+        <div class="rv-dialog-actions">
+          <button type="button" class="rv-cta-link" data-rv-cancel>Cancel</button>
+          <button type="submit" class="rv-cta-button">Submit report</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  const closeBtn = d.querySelector('.rv-dialog-close') as HTMLButtonElement;
+  const cancelBtn = d.querySelector('[data-rv-cancel]') as HTMLButtonElement;
+  const form = d.querySelector('form') as HTMLFormElement;
+  const errBox = d.querySelector('.rv-dialog-error') as HTMLElement;
+  const submitBtn = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+  const close = () => d.close();
+  closeBtn.addEventListener('click', close);
+  cancelBtn.addEventListener('click', close);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const reason = String(fd.get('reason') ?? '');
+    const message = String(fd.get('message') ?? '').trim() || null;
+    const email = String(fd.get('email') ?? '').trim() || null;
+    if (!reason) {
+      errBox.textContent = 'Please pick a reason.';
+      errBox.hidden = false;
+      return;
+    }
+    errBox.hidden = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/reviews/${reviewId}/report`, {
+        method: 'POST',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, message, email }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      errBox.textContent = 'Network error. Please try again.';
+      errBox.hidden = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit report';
+      return;
+    }
+
+    // Replace the form contents with a confirmation; close on user dismiss.
+    const content = d.querySelector('.rv-dialog-content') as HTMLElement;
+    content.innerHTML = `
+      <div class="rv-dialog-header">
+        <h2 class="rv-dialog-title">Report received</h2>
+        <button type="button" class="rv-dialog-close" aria-label="Close">×</button>
+      </div>
+      <p>Thanks — the merchant will take a look. You won't get a direct response, but the review may be removed if it doesn't meet their guidelines.</p>
+      <div class="rv-dialog-actions">
+        <button type="button" class="rv-cta-button" data-rv-cancel>Close</button>
+      </div>
+    `;
+    (content.querySelector('.rv-dialog-close') as HTMLButtonElement).addEventListener('click', close);
+    (content.querySelector('[data-rv-cancel]') as HTMLButtonElement).addEventListener('click', close);
+  });
+
+  d.showModal();
+};
+
 const renderFull = async (
   el: HTMLElement,
   productId: string,
@@ -700,6 +836,17 @@ const renderFull = async (
       fetchReviews(productId, variantId),
       customerId ? fetchMyReview(productId) : Promise.resolve(null),
     ]);
+
+    // Pause overrides everything else — render a single non-alarming notice
+    // and bail before any of the normal layout logic runs.
+    if (data.paused) {
+      el.innerHTML = `
+        <div class="rv-widget rv-widget-full">
+          <div class="rv-paused">Reviews are temporarily unavailable. Please check back soon.</div>
+        </div>
+      `;
+      return;
+    }
 
     // Legacy hash-token write link (kept for backward compat with deep-links
     // that arrive from an email but the customer isn't logged in to Shopify).
@@ -808,6 +955,11 @@ const renderFull = async (
         });
       });
     });
+    el.querySelectorAll<HTMLButtonElement>('[data-rv-report]').forEach((btn) => {
+      const reviewId = Number(btn.getAttribute('data-rv-report'));
+      if (!Number.isFinite(reviewId) || reviewId <= 0) return;
+      btn.addEventListener('click', () => openReportModal(reviewId));
+    });
   } catch (err) {
     el.innerHTML = '<div class="rv-widget rv-widget-full"><div class="rv-error">Reviews unavailable</div></div>';
     console.warn('reviews widget error', err);
@@ -817,7 +969,9 @@ const renderFull = async (
 const renderAggregate = async (el: HTMLElement, productId: string): Promise<void> => {
   try {
     const agg = await fetchAggregate(productId);
-    if (agg.count === 0) {
+    // Hide aggregate entirely while paused — same rationale as the full widget:
+    // "pause all review display."
+    if (agg.paused || agg.count === 0) {
       el.innerHTML = '';
       return;
     }

@@ -124,6 +124,43 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
     ctaEnabled: true,
     ctaLabel: 'Share another review',
   },
+  {
+    templateKey: 'review_retracted',
+    displayName: 'Review retracted notification',
+    subject: 'Your review of {{ productName }} was removed',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  We're writing to let you know that your review of <strong>{{ productName }}</strong> on {{ brandName }} has been removed.
+</p>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  Reason: your review {{ reasonPhrase }}.
+</p>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  If you believe this was a mistake, please reply to this email and we'll take another look. You're welcome to submit a new review at any time.
+</p>
+<p style="margin:24px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks for being a customer of {{ brandName }}.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: 'Write a new review',
+  },
+  {
+    templateKey: 'review_restored',
+    displayName: 'Review restored notification',
+    subject: 'Your review of {{ productName }} is back online',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  Good news — your review of <strong>{{ productName }}</strong> on {{ brandName }} has been restored and is visible to other customers again.
+</p>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  Apologies for any inconvenience caused by the earlier removal.
+</p>
+<p style="margin:24px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks for sharing your experience with {{ brandName }}.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: 'View your review',
+  },
 ];
 
 export const seedDefaultEmailTemplates = (): void => {

@@ -22,6 +22,9 @@ import {
 } from '../db/queries.js';
 import { verifyAppProxySignature } from '../shopify/app-proxy-verify.js';
 import { fetchShopifyCustomer } from '../shopify/customer-info.js';
+import { sanitizeReviewText } from '../lib/profanity.js';
+import { isReviewsPaused } from '../lib/panic.js';
+import { notifyOnNewReview } from '../email/notify-new-review.js';
 import { log } from '../lib/logger.js';
 
 const proxy = new Hono();
@@ -100,6 +103,7 @@ proxy.get('/customer/review', (c) => {
 // = 'purchase' if yes, null if not — no "Verified Buyer" badge for the
 // no-purchase case).
 proxy.post('/customer/review', async (c) => {
+  if (isReviewsPaused()) return c.json({ error: 'reviews_paused' }, 503);
   const customerShopifyId = c.get('customerShopifyId' as never) as string;
 
   const body = await c.req.json().catch(() => ({})) as {
@@ -156,6 +160,8 @@ proxy.post('/customer/review', async (c) => {
   const isPurchaser = customerHasPurchasedProduct(customer.id, productId);
   const displayName = submittedName ?? (customer.first_name?.trim() || null);
 
+  const censored = sanitizeReviewText({ title, body: reviewBody });
+
   const reviewId = insertReview({
     shopifyProductId: productId,
     shopifyVariantId: variantId,
@@ -163,8 +169,8 @@ proxy.post('/customer/review', async (c) => {
     reviewerEmail: customer.email,
     reviewerName: displayName,
     rating,
-    title,
-    body: reviewBody,
+    title: censored.title,
+    body: censored.body,
     verifiedKind: isPurchaser ? 'purchase' : null,
     status: 'published',
   });
@@ -177,6 +183,8 @@ proxy.post('/customer/review', async (c) => {
     verified: isPurchaser ? 'purchase' : 'none',
   });
 
+  void notifyOnNewReview({ reviewId, rating });
+
   return c.json({ ok: true, reviewId });
 });
 
@@ -184,6 +192,7 @@ proxy.post('/customer/review', async (c) => {
 // are updateable; the customer can't change verified status, the linked
 // product/variant, or the customer association.
 proxy.post('/customer/review/:id', async (c) => {
+  if (isReviewsPaused()) return c.json({ error: 'reviews_paused' }, 503);
   const customerShopifyId = c.get('customerShopifyId' as never) as string;
   const reviewId = Number(c.req.param('id'));
   if (!Number.isInteger(reviewId) || reviewId <= 0) {
@@ -223,11 +232,13 @@ proxy.post('/customer/review/:id', async (c) => {
 
   const displayName = submittedName ?? (customer.first_name?.trim() || null);
 
+  const censored = sanitizeReviewText({ title, body: reviewBody });
+
   updateReviewContent({
     id: reviewId,
     rating,
-    title,
-    body: reviewBody,
+    title: censored.title,
+    body: censored.body,
     reviewerName: displayName,
   });
 

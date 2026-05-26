@@ -384,9 +384,350 @@ export interface ReviewRow {
   status: string;
   merchant_reply: string | null;
   merchant_reply_at: number | null;
+  moderation_reason: ModerationReason | null;
+  moderation_note: string | null;
   created_at: number;
   updated_at: number;
 }
+
+// --- Moderation ---
+//
+// Reasons surfaced in the admin retract modal. Each maps to (a) the friendly
+// label shown to the merchant in the dropdown and (b) the phrase used in the
+// customer notification email ("We removed your review because it ..."). The
+// free-text note attached at retract time is INTERNAL ONLY — never shown to
+// the customer.
+//
+// Adding a new reason: extend MODERATION_REASONS, MODERATION_REASON_LABELS,
+// and MODERATION_REASON_CUSTOMER_PHRASES below. No migration needed —
+// the column is unconstrained TEXT.
+
+export const MODERATION_REASONS = [
+  'profanity',
+  'spam',
+  'off-topic',
+  'not-a-customer',
+  'harassment',
+  'contains-pii',
+  'legal-takedown',
+  'duplicate',
+  'other',
+] as const;
+export type ModerationReason = typeof MODERATION_REASONS[number];
+
+export const isModerationReason = (v: unknown): v is ModerationReason =>
+  typeof v === 'string' && (MODERATION_REASONS as readonly string[]).includes(v);
+
+export const MODERATION_REASON_LABELS: Record<ModerationReason, string> = {
+  'profanity':       'Profanity / inappropriate language',
+  'spam':            'Spam',
+  'off-topic':       'Off-topic (not about the product)',
+  'not-a-customer':  'Reviewer was not a customer',
+  'harassment':      'Harassment or personal attack',
+  'contains-pii':    'Contains personal information',
+  'legal-takedown':  'Legal takedown request',
+  'duplicate':       'Duplicate review',
+  'other':           'Other (use note for detail)',
+};
+
+// Customer-facing phrasing — appears in the retract email after "We removed
+// your review because it ...". Tone: matter-of-fact, no blame language for
+// the sensitive categories. "legal-takedown" is intentionally vague.
+export const MODERATION_REASON_CUSTOMER_PHRASES: Record<ModerationReason, string> = {
+  'profanity':       'contained language that violates our review guidelines',
+  'spam':            'appeared to be promotional or spam content',
+  'off-topic':       'was not about the product',
+  'not-a-customer':  'could not be verified as a genuine purchase',
+  'harassment':      'contained content directed at another person',
+  'contains-pii':    'contained personal information (yours or someone else\'s)',
+  'legal-takedown':  'needed to be removed at the request of a third party',
+  'duplicate':       'duplicated another review you had submitted',
+  'other':           'did not meet our review guidelines',
+};
+
+export type ModerationEventType = 'retract' | 'restore';
+
+export interface ModerationEventRow {
+  id: number;
+  review_id: number;
+  event_type: ModerationEventType;
+  from_status: string;
+  to_status: string;
+  reason: ModerationReason | null;
+  note: string | null;
+  actor: string;
+  customer_notified: number;
+  created_at: number;
+}
+
+// Transactional retract: flips status to 'rejected', writes the latest
+// reason/note onto the review row, and appends an audit event. customer_notified
+// records *intent* (whether the admin asked to notify) — the actual email is
+// sent by the route handler after this commits.
+export const retractReview = (input: {
+  reviewId: number;
+  fromStatus: string;
+  reason: ModerationReason;
+  note: string | null;
+  actor: string;
+  customerNotified: boolean;
+}): void => {
+  const db = getDb();
+  const now = nowSec();
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE reviews
+         SET status = 'rejected',
+             moderation_reason = ?,
+             moderation_note = ?,
+             updated_at = ?
+       WHERE id = ?
+    `).run(input.reason, input.note, now, input.reviewId);
+    db.prepare(`
+      INSERT INTO moderation_events
+        (review_id, event_type, from_status, to_status, reason, note, actor, customer_notified, created_at)
+      VALUES (?, 'retract', ?, 'rejected', ?, ?, ?, ?, ?)
+    `).run(
+      input.reviewId,
+      input.fromStatus,
+      input.reason,
+      input.note,
+      input.actor,
+      input.customerNotified ? 1 : 0,
+      now,
+    );
+  })();
+};
+
+// Transactional restore: flips status back to 'published' and clears the
+// reason/note on the review. The audit log retains the original retract event
+// (and this restore event), so the history is preserved.
+export const restoreReview = (input: {
+  reviewId: number;
+  fromStatus: string;
+  note: string | null;
+  actor: string;
+  customerNotified: boolean;
+}): void => {
+  const db = getDb();
+  const now = nowSec();
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE reviews
+         SET status = 'published',
+             moderation_reason = NULL,
+             moderation_note = NULL,
+             updated_at = ?
+       WHERE id = ?
+    `).run(now, input.reviewId);
+    db.prepare(`
+      INSERT INTO moderation_events
+        (review_id, event_type, from_status, to_status, reason, note, actor, customer_notified, created_at)
+      VALUES (?, 'restore', ?, 'published', NULL, ?, ?, ?, ?)
+    `).run(
+      input.reviewId,
+      input.fromStatus,
+      input.note,
+      input.actor,
+      input.customerNotified ? 1 : 0,
+      now,
+    );
+  })();
+};
+
+export const listModerationEvents = (reviewId: number): ModerationEventRow[] => {
+  return getDb()
+    .prepare('SELECT * FROM moderation_events WHERE review_id = ? ORDER BY created_at DESC, id DESC')
+    .all(reviewId) as ModerationEventRow[];
+};
+
+// --- Review reports (storefront-driven flag-this-review flow) ---
+//
+// Storefront-visible reason values are deliberately fewer/simpler than the
+// admin's moderation_reason enum. The reporter doesn't know our internal
+// taxonomy; "this is bad" + an optional message is enough to get something
+// in the admin queue.
+
+export const REPORT_REASONS = [
+  'inappropriate',  // profanity / harassment / etc
+  'spam-or-fake',
+  'off-topic',
+  'pii',            // contains personal info
+  'other',
+] as const;
+export type ReportReason = typeof REPORT_REASONS[number];
+
+export const isReportReason = (v: unknown): v is ReportReason =>
+  typeof v === 'string' && (REPORT_REASONS as readonly string[]).includes(v);
+
+export const REPORT_REASON_LABELS: Record<ReportReason, string> = {
+  'inappropriate':  'Inappropriate / offensive content',
+  'spam-or-fake':   'Spam or fake review',
+  'off-topic':      'Not about the product',
+  'pii':            'Contains personal information',
+  'other':          'Something else',
+};
+
+export type ReportStatus = 'open' | 'dismissed' | 'retracted';
+
+export interface ReviewReportRow {
+  id: number;
+  review_id: number;
+  reason: ReportReason;
+  message: string | null;
+  reporter_email: string | null;
+  reporter_ip: string | null;
+  status: ReportStatus;
+  resolved_at: number | null;
+  resolved_by: string | null;
+  created_at: number;
+}
+
+export const isReporterBanned = (email: string): boolean => {
+  const row = getDb()
+    .prepare('SELECT 1 AS x FROM banned_reporters WHERE email = ?')
+    .get(email.toLowerCase()) as { x: 1 } | undefined;
+  return row !== undefined;
+};
+
+export const banReporter = (input: { email: string; bannedBy: string }): void => {
+  getDb().prepare(`
+    INSERT INTO banned_reporters (email, banned_by, banned_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(email) DO NOTHING
+  `).run(input.email.toLowerCase(), input.bannedBy, nowSec());
+};
+
+export const unbanReporter = (email: string): void => {
+  getDb().prepare('DELETE FROM banned_reporters WHERE email = ?').run(email.toLowerCase());
+};
+
+export const listBannedReporters = (): Array<{ email: string; banned_by: string; banned_at: number }> => {
+  return getDb()
+    .prepare('SELECT email, banned_by, banned_at FROM banned_reporters ORDER BY banned_at DESC')
+    .all() as Array<{ email: string; banned_by: string; banned_at: number }>;
+};
+
+// Returns the inserted report id, or null if the insert was deduped (same IP
+// already has an open report on the same review). Callers should treat null
+// as success too — the user shouldn't get a different response for trying
+// twice.
+export const insertReviewReport = (input: {
+  reviewId: number;
+  reason: ReportReason;
+  message: string | null;
+  reporterEmail: string | null;
+  reporterIp: string | null;
+}): number | null => {
+  try {
+    const result = getDb().prepare(`
+      INSERT INTO review_reports
+        (review_id, reason, message, reporter_email, reporter_ip, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.reviewId,
+      input.reason,
+      input.message,
+      input.reporterEmail?.toLowerCase() ?? null,
+      input.reporterIp,
+      nowSec(),
+    );
+    return Number(result.lastInsertRowid);
+  } catch (err) {
+    // Unique-index violation on (review_id, reporter_ip) where status='open'.
+    // Treat as a no-op success — caller doesn't need to know.
+    if (err instanceof Error && err.message.includes('UNIQUE')) return null;
+    throw err;
+  }
+};
+
+export const findReviewReportById = (id: number): ReviewReportRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM review_reports WHERE id = ?')
+    .get(id) as ReviewReportRow | undefined) ?? null;
+};
+
+// Groups all open reports together with each review's current state for the
+// admin "Reports" page. The same review can have many reports; the UI
+// collapses them per-review. Ordered most-recently-reported first.
+export interface ReportedReviewGroup {
+  review: ReviewRow;
+  reports: ReviewReportRow[];
+  productTitle: string | null;
+}
+
+export const listOpenReportsGroupedByReview = (): ReportedReviewGroup[] => {
+  const reports = getDb()
+    .prepare(`
+      SELECT * FROM review_reports
+       WHERE status = 'open'
+       ORDER BY created_at DESC, id DESC
+    `)
+    .all() as ReviewReportRow[];
+  if (reports.length === 0) return [];
+
+  const byReviewId = new Map<number, ReviewReportRow[]>();
+  for (const r of reports) {
+    let arr = byReviewId.get(r.review_id);
+    if (!arr) { arr = []; byReviewId.set(r.review_id, arr); }
+    arr.push(r);
+  }
+
+  const groups: ReportedReviewGroup[] = [];
+  for (const [reviewId, reps] of byReviewId) {
+    const review = findReviewById(reviewId);
+    if (!review) continue;
+    groups.push({ review, reports: reps, productTitle: null });
+  }
+  // Most-recently-reported-review first.
+  groups.sort((a, b) => (b.reports[0]?.created_at ?? 0) - (a.reports[0]?.created_at ?? 0));
+  return groups;
+};
+
+export const countOpenReports = (): number => {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM review_reports WHERE status = 'open'")
+    .get() as { n: number };
+  return row.n;
+};
+
+export const listReportsForReview = (reviewId: number, limit = 100): ReviewReportRow[] => {
+  return getDb()
+    .prepare('SELECT * FROM review_reports WHERE review_id = ? ORDER BY created_at DESC LIMIT ?')
+    .all(reviewId, limit) as ReviewReportRow[];
+};
+
+// Resolves one or more reports as a group. Used by both "dismiss this report"
+// (single id) and "retract the review" (closes all open reports for that
+// review at once with newStatus='retracted').
+export const resolveReports = (input: {
+  reportIds: number[];
+  newStatus: 'dismissed' | 'retracted';
+  resolvedBy: string;
+}): number => {
+  if (input.reportIds.length === 0) return 0;
+  const now = nowSec();
+  const placeholders = input.reportIds.map(() => '?').join(',');
+  const result = getDb().prepare(`
+    UPDATE review_reports
+       SET status = ?, resolved_at = ?, resolved_by = ?
+     WHERE id IN (${placeholders}) AND status = 'open'
+  `).run(input.newStatus, now, input.resolvedBy, ...input.reportIds);
+  return result.changes;
+};
+
+export const resolveAllOpenReportsForReview = (input: {
+  reviewId: number;
+  newStatus: 'dismissed' | 'retracted';
+  resolvedBy: string;
+}): number => {
+  const result = getDb().prepare(`
+    UPDATE review_reports
+       SET status = ?, resolved_at = ?, resolved_by = ?
+     WHERE review_id = ? AND status = 'open'
+  `).run(input.newStatus, nowSec(), input.resolvedBy, input.reviewId);
+  return result.changes;
+};
 
 export const insertReview = (input: {
   shopifyProductId: string;
@@ -426,8 +767,11 @@ export const insertReview = (input: {
 };
 
 // Used by the submission flow to detect a duplicate: a customer who already
-// reviewed this product (across any order). If this returns a row, we silently
-// mark the new purchase as reviewed without inserting a duplicate review.
+// has an ACTIVE review for this product (across any order). Rejected
+// (retracted) reviews are excluded — the customer was invited to resubmit
+// and shouldn't be blocked by their own retracted history. If this returns a
+// row, we silently mark the new purchase as reviewed without inserting a
+// duplicate review.
 export const findReviewByCustomerAndProduct = (
   customerId: number,
   shopifyProductId: string,
@@ -437,6 +781,7 @@ export const findReviewByCustomerAndProduct = (
       SELECT * FROM reviews
        WHERE customer_id = ?
          AND shopify_product_id = ?
+         AND status <> 'rejected'
        ORDER BY created_at DESC
        LIMIT 1
     `)

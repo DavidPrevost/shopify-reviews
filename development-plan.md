@@ -101,8 +101,8 @@ One Node.js application, deployed as a Docker stack on **Mercury** (the brand's 
             │   Google Cloud e2-micro VM (Ubuntu 24.04)        │
             │   ─ Caddy: HTTPS termination + Let's Encrypt     │
             │   ─ Tailscale: joined to brand tailnet           │
-            │   ─ Reverse-proxies to mercury:8080 (prod) or    │
-            │                       mercury:8081 (dev)         │
+            │   ─ Reverse-proxies to mercury:8070 (prod) or    │
+            │                       mercury:8071 (dev)         │
             └──────────────────────┬───────────────────────────┘
                                    │ Tailscale (encrypted overlay,
                                    │ no inbound ports on home network)
@@ -188,7 +188,7 @@ To test against a Shopify development store without endangering the live brand s
 - `/opt/stacks/shopify-reviews-dev/` — points at a free Shopify development store (the owner will create one via Shopify Partners during step 12). Public hostname: `reviews-dev.brandname.com`.
 - `/opt/stacks/shopify-reviews/` — points at the live brand store. Public hostname: `reviews.brandname.com`.
 
-Each stack has its own `.env` with its own Shopify token, webhook secret, and host port (8080 prod, 8081 dev). The application code is identical between the two; the GCP relay's Caddy config maps each public hostname to the right port on Mercury.
+Each stack has its own `.env` with its own Shopify token, webhook secret, and host port (8070 prod, 8071 dev). The application code is identical between the two; the GCP relay's Caddy config maps each public hostname to the right port on Mercury. (The reviews app originally used 8080/8081, but a media downloader on Mercury was already squatting on 8080, so the reviews stacks moved to 8070/8071. Mercury's port convention now: reviews uses 80xx, affiliates uses 90xx, even = prod, odd = dev.)
 
 ### The development loop
 
@@ -390,12 +390,12 @@ Replaces the originally-planned Cloudflare Tunnel. Performed via Google Cloud, S
 3. Install Tailscale on the relay VM and join it to the brand tailnet so it can reach Mercury privately.
 4. Install Caddy. Configure `/etc/caddy/Caddyfile` with two server blocks:
    ```
-   reviews-dev.brandname.com { reverse_proxy 100.117.6.18:8081 }
-   reviews.brandname.com     { reverse_proxy 100.117.6.18:8080 }
+   reviews-dev.brandname.com { reverse_proxy 100.117.6.18:8071 }
+   reviews.brandname.com     { reverse_proxy 100.117.6.18:8070 }
    ```
    (Substitute Mercury's actual Tailscale IP.) Caddy auto-issues Let's Encrypt certs on first request.
 5. At Squarespace → DNS, add **two A records**: host `reviews` → GCP static IP, host `reviews-dev` → same GCP static IP. Apex zone otherwise untouched. Set TTL to 5 minutes if Squarespace allows it, so any future migration propagates fast.
-6. On Mercury, each `docker-compose.yml` (dev and prod) binds the app's port to the Tailscale interface only via `${HOST_BIND_IP}:${HOST_PORT}:8080`. Prod uses host port 8080; dev uses 8081.
+6. On Mercury, each `docker-compose.yml` (dev and prod) binds the app's port to the Tailscale interface only via `${HOST_BIND_IP}:${HOST_PORT}:8080`. Prod uses host port 8070; dev uses 8071. (The container's *internal* port stays 8080 — that's the app's listener inside the container — only the host-side mapping changed.)
 
 Verification gate: `curl https://reviews-dev.brandname.com/health` from any internet-connected machine returns `{"status":"ok"}` once the dev stack is deployed. Before that point, Caddy will return 502 (which still confirms the ingress chain is working).
 
@@ -749,7 +749,7 @@ These were either added during the build as user-priority items or evolved from 
 1. Step 13 — Yotpo cleanup on the live brand store (theme code edits + metafield removal). Risky; walked through with owner, not autonomous.
 2. Step 14 — widget integration on the live (Trademark 1.7.3) theme. Different file paths than the dev-store Dawn-derivative theme.
 3. Install Reviews app on the live store (the dev.shopify.com Collaboration wrinkle — the live store is not currently in the Teraclay org).
-4. Stand up `/opt/stacks/shopify-reviews/` prod stack on Mercury with fresh secrets, live store domain, and port 8080.
+4. Stand up `/opt/stacks/shopify-reviews/` prod stack on Mercury with fresh secrets, live store domain, and host port 8070.
 5. DNS A record for `reviews.<brand>` at Squarespace (already done for dev).
 6. App Proxy configuration on the live-store install for storefront-customer review submission.
 
@@ -768,19 +768,17 @@ Features deferred to after MVP launch. Update this list as priorities shift; the
 - ✅ Branding admin page (widget visual customization + email template + shared email branding)
 - ✅ Multi-product email batching (one email per order with all products inline)
 
-### Prioritized next — Chunk A: Moderation, reporting, notifications
+### Chunk A: Moderation, reporting, notifications — ✅ complete
 
-These share data-model and UI surfaces; cleanest as one focused build.
+1. ✅ **Retract-with-reason + audit log.** Migration 008 adds `moderation_reason` (9-value enum: profanity, spam, off-topic, not-a-customer, harassment, contains-pii, legal-takedown, duplicate, other) and `moderation_note` to `reviews`, plus a `moderation_events` table that records every retract/restore with from/to status, reason, internal note, actor, and customer-notified flag. Admin review-detail page swaps the old 3-button moderation card for a Retract dialog (reason dropdown + optional internal note + opt-out checkbox for customer notification) and shows the full history in an audit-log card. `review_retracted` and `review_restored` email templates seed on first boot and are merchant-editable on the Branding/Email tab. Storefront removal is silent. Migration 009 relaxes the per-customer-per-product unique index to apply only to non-rejected reviews so a retracted customer can resubmit. A public-facing "review moderation policy" page is deferred to its own pass.
 
-1. **Retract-with-reason + audit log.** Existing `status='rejected'` already exists; this adds a `moderation_reason` field (enum: profanity, spam, off-topic, not-a-customer, harassment, personal-info, legal-takedown), a `moderation_note` free-text field, and an audit log table capturing who retracted, when, and why. Optional: customer-facing email when their review is retracted, with reason; optional: a public "review moderation policy" page linked from the storefront widget footer.
+2. ✅ **Profanity wordlist filter.** Admin-editable newline-separated wordlist in Settings; `#`-prefixed lines are comments. Whole-word, case-insensitive match (avoids the Scunthorpe problem); matched words are replaced by `*`s of the same length. Applied at all five review-submission paths (email-link submit, sample submit, App Proxy submit + edit, legacy api submit) via a single `sanitizeReviewText` helper. Reviewer names are intentionally not censored.
 
-2. **Profanity wordlist (light filter only).** Admin-editable list of words to censor as `****` in submitted reviews before publishing. No held-pending state, no AI moderation; the trust model is publish-immediately. Configurable in Settings.
+3. ✅ **"Pause reviews" panic button.** New `panic_events` audit table (migration 010) plus three settings keys for current state (`panic_paused_until`, `panic_paused_reason`, `panic_paused_at`). Settings page exposes a Pause dialog requiring a reason, a duration (1-168h, default 72), and the typed phrase "PAUSE REVIEWS" to confirm. While paused: storefront widget shows "Reviews are temporarily unavailable" and hides aggregate; all submission paths (API, App Proxy, email-link, sample) return 503; the dispatcher's cron run short-circuits with a warning log. A red banner is injected at the top of every admin page with a one-click Resume; Settings card surfaces countdown, extend, and resume controls plus the full pause history. Activation/extension/resume sends an operational email to `DEV_NOTIFICATION_EMAIL` when configured. Auto-resumes silently when `paused_until` passes — no cron needed.
 
-3. **"Pause reviews" panic button.** Admin emergency control: pause all review display and submission with one click + significant confirmation + required reason. Auto-expires after 72 hours unless extended. While paused: widget shows "Reviews are temporarily unavailable" on the storefront; all submission paths (email-link, sample, App Proxy) return 503. Auto-emails the developer when activated. Audit log captures every pause/resume.
+4. ✅ **Reported reviews moderation queue.** Migration 011 adds `review_reports` (with a partial unique index on `(review_id, reporter_ip)` for status='open' as anti-spam dedupe) and `banned_reporters`. Storefront widget grows a "Report" button on each review (hidden on the customer's own review); clicking opens a modal with a simpler 5-value reason enum, optional message, and optional email. The `/api/reviews/:id/report` endpoint is CORS-allowed (unauthenticated), silently drops reports from banned emails with 200 OK so the reporter gets no signal, and silently succeeds for non-published reviews to avoid leaking review status. New "Reports" admin tab (with open-count badge in the nav) groups open reports by review; each group has dismiss-this / dismiss-all / retract-the-review (uses the same retract flow + audit log + customer notification email as the review-detail page) and per-report ban-this-email actions; banned reporters listed below with unban.
 
-4. **Reported reviews moderation queue.** New `review_reports` table; storefront adds a "Report this review" link → modal with reason dropdown + optional message + optional reporter email. Admin "Reports" page groups reports by review with quick actions: dismiss, retract review (sets moderation_reason), ban reporter email from future reports.
-
-5. **Configurable new-review notifications.** Master toggle, recipient email, star-rating checkboxes (any combination of 1-5 triggers). Routes through existing Gmail SMTP.
+5. ✅ **Configurable new-review notifications.** Settings card with master toggle, recipient email, and per-rating checkboxes (1-5). The `notifyOnNewReview` helper checks all three before firing, looks up the review + product, and sends a plain operational email (no template — internal-only) with the rating, reviewer label, body, and an admin link. Wired into the four new-review insertion paths (skipped on the proxy edit path — edits aren't new reviews). Fire-and-forget: failures are logged but don't block the submission response.
 
 ### Prioritized next — Chunk B: Search, filters, storefront UX polish
 

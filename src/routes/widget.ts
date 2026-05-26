@@ -19,6 +19,9 @@ import { nowSec } from '../lib/time.js';
 import { escapeHtml } from '../email/render.js';
 import { log } from '../lib/logger.js';
 import { getOrFetchProduct } from '../shopify/product-info.js';
+import { sanitizeReviewText } from '../lib/profanity.js';
+import { isReviewsPaused } from '../lib/panic.js';
+import { notifyOnNewReview } from '../email/notify-new-review.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +83,15 @@ const pageShell = (title: string, body: string): string => `<!DOCTYPE html>
 </body>
 </html>`;
 
+// Rendered when the panic button is active. Same shell as the other
+// reviewer-facing pages; non-alarming copy. Used by both the email-link and
+// sample-invitation flows.
+const pausedPage = (c: import('hono').Context) =>
+  c.html(pageShell('Reviews temporarily unavailable', `
+    <h1>Reviews are temporarily unavailable</h1>
+    <p>We've temporarily paused new reviews for this store. Please try again later — your link will still work once reviews are back.</p>
+  `), 503);
+
 // --- /r/:token  — review submission page ---
 
 const renderForm = (input: {
@@ -131,6 +143,7 @@ const renderForm = (input: {
 };
 
 widget.get('/r/:token', async (c) => {
+  if (isReviewsPaused()) return pausedPage(c);
   const token = c.req.param('token');
   const verified = verifyReviewToken(token);
   if (!verified.ok) {
@@ -163,6 +176,7 @@ const trimOrNull = (s: unknown, maxLen: number): string | null => {
 };
 
 widget.post('/r/:token', async (c) => {
+  if (isReviewsPaused()) return pausedPage(c);
   const token = c.req.param('token');
   const verified = verifyReviewToken(token);
   if (!verified.ok) {
@@ -234,6 +248,8 @@ widget.post('/r/:token', async (c) => {
   // field on the form and that submittedName overrides this fallback.
   const fallbackName = customer.first_name?.trim() || null;
 
+  const censored = sanitizeReviewText({ title, body });
+
   const reviewId = insertReview({
     shopifyProductId: purchase.shopify_product_id,
     shopifyVariantId: purchase.shopify_variant_id,
@@ -241,8 +257,8 @@ widget.post('/r/:token', async (c) => {
     reviewerEmail: customer.email,
     reviewerName: submittedName ?? fallbackName,
     rating,
-    title,
-    body,
+    title: censored.title,
+    body: censored.body,
     verifiedKind: 'purchase',
     status: 'published',
   });
@@ -256,6 +272,8 @@ widget.post('/r/:token', async (c) => {
     rating,
     productId: purchase.shopify_product_id,
   });
+
+  void notifyOnNewReview({ reviewId, rating });
 
   return c.html(pageShell('Thank you', `
     <h1>Thank you</h1>
@@ -371,6 +389,7 @@ const resolveInvitation = async (
 };
 
 widget.get('/r/invite/:token', async (c) => {
+  if (isReviewsPaused()) return pausedPage(c);
   const token = c.req.param('token');
   const resolved = await resolveInvitation(c, token);
   if (!resolved.ok) return resolved.response;
@@ -385,6 +404,7 @@ widget.get('/r/invite/:token', async (c) => {
 });
 
 widget.post('/r/invite/:token', async (c) => {
+  if (isReviewsPaused()) return pausedPage(c);
   const token = c.req.param('token');
   const resolved = await resolveInvitation(c, token);
   if (!resolved.ok) return resolved.response;
@@ -455,6 +475,8 @@ widget.post('/r/invite/:token', async (c) => {
   // First-name-only as the display name. Same rule as the email-link flow.
   const displayName = submittedName.split(/\s+/)[0] ?? submittedName;
 
+  const censored = sanitizeReviewText({ title, body });
+
   const reviewId = insertReview({
     shopifyProductId: invitation.shopify_product_id,
     shopifyVariantId: null,
@@ -462,8 +484,8 @@ widget.post('/r/invite/:token', async (c) => {
     reviewerEmail: customer.email,
     reviewerName: displayName,
     rating,
-    title,
-    body,
+    title: censored.title,
+    body: censored.body,
     verifiedKind: 'sample',
     status: 'published',
   });
@@ -477,6 +499,8 @@ widget.post('/r/invite/:token', async (c) => {
     rating,
     productId: invitation.shopify_product_id,
   });
+
+  void notifyOnNewReview({ reviewId, rating });
 
   return c.html(pageShell('Thank you', `
     <h1>Thank you</h1>

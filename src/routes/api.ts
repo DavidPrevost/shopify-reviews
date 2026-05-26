@@ -9,11 +9,18 @@ import {
   findPurchaseById,
   findCustomerById,
   findReviewByCustomerAndProduct,
+  findReviewById,
+  insertReviewReport,
+  isReporterBanned,
+  isReportReason,
   type ReviewRow,
 } from '../db/queries.js';
 import { verifyReviewToken } from '../email/tokens.js';
 import { getOrFetchProduct } from '../shopify/product-info.js';
 import { resolveWidgetConfig } from '../shopify/widget-config.js';
+import { sanitizeReviewText } from '../lib/profanity.js';
+import { isReviewsPaused } from '../lib/panic.js';
+import { notifyOnNewReview } from '../email/notify-new-review.js';
 import { log } from '../lib/logger.js';
 
 const api = new Hono();
@@ -39,6 +46,21 @@ const reviewToPublic = (r: ReviewRow) => ({
 });
 
 api.get('/products/:productId/reviews', async (c) => {
+  // When paused, return empty + a paused flag so the widget can render its
+  // "temporarily unavailable" notice instead of reviews. Aggregate is also
+  // suppressed — the spec is "pause all review display."
+  if (isReviewsPaused()) {
+    return c.json({
+      reviews: [],
+      aggregate: { avg: null, count: 0 },
+      related: null,
+      variantHandling: 'shared',
+      page: 1,
+      size: 0,
+      paused: true,
+    });
+  }
+
   const productId = c.req.param('productId');
   const variantId = c.req.query('variant') || null;
   const page = Math.max(1, Number(c.req.query('page') ?? '1'));
@@ -83,6 +105,9 @@ api.get('/products/:productId/reviews', async (c) => {
 // collection-card placeholders where the customer hasn't picked a variant
 // yet and "this product overall" is the right framing.
 api.get('/products/:productId/aggregate', (c) => {
+  if (isReviewsPaused()) {
+    return c.json({ avg: null, count: 0, paused: true });
+  }
   const productId = c.req.param('productId');
   return c.json(getProductAggregate(productId));
 });
@@ -115,6 +140,9 @@ const trimOrNull = (s: unknown, maxLen: number): string | null => {
 };
 
 api.post('/reviews/submit', async (c) => {
+  if (isReviewsPaused()) {
+    return c.json({ error: 'reviews_paused' }, 503);
+  }
   let body: SubmitBody;
   try {
     body = await c.req.json<SubmitBody>();
@@ -168,6 +196,8 @@ api.post('/reviews/submit', async (c) => {
     return c.json({ ok: true, reviewId: existingReview.id, duplicate: true });
   }
 
+  const censored = sanitizeReviewText({ title, body: reviewBody });
+
   const reviewId = insertReview({
     shopifyProductId: purchase.shopify_product_id,
     shopifyVariantId: purchase.shopify_variant_id,
@@ -175,8 +205,8 @@ api.post('/reviews/submit', async (c) => {
     reviewerEmail: customer.email,
     reviewerName: submittedName ?? fallbackName,
     rating,
-    title,
-    body: reviewBody,
+    title: censored.title,
+    body: censored.body,
     verifiedKind: 'purchase',
     status: 'published',
   });
@@ -191,7 +221,82 @@ api.post('/reviews/submit', async (c) => {
     productId: purchase.shopify_product_id,
   });
 
+  // Optional admin notification. Fire-and-forget — the response shouldn't
+  // wait on SMTP, and the function logs its own errors.
+  void notifyOnNewReview({ reviewId, rating });
+
   return c.json({ ok: true, reviewId });
+});
+
+// --- Report a review (storefront flag-this-review flow) ---
+//
+// Public + CORS-allowed. Captures IP for dedupe (one open report per IP per
+// review). Reporter email is optional; when provided and the address is on
+// the banned_reporters list, the request returns 200 with no DB write — the
+// reporter shouldn't get a signal that they're banned.
+
+const MAX_REPORT_MESSAGE = 1000;
+
+api.post('/reviews/:id/report', async (c) => {
+  const reviewId = Number(c.req.param('id'));
+  if (!Number.isInteger(reviewId) || reviewId <= 0) {
+    return c.json({ error: 'invalid_review_id' }, 400);
+  }
+  const review = findReviewById(reviewId);
+  if (!review || review.status !== 'published') {
+    // Don't reveal whether a non-published review exists. Silent success.
+    return c.json({ ok: true });
+  }
+
+  let body: { reason?: string; message?: string; email?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+
+  const reasonRaw = String(body.reason ?? '').trim();
+  if (!isReportReason(reasonRaw)) {
+    return c.json({ error: 'invalid_reason' }, 400);
+  }
+  const message = trimOrNull(body.message, MAX_REPORT_MESSAGE);
+  const reporterEmail = trimOrNull(body.email, 200);
+
+  if (reporterEmail && isReporterBanned(reporterEmail)) {
+    // Silently accept. No DB write.
+    log('info', 'report from banned reporter dropped', {
+      reviewId,
+      reporterEmail,
+    });
+    return c.json({ ok: true });
+  }
+
+  // Best-effort IP capture. Behind the Caddy/GCP relay we'll see the relay's
+  // IP unless the X-Forwarded-For header is set; in the dev environment it'll
+  // be a localhost address. Used for dedupe only, not for blocking, so an
+  // imperfect value is fine.
+  const reporterIp =
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+    c.req.header('x-real-ip') ||
+    null;
+
+  const reportId = insertReviewReport({
+    reviewId,
+    reason: reasonRaw,
+    message,
+    reporterEmail,
+    reporterIp,
+  });
+
+  log('info', reportId ? 'review reported' : 'review report deduped', {
+    reviewId,
+    reportId,
+    reason: reasonRaw,
+    hasMessage: message !== null,
+    hasReporterEmail: reporterEmail !== null,
+  });
+
+  return c.json({ ok: true });
 });
 
 export default api;
