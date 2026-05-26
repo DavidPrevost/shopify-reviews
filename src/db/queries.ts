@@ -1106,6 +1106,89 @@ export const listReviews = (input: { status?: string; limit: number; offset: num
   `).all(input.limit, input.offset) as ReviewRow[];
 };
 
+// --- Filtered/sorted reviews list (admin Reviews tab) ---
+
+export interface ReviewFilter {
+  status?: string;     // published | pending | rejected
+  rating?: number;     // 1-5
+  productId?: string;  // exact shopify_product_id
+  reviewer?: string;   // substring match on email or name
+  dateFrom?: number;   // unix sec, inclusive
+  dateTo?: number;     // unix sec, inclusive
+}
+
+export type ReviewSortKey = 'created_at' | 'rating' | 'product' | 'reviewer' | 'status';
+
+export interface ReviewListRow extends ReviewRow {
+  product_title: string | null;
+  variants_json: string | null;
+}
+
+// Sort keys map to a fixed whitelist of expressions — never interpolate a
+// caller-supplied column name into SQL.
+const REVIEW_SORT_COLUMNS: Record<ReviewSortKey, string> = {
+  created_at: 'r.created_at',
+  rating: 'r.rating',
+  product: 'COALESCE(pc.title, r.shopify_product_id)',
+  reviewer: 'COALESCE(r.reviewer_name, r.reviewer_email)',
+  status: 'r.status',
+};
+
+const buildReviewWhere = (f: ReviewFilter): { clause: string; params: Array<string | number> } => {
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+  if (f.status) { where.push('r.status = ?'); params.push(f.status); }
+  if (f.rating) { where.push('r.rating = ?'); params.push(f.rating); }
+  if (f.productId) { where.push('r.shopify_product_id = ?'); params.push(f.productId); }
+  if (f.reviewer) {
+    where.push('(r.reviewer_email LIKE ? OR r.reviewer_name LIKE ?)');
+    const like = `%${f.reviewer}%`;
+    params.push(like, like);
+  }
+  if (f.dateFrom) { where.push('r.created_at >= ?'); params.push(f.dateFrom); }
+  if (f.dateTo) { where.push('r.created_at <= ?'); params.push(f.dateTo); }
+  return { clause: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+};
+
+export const listReviewsFiltered = (input: {
+  filter: ReviewFilter;
+  sort: ReviewSortKey;
+  dir: 'asc' | 'desc';
+  limit: number;
+  offset: number;
+}): ReviewListRow[] => {
+  const { clause, params } = buildReviewWhere(input.filter);
+  const col = REVIEW_SORT_COLUMNS[input.sort] ?? REVIEW_SORT_COLUMNS.created_at;
+  const dir = input.dir === 'asc' ? 'ASC' : 'DESC';
+  return getDb().prepare(`
+    SELECT r.*, pc.title AS product_title, pc.variants_json AS variants_json
+      FROM reviews r
+      LEFT JOIN products_cache pc ON pc.shopify_product_id = r.shopify_product_id
+      ${clause}
+     ORDER BY ${col} ${dir}, r.id DESC
+     LIMIT ? OFFSET ?
+  `).all(...params, input.limit, input.offset) as ReviewListRow[];
+};
+
+export const countReviewsFiltered = (filter: ReviewFilter): number => {
+  const { clause, params } = buildReviewWhere(filter);
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS n FROM reviews r ${clause}
+  `).get(...params) as { n: number };
+  return row.n;
+};
+
+// Distinct products that have at least one review, with cached title if known.
+// Drives the product filter dropdown on the Reviews tab.
+export const listReviewProductOptions = (): Array<{ shopify_product_id: string; title: string | null }> => {
+  return getDb().prepare(`
+    SELECT DISTINCT r.shopify_product_id AS shopify_product_id, pc.title AS title
+      FROM reviews r
+      LEFT JOIN products_cache pc ON pc.shopify_product_id = r.shopify_product_id
+     ORDER BY COALESCE(pc.title, r.shopify_product_id)
+  `).all() as Array<{ shopify_product_id: string; title: string | null }>;
+};
+
 export const countReviewsByStatus = (): Record<string, number> => {
   const rows = getDb().prepare(`
     SELECT status, COUNT(*) AS n FROM reviews GROUP BY status
@@ -1243,6 +1326,7 @@ export interface ProductCacheRow {
   title: string;
   featured_image_url: string | null;
   variant_handling: string | null;
+  variants_json: string | null;
   updated_at: number;
 }
 
@@ -1252,15 +1336,17 @@ export const upsertProductCache = (input: {
   title: string;
   featuredImageUrl: string | null;
   variantHandling: string | null;
+  variantsJson?: string | null;
 }): void => {
   getDb().prepare(`
-    INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, variant_handling, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, variant_handling, variants_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(shopify_product_id) DO UPDATE SET
       handle = excluded.handle,
       title = excluded.title,
       featured_image_url = excluded.featured_image_url,
       variant_handling = excluded.variant_handling,
+      variants_json = excluded.variants_json,
       updated_at = excluded.updated_at
   `).run(
     input.shopifyProductId,
@@ -1268,6 +1354,7 @@ export const upsertProductCache = (input: {
     input.title,
     input.featuredImageUrl,
     input.variantHandling,
+    input.variantsJson ?? null,
     nowSec(),
   );
 };

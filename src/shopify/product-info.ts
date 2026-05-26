@@ -38,9 +38,14 @@ const fetchQuery = `
       title
       featuredImage { url }
       variantHandling: metafield(namespace: "reviews", key: "variant_handling") { value }
+      variants(first: 100) { nodes { id title } }
     }
   }
 `;
+
+// Shopify variant ids come back as gids (gid://shopify/ProductVariant/123).
+// Reviews store the bare numeric id, so key the cache map by that.
+const numericId = (gid: string): string => gid.split('/').pop() ?? gid;
 
 // Get product info, preferring the local cache. Falls back to Shopify and
 // updates the cache on miss or when the cached row is older than the TTL.
@@ -59,6 +64,7 @@ export const getOrFetchProduct = async (shopifyProductId: string): Promise<Produ
       title: string;
       featuredImage: { url: string } | null;
       variantHandling: { value: string } | null;
+      variants: { nodes: Array<{ id: string; title: string }> };
     } | null;
   }>(fetchQuery, { id: gid });
 
@@ -66,12 +72,18 @@ export const getOrFetchProduct = async (shopifyProductId: string): Promise<Produ
 
   const variantHandlingRaw = data.product.variantHandling?.value ?? null;
 
+  const variantMap: Record<string, string> = {};
+  for (const v of data.product.variants.nodes) {
+    variantMap[numericId(v.id)] = v.title;
+  }
+
   upsertProductCache({
     shopifyProductId,
     handle: data.product.handle,
     title: data.product.title,
     featuredImageUrl: data.product.featuredImage?.url ?? null,
     variantHandling: variantHandlingRaw,
+    variantsJson: JSON.stringify(variantMap),
   });
 
   return {

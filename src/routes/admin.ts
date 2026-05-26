@@ -2,7 +2,12 @@ import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
   listReviews,
+  listReviewsFiltered,
+  countReviewsFiltered,
+  listReviewProductOptions,
   countReviewsByStatus,
+  type ReviewSortKey,
+  type ReviewListRow,
   findReviewById,
   updateReviewStatus,
   setMerchantReply,
@@ -584,34 +589,160 @@ const renderPanicCard = (
 // --- Reviews list ---
 
 admin.get('/reviews', (c) => {
-  const status = c.req.query('status');
-  const page = Math.max(1, Number(c.req.query('page') ?? '1'));
+  const q = c.req.query();
+  const status = q.status ?? '';
+  const ratingNum = q.rating ? Number(q.rating) : NaN;
+  const rating = Number.isInteger(ratingNum) && ratingNum >= 1 && ratingNum <= 5 ? ratingNum : undefined;
+  const productId = q.product ?? '';
+  const reviewer = (q.reviewer ?? '').trim();
+  const from = q.from ?? '';
+  const to = q.to ?? '';
+  const validSorts: ReviewSortKey[] = ['created_at', 'rating', 'product', 'reviewer', 'status'];
+  const sort = (validSorts.includes(q.sort as ReviewSortKey) ? q.sort : 'created_at') as ReviewSortKey;
+  const dir: 'asc' | 'desc' = q.dir === 'asc' ? 'asc' : 'desc';
+  const page = Math.max(1, Number(q.page ?? '1'));
   const size = 50;
-  const reviews = listReviews({ status, limit: size, offset: (page - 1) * size });
 
-  const filterTabs = ['all', 'published', 'pending', 'rejected']
-    .map(
-      (label) => {
-        const href = label === 'all' ? '/admin/reviews' : `/admin/reviews?status=${label}`;
-        const active = (status === label) || (label === 'all' && !status);
-        return `<a href="${href}" class="${active ? 'active' : ''}">${label}</a>`;
-      },
-    )
+  // date inputs are YYYY-MM-DD; treat them as UTC day boundaries.
+  const dfParsed = from ? Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000) : NaN;
+  const dtParsed = to ? Math.floor(Date.parse(`${to}T23:59:59Z`) / 1000) : NaN;
+  const filter = {
+    status: status || undefined,
+    rating,
+    productId: productId || undefined,
+    reviewer: reviewer || undefined,
+    dateFrom: Number.isFinite(dfParsed) ? dfParsed : undefined,
+    dateTo: Number.isFinite(dtParsed) ? dtParsed : undefined,
+  };
+
+  const total = countReviewsFiltered(filter);
+  const reviews = listReviewsFiltered({ filter, sort, dir, limit: size, offset: (page - 1) * size });
+  const productOptions = listReviewProductOptions();
+  const totalPages = Math.max(1, Math.ceil(total / size));
+
+  // Preserve active filters when building sort-header and pagination links.
+  const baseParams = () => {
+    const sp = new URLSearchParams();
+    if (status) sp.set('status', status);
+    if (rating) sp.set('rating', String(rating));
+    if (productId) sp.set('product', productId);
+    if (reviewer) sp.set('reviewer', reviewer);
+    if (from) sp.set('from', from);
+    if (to) sp.set('to', to);
+    return sp;
+  };
+  const sortHeader = (key: ReviewSortKey, label: string) => {
+    const nextDir = sort === key && dir === 'asc' ? 'desc' : 'asc';
+    const sp = baseParams();
+    sp.set('sort', key);
+    sp.set('dir', nextDir);
+    const arrow = sort === key ? (dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th><a href="/admin/reviews?${sp.toString()}" style="color:inherit;text-decoration:none;">${label}${arrow}</a></th>`;
+  };
+  const pageLink = (p: number, label: string) => {
+    const sp = baseParams();
+    sp.set('sort', sort);
+    sp.set('dir', dir);
+    sp.set('page', String(p));
+    return `<a href="/admin/reviews?${sp.toString()}">${label}</a>`;
+  };
+
+  const productOptionsHtml = productOptions
+    .map((p) => `<option value="${escapeHtml(p.shopify_product_id)}"${p.shopify_product_id === productId ? ' selected' : ''}>${escapeHtml(p.title ?? p.shopify_product_id)}</option>`)
+    .join('');
+  const ratingOptionsHtml = [1, 2, 3, 4, 5]
+    .map((n) => `<option value="${n}"${rating === n ? ' selected' : ''}>${n} star${n === 1 ? '' : 's'}</option>`)
+    .join('');
+  const statusOptionsHtml = ['published', 'pending', 'rejected']
+    .map((s) => `<option value="${s}"${status === s ? ' selected' : ''}>${s}</option>`)
     .join('');
 
   const tableHtml = reviews.length === 0
-    ? '<p class="muted">No reviews matching this filter.</p>'
+    ? '<p class="muted">No reviews match these filters.</p>'
     : `<table>
-        <thead><tr><th>When</th><th>Rating</th><th>Product</th><th>Reviewer</th><th>Status</th><th></th></tr></thead>
-        <tbody>${reviews.map(reviewRowHtml).join('')}</tbody>
+        <thead><tr>
+          ${sortHeader('created_at', 'When')}
+          ${sortHeader('rating', 'Rating')}
+          ${sortHeader('product', 'Product')}
+          ${sortHeader('reviewer', 'Reviewer')}
+          ${sortHeader('status', 'Status')}
+          <th></th>
+        </tr></thead>
+        <tbody>${reviews.map(reviewListRowHtml).join('')}</tbody>
        </table>`;
+
+  const pagerHtml = totalPages > 1
+    ? `<div class="filter-row" style="justify-content:space-between;margin-top:16px;">
+         <span class="muted">${total} review${total === 1 ? '' : 's'} · page ${page} of ${totalPages}</span>
+         <span>${page > 1 ? pageLink(page - 1, '← Prev') : ''} ${page < totalPages ? pageLink(page + 1, 'Next →') : ''}</span>
+       </div>`
+    : `<p class="muted" style="margin-top:12px;">${total} review${total === 1 ? '' : 's'}.</p>`;
 
   return c.html(adminShell('Reviews', `
     <h2>Reviews</h2>
-    <div class="filter-row">${filterTabs}</div>
+    <form method="GET" action="/admin/reviews" class="card" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;align-items:end;">
+      <div>
+        <label for="f-status">Status</label>
+        <select id="f-status" name="status"><option value="">Any</option>${statusOptionsHtml}</select>
+      </div>
+      <div>
+        <label for="f-rating">Rating</label>
+        <select id="f-rating" name="rating"><option value="">Any</option>${ratingOptionsHtml}</select>
+      </div>
+      <div>
+        <label for="f-product">Product</label>
+        <select id="f-product" name="product"><option value="">Any</option>${productOptionsHtml}</select>
+      </div>
+      <div>
+        <label for="f-reviewer">Reviewer</label>
+        <input id="f-reviewer" name="reviewer" type="text" value="${escapeHtml(reviewer)}" placeholder="name or email">
+      </div>
+      <div>
+        <label for="f-from">From</label>
+        <input id="f-from" name="from" type="date" value="${escapeHtml(from)}">
+      </div>
+      <div>
+        <label for="f-to">To</label>
+        <input id="f-to" name="to" type="date" value="${escapeHtml(to)}">
+      </div>
+      <input type="hidden" name="sort" value="${sort}">
+      <input type="hidden" name="dir" value="${dir}">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="submit" class="primary">Filter</button>
+        <a href="/admin/reviews">Clear</a>
+      </div>
+    </form>
     ${tableHtml}
+    ${pagerHtml}
   `, 'reviews'));
 });
+
+// Row for the filtered Reviews list. Shows the cached product title (falling
+// back to the bare id when the product isn't cached yet) and the variant title
+// resolved from the cached variant map when available.
+const reviewListRowHtml = (r: ReviewListRow): string => {
+  const productLabel = r.product_title
+    ? escapeHtml(r.product_title)
+    : `<span class="muted">${escapeHtml(r.shopify_product_id)}</span>`;
+  let variantLabel = '';
+  if (r.shopify_variant_id && r.variants_json) {
+    try {
+      const m = JSON.parse(r.variants_json) as Record<string, string>;
+      const t = m[r.shopify_variant_id];
+      if (t) variantLabel = `<div class="muted" style="font-size:12px;">${escapeHtml(t)}</div>`;
+    } catch { /* unparseable variant cache — show product only */ }
+  }
+  return `
+    <tr>
+      <td class="muted">${formatTs(r.created_at)}</td>
+      <td class="stars">${stars(r.rating)}</td>
+      <td>${productLabel}${variantLabel}</td>
+      <td>${escapeHtml(r.reviewer_name ?? r.reviewer_email)}</td>
+      <td>${statusPill(r.status)}</td>
+      <td><a href="/admin/reviews/${r.id}">View</a></td>
+    </tr>
+  `;
+};
 
 // --- Review detail + moderation ---
 
