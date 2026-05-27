@@ -171,6 +171,8 @@ proxy.post('/customer/review', async (c) => {
     rating,
     title: censored.title,
     body: censored.body,
+    titleOriginal: title,
+    bodyOriginal: reviewBody,
     verifiedKind: isPurchaser ? 'purchase' : null,
     status: 'published',
   });
@@ -239,6 +241,8 @@ proxy.post('/customer/review/:id', async (c) => {
     rating,
     title: censored.title,
     body: censored.body,
+    titleOriginal: title,
+    bodyOriginal: reviewBody,
     reviewerName: displayName,
   });
 

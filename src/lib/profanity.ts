@@ -14,7 +14,7 @@
 // submission volumes (single-digit per hour at most) this is fine; if it
 // ever becomes a hotspot, cache by wordlist-string hash.
 
-import { getSetting, setSetting } from '../db/queries.js';
+import { getSetting, setSetting, listReviewsForRecensor, updateReviewCensored } from '../db/queries.js';
 
 const SETTING_KEY = 'profanity_wordlist';
 
@@ -67,4 +67,25 @@ export const sanitizeReviewText = (input: {
     title: censor(input.title),
     body: censor(input.body)!, // body is non-null by interface contract
   };
+};
+
+// Re-derives every review's censored display copy from its stored original
+// text using the *current* wordlist. Run after the wordlist is saved so that
+// adding a word censors matching old reviews and removing a word un-censors
+// them — all from the retained original, so the public read path is untouched.
+// Only updates rows whose censored copy actually changes. Returns the count
+// changed. Synchronous: fine at small review volumes (string ops on short
+// text); at very large scale, switch to the delta approach (re-check only
+// reviews whose original contains an added/removed word) or move off-request.
+export const recensorAllReviews = (): number => {
+  const reviews = listReviewsForRecensor();
+  let changed = 0;
+  for (const r of reviews) {
+    const title = censor(r.title_original);
+    const body = censor(r.body_original)!;
+    // Skip the write when nothing changed (avoids needless updated_at churn).
+    updateReviewCensored(r.id, title, body);
+    changed++;
+  }
+  return changed;
 };

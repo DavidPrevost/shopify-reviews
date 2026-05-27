@@ -207,6 +207,8 @@ api.post('/reviews/submit', async (c) => {
     rating,
     title: censored.title,
     body: censored.body,
+    titleOriginal: title,
+    bodyOriginal: reviewBody,
     verifiedKind: 'purchase',
     status: 'published',
   });

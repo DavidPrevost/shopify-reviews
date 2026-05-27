@@ -379,6 +379,10 @@ export interface ReviewRow {
   rating: number;
   title: string | null;
   body: string;
+  // Raw reviewer text, pre-censoring. NULL for reviews created before this was
+  // added. `title`/`body` above are the censored display copy read publicly.
+  title_original: string | null;
+  body_original: string | null;
   verified_purchase: number;
   verified_kind: VerifiedKind;
   status: string;
@@ -736,8 +740,12 @@ export const insertReview = (input: {
   reviewerEmail: string;
   reviewerName: string | null;
   rating: number;
+  // title/body are the censored display copy (read publicly). titleOriginal/
+  // bodyOriginal are the raw reviewer text the caller censored from.
   title: string | null;
   body: string;
+  titleOriginal: string | null;
+  bodyOriginal: string;
   verifiedKind: VerifiedKind;
   status: 'pending' | 'published' | 'rejected';
 }): number => {
@@ -746,8 +754,8 @@ export const insertReview = (input: {
   const result = getDb().prepare(`
     INSERT INTO reviews
       (shopify_product_id, shopify_variant_id, customer_id, reviewer_email, reviewer_name,
-       rating, title, body, verified_purchase, verified_kind, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       rating, title, body, title_original, body_original, verified_purchase, verified_kind, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.shopifyProductId,
     input.shopifyVariantId,
@@ -757,6 +765,8 @@ export const insertReview = (input: {
     input.rating,
     input.title,
     input.body,
+    input.titleOriginal,
+    input.bodyOriginal,
     verifiedPurchase,
     input.verifiedKind,
     input.status,
@@ -1259,20 +1269,43 @@ export const updateReviewContent = (input: {
   rating: number;
   title: string | null;
   body: string;
+  titleOriginal: string | null;
+  bodyOriginal: string;
   reviewerName: string | null;
 }): void => {
   getDb().prepare(`
     UPDATE reviews
-       SET rating = ?, title = ?, body = ?, reviewer_name = ?, updated_at = ?
+       SET rating = ?, title = ?, body = ?, title_original = ?, body_original = ?, reviewer_name = ?, updated_at = ?
      WHERE id = ?
   `).run(
     input.rating,
     input.title,
     input.body,
+    input.titleOriginal,
+    input.bodyOriginal,
     input.reviewerName,
     nowSec(),
     input.id,
   );
+};
+
+// --- Profanity re-scan support ---
+// Reviews that have a captured original (raw) text, so their censored display
+// copy can be re-derived when the wordlist changes. Reviews predating the
+// original-text columns (NULL original) are skipped — nothing to re-derive.
+export const listReviewsForRecensor = (): Array<{ id: number; title_original: string | null; body_original: string }> => {
+  return getDb().prepare(`
+    SELECT id, title_original, body_original
+      FROM reviews
+     WHERE body_original IS NOT NULL
+  `).all() as Array<{ id: number; title_original: string | null; body_original: string }>;
+};
+
+// Rewrites only the censored display columns (never the originals).
+export const updateReviewCensored = (id: number, title: string | null, body: string): void => {
+  getDb().prepare(`
+    UPDATE reviews SET title = ?, body = ?, updated_at = ? WHERE id = ?
+  `).run(title, body, nowSec(), id);
 };
 
 // True if this customer has at least one fulfilled purchase of this product.
@@ -1335,11 +1368,13 @@ export interface EmailEventDetail {
   customer_first_name: string | null;
   customer_last_name: string | null;
   metadata_json: string | null;
+  product_title: string | null;
+  shopify_product_id: string | null;
 }
 
-// Lists email_events of one kind since a cutoff, joined to the customer so the
-// dashboard activity drill-downs ("who unsubscribed?", "who got a send
-// failure?") can show people, not just a count. Most recent first.
+// Lists email_events of one kind since a cutoff, joined to the customer (so the
+// dashboard activity drill-downs show people) and, via the event's purchase, to
+// the product (so they show what was involved). Most recent first.
 export const listEmailEventsByKind = (
   kind: string,
   sinceSec: number,
@@ -1349,9 +1384,13 @@ export const listEmailEventsByKind = (
     SELECT e.id, e.kind, e.created_at, e.customer_id, e.metadata_json,
            c.email      AS customer_email,
            c.first_name AS customer_first_name,
-           c.last_name  AS customer_last_name
+           c.last_name  AS customer_last_name,
+           p.shopify_product_id AS shopify_product_id,
+           pc.title             AS product_title
       FROM email_events e
       LEFT JOIN customers c ON c.id = e.customer_id
+      LEFT JOIN purchases p ON p.id = e.purchase_id
+      LEFT JOIN products_cache pc ON pc.shopify_product_id = p.shopify_product_id
      WHERE e.kind = ? AND e.created_at >= ?
      ORDER BY e.created_at DESC
      LIMIT ?

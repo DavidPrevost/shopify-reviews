@@ -273,6 +273,8 @@ widget.post('/r/:token', async (c) => {
     rating,
     title: censored.title,
     body: censored.body,
+    titleOriginal: title,
+    bodyOriginal: body,
     verifiedKind: 'purchase',
     status: 'published',
   });
@@ -500,6 +502,8 @@ widget.post('/r/invite/:token', async (c) => {
     rating,
     title: censored.title,
     body: censored.body,
+    titleOriginal: title,
+    bodyOriginal: body,
     verifiedKind: 'sample',
     status: 'published',
   });

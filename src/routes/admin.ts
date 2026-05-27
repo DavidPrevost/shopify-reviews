@@ -51,7 +51,7 @@ import {
   type ReportReason,
 } from '../db/queries.js';
 import { sendTemplateEmail, sendTemplateEmailByTrigger } from '../email/send-template.js';
-import { getProfanityWordlist, setProfanityWordlist } from '../lib/profanity.js';
+import { getProfanityWordlist, setProfanityWordlist, recensorAllReviews } from '../lib/profanity.js';
 import { getNewReviewNotifyConfig, setNewReviewNotifyConfig } from '../email/notify-new-review.js';
 import {
   getPauseState,
@@ -368,12 +368,17 @@ admin.get('/dashboard', (c) => {
   const stats = emailEventStats(since30d);
   const recentReviews = listReviews({ limit: 10, offset: 0 });
 
+  // "Submitted" is a review, not just an email event — point its card at the
+  // Reviews table filtered to the last 30 days, and count reviews to match.
+  const since30dDate = new Date(since30d * 1000).toISOString().slice(0, 10);
+  const submitted30d = countReviewsFiltered({ dateFrom: since30d });
+
   const statBlocks = [
     { label: 'Published', n: counts.published ?? 0, href: '/admin/reviews?status=published' },
     { label: 'Pending',   n: counts.pending ?? 0,   href: '/admin/reviews?status=pending' },
     { label: 'Rejected',  n: counts.rejected ?? 0,  href: '/admin/reviews?status=rejected' },
+    { label: 'Submitted (30d)',    n: submitted30d,                 href: `/admin/reviews?from=${since30dDate}` },
     { label: 'Sent (30d)',         n: stats.request_sent ?? 0,     href: '/admin/activity?kind=request_sent' },
-    { label: 'Submitted (30d)',    n: stats.review_submitted ?? 0, href: '/admin/activity?kind=review_submitted' },
     { label: 'Unsubscribed (30d)', n: stats.unsubscribed ?? 0,     href: '/admin/activity?kind=unsubscribed' },
     { label: 'Send failed (30d)',  n: stats.send_failed ?? 0,      href: '/admin/activity?kind=send_failed' },
   ];
@@ -411,10 +416,11 @@ admin.get('/dashboard', (c) => {
 // behind the number (the review-status cards link to /admin/reviews instead).
 const ACTIVITY_KINDS: Record<string, string> = {
   request_sent: 'Review requests sent',
-  review_submitted: 'Reviews submitted',
   unsubscribed: 'Unsubscribed',
   send_failed: 'Send failures',
   resubscribed: 'Re-subscribed',
+  // 'review_submitted' intentionally omitted — a submitted review is a review,
+  // so the dashboard card links to the Reviews table (filtered to 30d) instead.
 };
 
 admin.get('/activity', async (c) => {
@@ -429,12 +435,15 @@ admin.get('/activity', async (c) => {
   const rowsHtml = events.length === 0
     ? '<p class="muted">Nothing in the last 30 days.</p>'
     : `<table>
-        <thead><tr><th>When</th><th>Customer</th><th>Details</th></tr></thead>
+        <thead><tr><th>When</th><th>Customer</th><th>Product</th><th>Details</th></tr></thead>
         <tbody>${events.map((e) => {
           const name = [e.customer_first_name, e.customer_last_name].filter(Boolean).join(' ').trim();
           const who = e.customer_email
             ? `<a href="/admin/customers/${encodeURIComponent(e.customer_email)}">${escapeHtml(name || e.customer_email)}</a>`
             : '<span class="muted">—</span>';
+          const product = e.product_title
+            ? escapeHtml(e.product_title)
+            : (e.shopify_product_id ? `<span class="muted">${escapeHtml(e.shopify_product_id)}</span>` : '<span class="muted">—</span>');
           let detail = '';
           if (e.metadata_json) {
             try {
@@ -443,7 +452,7 @@ admin.get('/activity', async (c) => {
               else if (meta.scope) detail = `scope: ${escapeHtml(String(meta.scope))}`;
             } catch { /* leave detail blank on unparseable metadata */ }
           }
-          return `<tr><td class="muted">${formatTs(e.created_at)}</td><td>${who}</td><td class="muted">${detail}</td></tr>`;
+          return `<tr><td class="muted">${formatTs(e.created_at)}</td><td>${who}</td><td>${product}</td><td class="muted">${detail}</td></tr>`;
         }).join('')}</tbody>
        </table>`;
   return c.html(adminShell(title, `
@@ -625,6 +634,17 @@ admin.get('/reviews', (c) => {
   const productOptions = listReviewProductOptions();
   const totalPages = Math.max(1, Math.ceil(total / size));
 
+  // Moderation sub-tab (profanity filter + pause/panic), relocated here from
+  // Settings so it lives alongside the reviews it governs.
+  const profanityList = getProfanityWordlist();
+  const pauseState = getPauseState();
+  const panicEvents = listPanicEvents(20);
+  const modFlash =
+    (q.recensored !== undefined ? `<div class="ok">Wordlist saved. Re-ran the filter over existing reviews (${escapeHtml(q.recensored)} re-checked).</div>` : '') +
+    (q.paused === '1' ? '<div class="ok">Reviews paused. The widget and submission paths now return an "unavailable" notice.</div>' : '') +
+    (q.extended === '1' ? '<div class="ok">Pause extended.</div>' : '') +
+    (q.resumed === '1' ? '<div class="ok">Reviews resumed.</div>' : '');
+
   // Preserve active filters when building sort-header and pagination links.
   const baseParams = () => {
     const sp = new URLSearchParams();
@@ -684,41 +704,102 @@ admin.get('/reviews', (c) => {
     : `<p class="muted" style="margin-top:12px;">${total} review${total === 1 ? '' : 's'}.</p>`;
 
   return c.html(adminShell('Reviews', `
-    <h2>Reviews</h2>
-    <form method="GET" action="/admin/reviews" class="card" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;align-items:end;">
-      <div>
-        <label for="f-status">Status</label>
-        <select id="f-status" name="status"><option value="">Any</option>${statusOptionsHtml}</select>
+    <nav class="tabs" id="reviews-tabs">
+      <a href="#list" data-tab="list">All reviews</a>
+      <a href="#moderation" data-tab="moderation">Moderation</a>
+    </nav>
+
+    <section id="tab-list" class="tab-panel" data-tab="list">
+      <form method="GET" action="/admin/reviews" class="card" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;align-items:end;">
+        <div>
+          <label for="f-status">Status</label>
+          <select id="f-status" name="status"><option value="">Any</option>${statusOptionsHtml}</select>
+        </div>
+        <div>
+          <label for="f-rating">Rating</label>
+          <select id="f-rating" name="rating"><option value="">Any</option>${ratingOptionsHtml}</select>
+        </div>
+        <div>
+          <label for="f-product">Product</label>
+          <select id="f-product" name="product"><option value="">Any</option>${productOptionsHtml}</select>
+        </div>
+        <div>
+          <label for="f-reviewer">Reviewer</label>
+          <input id="f-reviewer" name="reviewer" type="text" value="${escapeHtml(reviewer)}" placeholder="name or email">
+        </div>
+        <div>
+          <label for="f-from">From</label>
+          <input id="f-from" name="from" type="date" value="${escapeHtml(from)}">
+        </div>
+        <div>
+          <label for="f-to">To</label>
+          <input id="f-to" name="to" type="date" value="${escapeHtml(to)}">
+        </div>
+        <input type="hidden" name="sort" value="${sort}">
+        <input type="hidden" name="dir" value="${dir}">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="submit" class="primary">Filter</button>
+          <a href="/admin/reviews">Clear</a>
+        </div>
+      </form>
+      ${tableHtml}
+      ${pagerHtml}
+    </section>
+
+    <section id="tab-moderation" class="tab-panel" data-tab="moderation">
+      ${modFlash}
+      <div class="card">
+        <h3 style="margin-top:0;">Profanity filter</h3>
+        <p class="muted">Words listed here are censored to <code>****</code> in review titles and bodies. Whole-word match, case-insensitive. One word per line; lines starting with <code>#</code> are comments. Reviewer names are never censored. This is a light filter, not a held-pending queue — reviews still publish immediately; for full removal, retract the review.</p>
+        <form method="POST" action="/admin/settings/profanity">
+          <label for="profanity_wordlist">Wordlist</label>
+          <textarea id="profanity_wordlist" name="profanity_wordlist" rows="8" class="profanity-blur" style="font-family:monospace;font-size:13px;" placeholder="One word per line">${escapeHtml(profanityList.join('\n'))}</textarea>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+            <button type="button" id="profanity-reveal">Reveal list</button>
+            <span class="muted" style="font-size:12px;">${profanityList.length === 0 ? 'No words configured — filter inactive.' : `${profanityList.length} word${profanityList.length === 1 ? '' : 's'} active.`}</span>
+          </div>
+          <p class="muted" style="font-size:12px;margin-top:8px;">The list is blurred by default. Saving re-runs the filter over existing reviews' original text, so adding a word censors matching older reviews and removing one un-censors them.</p>
+          <div style="margin-top:12px;">
+            <button type="submit" class="primary">Save wordlist</button>
+          </div>
+        </form>
       </div>
-      <div>
-        <label for="f-rating">Rating</label>
-        <select id="f-rating" name="rating"><option value="">Any</option>${ratingOptionsHtml}</select>
-      </div>
-      <div>
-        <label for="f-product">Product</label>
-        <select id="f-product" name="product"><option value="">Any</option>${productOptionsHtml}</select>
-      </div>
-      <div>
-        <label for="f-reviewer">Reviewer</label>
-        <input id="f-reviewer" name="reviewer" type="text" value="${escapeHtml(reviewer)}" placeholder="name or email">
-      </div>
-      <div>
-        <label for="f-from">From</label>
-        <input id="f-from" name="from" type="date" value="${escapeHtml(from)}">
-      </div>
-      <div>
-        <label for="f-to">To</label>
-        <input id="f-to" name="to" type="date" value="${escapeHtml(to)}">
-      </div>
-      <input type="hidden" name="sort" value="${sort}">
-      <input type="hidden" name="dir" value="${dir}">
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button type="submit" class="primary">Filter</button>
-        <a href="/admin/reviews">Clear</a>
-      </div>
-    </form>
-    ${tableHtml}
-    ${pagerHtml}
+
+      ${renderPanicCard(pauseState, panicEvents)}
+    </section>
+
+    <style>
+      .profanity-blur { filter: blur(6px); transition: filter 0.12s; }
+      .profanity-blur.revealed { filter: none; }
+    </style>
+    <script>
+      (function () {
+        var tabs = document.querySelectorAll('#reviews-tabs a');
+        var panels = document.querySelectorAll('.tab-panel');
+        function show(name) {
+          tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
+          panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
+        }
+        var hash = (location.hash || '').replace('#', '');
+        var s = location.search;
+        var initial = hash || 'list';
+        if (s.indexOf('recensored') !== -1 || s.indexOf('paused=') !== -1 || s.indexOf('extended=') !== -1 || s.indexOf('resumed=') !== -1) initial = 'moderation';
+        show(initial);
+        tabs.forEach(function (a) {
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            history.replaceState(null, '', '#' + a.dataset.tab);
+            show(a.dataset.tab);
+          });
+        });
+        var rev = document.getElementById('profanity-reveal');
+        var ta = document.getElementById('profanity_wordlist');
+        if (rev && ta) rev.addEventListener('click', function () {
+          var on = ta.classList.toggle('revealed');
+          rev.textContent = on ? 'Hide list' : 'Reveal list';
+        });
+      })();
+    </script>
   `, 'reviews'));
 });
 
@@ -784,8 +865,18 @@ admin.get('/reviews/:id', (c) => {
     <div class="card">
       <p><span class="stars">${stars(review.rating)}</span> &nbsp; ${statusPill(review.status)}</p>
       <p class="muted">${formatTs(review.created_at)} · Product ${escapeHtml(review.shopify_product_id)} · ${escapeHtml(review.reviewer_email)}</p>
-      ${review.title ? `<h3>${escapeHtml(review.title)}</h3>` : ''}
-      <p style="white-space: pre-wrap;">${escapeHtml(review.body)}</p>
+      ${(() => {
+        // Admin sees the original (uncensored) text to moderate; the public
+        // storefront only ever gets the censored title/body columns. Older
+        // reviews have no captured original, so fall back to the censored copy.
+        const adminTitle = review.title_original ?? review.title;
+        const adminBody = review.body_original ?? review.body;
+        const censoredNote = review.body_original && review.body_original !== review.body
+          ? '<p class="muted" style="font-size:12px;">Showing the original text. The public storefront shows a profanity-censored version.</p>'
+          : '';
+        return `${adminTitle ? `<h3>${escapeHtml(adminTitle)}</h3>` : ''}
+      <p style="white-space: pre-wrap;">${escapeHtml(adminBody)}</p>${censoredNote}`;
+      })()}
     </div>
 
     ${moderationCard}
@@ -2976,7 +3067,6 @@ admin.get('/settings', (c) => {
     <nav class="tabs" id="settings-tabs">
       <a href="#cadence"       data-tab="cadence">Cadence</a>
       <a href="#notifications" data-tab="notifications">Notifications</a>
-      <a href="#moderation"    data-tab="moderation">Moderation</a>
       <a href="#appearance"    data-tab="appearance">Appearance</a>
       <a href="#setup"         data-tab="setup">Setup</a>
     </nav>
@@ -3030,23 +3120,6 @@ admin.get('/settings', (c) => {
         </div>
       </form>
     </div>
-    </section>
-
-    <section id="tab-moderation" class="tab-panel" data-tab="moderation">
-    <div class="card">
-      <h3 style="margin-top:0;">Profanity filter</h3>
-      <p class="muted">Words listed here are censored to <code>****</code> in review titles and bodies at submission time. Whole-word match, case-insensitive. One word per line. Lines starting with <code>#</code> are comments. Reviewer display names are never censored. This is a light filter, not a held-pending queue — reviews still publish immediately; if a censored review needs full removal, retract it from the Reviews page.</p>
-      <form method="POST" action="/admin/settings/profanity">
-        <label for="profanity_wordlist">Wordlist</label>
-        <textarea id="profanity_wordlist" name="profanity_wordlist" rows="8" style="font-family:monospace;font-size:13px;" placeholder="One word per line, e.g.&#10;spam&#10;scam&#10;# comment lines like this are ignored">${escapeHtml(profanityList.join('\n'))}</textarea>
-        <p class="muted" style="margin-top:4px;font-size:12px;">${profanityList.length === 0 ? 'No words configured. Filter is inactive.' : `${profanityList.length} word${profanityList.length === 1 ? '' : 's'} active.`}</p>
-        <div style="margin-top:12px;">
-          <button type="submit" class="primary">Save wordlist</button>
-        </div>
-      </form>
-    </div>
-
-    ${renderPanicCard(pauseState, panicEvents)}
     </section>
 
     <section id="tab-notifications" class="tab-panel" data-tab="notifications">
@@ -3226,10 +3299,7 @@ admin.get('/settings', (c) => {
           panels.forEach(function (p) { p.classList.toggle('active', p.dataset.tab === name); });
         }
         var hash = (location.hash || '').replace('#', '');
-        var search = location.search;
         var initial = hash || 'cadence';
-        // Panic actions redirect with ?paused/extended/resumed — land on Moderation so the result is visible.
-        if (search.indexOf('paused=') !== -1 || search.indexOf('extended=') !== -1 || search.indexOf('resumed=') !== -1) initial = 'moderation';
         show(initial);
         tabs.forEach(function (a) {
           a.addEventListener('click', function (e) {
@@ -3366,7 +3436,7 @@ admin.post('/panic/pause', async (c) => {
     actor: 'admin',
     pausedUntil: state.pausedUntil,
   });
-  return c.redirect('/admin/settings?paused=1');
+  return c.redirect('/admin/reviews?paused=1#moderation');
 });
 
 admin.post('/panic/extend', async (c) => {
@@ -3380,7 +3450,7 @@ admin.post('/panic/extend', async (c) => {
     actor: 'admin',
     pausedUntil: state.pausedUntil,
   });
-  return c.redirect('/admin/settings?extended=1');
+  return c.redirect('/admin/reviews?extended=1#moderation');
 });
 
 admin.post('/panic/resume', async (c) => {
@@ -3392,7 +3462,7 @@ admin.post('/panic/resume', async (c) => {
     actor: 'admin',
     pausedUntil: null,
   });
-  return c.redirect('/admin/settings?resumed=1');
+  return c.redirect('/admin/reviews?resumed=1#moderation');
 });
 
 admin.post('/settings/new-review-notify', async (c) => {
@@ -3419,8 +3489,11 @@ admin.post('/settings/profanity', async (c) => {
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'));
   setProfanityWordlist(words);
-  log('info', 'admin updated profanity wordlist', { wordCount: words.length });
-  return c.redirect('/admin/settings?saved=1');
+  // Re-derive every review's censored display copy from its stored original so
+  // added words censor old reviews and removed words un-censor them.
+  const recensored = recensorAllReviews();
+  log('info', 'admin updated profanity wordlist', { wordCount: words.length, recensored });
+  return c.redirect(`/admin/reviews?recensored=${recensored}#moderation`);
 });
 
 // --- Brand info sync from Shopify ---
