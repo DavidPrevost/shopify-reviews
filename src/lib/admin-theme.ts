@@ -91,17 +91,59 @@ export const ADMIN_THEMES: Record<string, AdminTheme> = {
 
 export const DEFAULT_ADMIN_THEME = 'blue-light';
 
+// The "Brand" theme key — not a static palette; its vars are derived from the
+// store's synced brand colors (shop_brand_json) at render time.
+export const BRAND_THEME_KEY = 'brand';
+
 export const getActiveAdminTheme = (): string => {
   const stored = getSetting('admin_theme');
-  if (stored && stored in ADMIN_THEMES) return stored;
+  if (stored && (stored in ADMIN_THEMES || stored === BRAND_THEME_KEY)) return stored;
   return DEFAULT_ADMIN_THEME;
 };
+
+// Derives admin chrome vars from the synced Shopify brand colors. We use a
+// neutral light base for backgrounds/text/borders (deliberately NOT trying to
+// generate light/dark variants from arbitrary brand colors) and apply the brand
+// PRIMARY pair to the header + accent. Shopify provides primary as a
+// background/foreground pair already chosen to contrast, so header text on the
+// header background stays legible regardless of the brand color. Returns null
+// when no usable brand primary pair is set, so the picker falls back cleanly.
+export const buildBrandThemeVars = (): ThemeVars | null => {
+  let primary: { background?: string | null; foreground?: string | null } | undefined;
+  try {
+    const parsed = JSON.parse(getSetting('shop_brand_json') ?? '{}');
+    primary = parsed?.colors?.primary;
+  } catch {
+    return null;
+  }
+  const bg = primary?.background;
+  const fg = primary?.foreground;
+  if (!bg || !fg) return null;
+  return {
+    ...LIGHT_BASE,
+    '--bg': '#f5f6f8',
+    '--surface-alt': '#f1f3f7',
+    '--accent': bg,
+    '--accent-hover': bg,
+    '--header-bg': bg,
+    '--header-text': fg,
+    '--header-nav': fg,
+    '--header-nav-active': fg,
+    '--accent-text': fg,
+  };
+};
+
+// True when the Brand theme has usable colors to render (drives whether the
+// picker offers it as a live option vs. a "sync your brand first" hint).
+export const brandThemeAvailable = (): boolean => buildBrandThemeVars() !== null;
 
 // Builds the `:root { --x: y; ... }` block for the active theme, to be injected
 // at the top of the admin shell's <style>.
 export const renderAdminThemeVars = (themeKey: string): string => {
-  const theme = ADMIN_THEMES[themeKey] ?? ADMIN_THEMES[DEFAULT_ADMIN_THEME]!;
-  const lines = Object.entries(theme.vars)
+  const vars = themeKey === BRAND_THEME_KEY
+    ? (buildBrandThemeVars() ?? ADMIN_THEMES[DEFAULT_ADMIN_THEME]!.vars)
+    : (ADMIN_THEMES[themeKey] ?? ADMIN_THEMES[DEFAULT_ADMIN_THEME]!).vars;
+  const lines = Object.entries(vars)
     .map(([k, v]) => `      ${k}: ${v};`)
     .join('\n');
   return `:root {\n${lines}\n    }`;

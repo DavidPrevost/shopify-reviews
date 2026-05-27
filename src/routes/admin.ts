@@ -97,7 +97,7 @@ import { escapeHtml } from '../email/render.js';
 import { log } from '../lib/logger.js';
 import { config } from '../config.js';
 import { nowSec, daysToSec } from '../lib/time.js';
-import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_THEME } from '../lib/admin-theme.js';
+import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_THEME, BRAND_THEME_KEY, brandThemeAvailable } from '../lib/admin-theme.js';
 import { saveLogo } from '../lib/uploads.js';
 import { EMAIL_TRIGGERS, isEmailTrigger, triggerLabel } from '../email/triggers.js';
 import { EMAIL_VARIABLES } from '../email/variables.js';
@@ -2100,6 +2100,25 @@ admin.get('/branding', (c) => {
     .map((p) => `<button type="button" data-preset-for="${fieldId}" data-color="${p.hex}" style="background:${p.hex};" title="${escapeHtml(p.name)} (${p.hex})" aria-label="${escapeHtml(p.name)}"></button>`)
     .join('');
 
+  // Distinct swatch row showing the colors synced from Shopify (when present),
+  // so the merchant can apply their actual brand colors to any field in one
+  // click. Reuses the same data-preset-for click handling as the palette.
+  // Reads the brand vars lazily (they're assigned further down, before the
+  // widgetTab template that calls this runs).
+  const brandSwatches = (fieldId: string): string => {
+    const data = [
+      { name: 'Brand primary', hex: brandPrimaryBg },
+      { name: 'Brand primary text', hex: brandPrimaryFg },
+      { name: 'Brand secondary', hex: brandSecondaryBg },
+      { name: 'Brand secondary text', hex: brandSecondaryFg },
+    ].filter((s) => s.hex);
+    if (data.length === 0) return '';
+    return `<div class="color-presets" style="margin-top:2px;align-items:center;">
+       <span class="muted" style="font-size:11px;margin-right:4px;">Shopify brand:</span>
+       ${data.map((s) => `<button type="button" data-preset-for="${fieldId}" data-color="${escapeHtml(s.hex)}" style="background:${escapeHtml(s.hex)};" title="${escapeHtml(s.name)} (${escapeHtml(s.hex)})" aria-label="${escapeHtml(s.name)}"></button>`).join('')}
+     </div>`;
+  };
+
   const colorField = (opts: {
     id: string;
     label: string;
@@ -2122,6 +2141,7 @@ admin.get('/branding', (c) => {
         </div>
         <div class="color-field-default">${defaultSource}${hasOverride ? ' · <strong style="color:#0a8a3a;">overridden</strong>' : ''}</div>
         <div class="color-presets">${presetSwatches(opts.id)}</div>
+        ${brandSwatches(opts.id)}
         <input type="hidden" name="${opts.id}" data-hidden-for="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}">
       </div>
     `;
@@ -3086,9 +3106,11 @@ admin.get('/settings', (c) => {
   const notifyConfig = getNewReviewNotifyConfig();
 
   const activeTheme = getActiveAdminTheme();
-  const themeOptions = Object.entries(ADMIN_THEMES)
-    .map(([key, t]) => `<option value="${key}"${key === activeTheme ? ' selected' : ''}>${escapeHtml(t.label)}</option>`)
-    .join('');
+  const brandReady = brandThemeAvailable();
+  const themeOptions = `<option value="${BRAND_THEME_KEY}"${activeTheme === BRAND_THEME_KEY ? ' selected' : ''}>Brand — from Shopify${brandReady ? '' : ' (no brand colors synced yet)'}</option>`
+    + Object.entries(ADMIN_THEMES)
+        .map(([key, t]) => `<option value="${key}"${key === activeTheme ? ' selected' : ''}>${escapeHtml(t.label)}</option>`)
+        .join('');
 
   // Hour dropdown: 1-12
   const hourOptions = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -3542,7 +3564,7 @@ admin.post('/settings/theme', async (c) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
   const form = await c.req.formData();
   const theme = String(form.get('admin_theme') ?? '');
-  if (theme in ADMIN_THEMES) {
+  if (theme in ADMIN_THEMES || theme === BRAND_THEME_KEY) {
     setSetting('admin_theme', theme);
   }
   return c.redirect('/admin/settings?saved=1');
