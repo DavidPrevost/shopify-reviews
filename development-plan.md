@@ -738,6 +738,19 @@ These were either added during the build as user-priority items or evolved from 
 - **Self-configuring widget bundle** — widget detects its API base at runtime from its own script src, so the same bundle works on dev and prod.
 - **Native HTML5 dialog** for the storefront-customer review modal (focus trap, backdrop, mobile-responsive — all built-in).
 
+### Admin & branding overhaul (later session — committed, deploy/validation gap noted below)
+
+- **Chunk A moderation suite** — retract-with-reason + `moderation_events` audit log (migration 008), reports queue + `banned_reporters` (011), pause-reviews panic button + `panic_events` (010), uniqueness-excludes-rejected (009), profanity filter, configurable new-review notifications. (Was built in a prior session and uncommitted; secured this session.)
+- **Admin theme system** — 10 presets (5 accents × light/dark) via CSS variables on the shell; chrome themed, semantic colors (status pills, error/success, star gold, danger, pause banner) left fixed. Picker in Settings → Appearance. Plus a **"Brand — from Shopify"** theme that applies the synced brand primary pair to header/accent over a neutral light base (no light/dark derivation by design).
+- **Settings → sub-tabs** — Cadence / Notifications / Appearance / Setup (Moderation moved out, see below).
+- **Dashboard drill-downs** — stat cards are links: review-status → filtered Reviews; email/customer stats → `/admin/activity?kind=…` lists (with a Product column); "Submitted" → Reviews filtered to last 30 days.
+- **Reviews tab redesign** — filter by status/rating/product/reviewer/date, sortable columns, real product + variant names (variant titles cached via migration 012). **Moderation is now a sub-tab here** (profanity + panic), relocated from Settings; profanity wordlist is blur+Reveal.
+- **Widget branding** — explicit background / text / button-label overrides with inherit-by-default + truthful live preview + "reset to Shopify defaults". A "Shopify brand" swatch row in each color field applies synced brand colors in one click.
+- **Self-hosted logo upload** — PNG/JPG, 250 KB cap, served at `/uploads` (long cache, nosniff); sets the shared email logo URL.
+- **Email template system** — trigger-based selection (migration 013) with a curated trigger registry + flat global variable registry; 4 seeded defaults (Review Request, Review Request Followup, Repeat Customer Review, Review Removed) + dormant Review Restored; moderation emails select by trigger. Editor: dropdown selector + unsaved-changes guard, per-template trigger picker, create/delete, constrained toolbar (bold/italic/heading/list/link) + insert-logo + insert-variable + raw-HTML toggle. No server-side HTML sanitizer (admin is a trusted boundary).
+- **Profanity censor-on-write, store-both** (migration 014) — see §15 Chunk A item 2 for the full model; re-scan on wordlist save; curated default wordlist seeded once; comments persist (raw text stored).
+- **Brand assets without Storefront API** — Liquid relay (`shop.brand` → widget `data-brand-*` attributes → HMAC `/proxy/brand` → `shop_brand_json`) + manual entry fallback. See §5 brand-colors note.
+
 ### Conventions adopted during build (deviations from earlier draft)
 
 - **All persisted timestamps are unix seconds**, matching SQLite's `unixepoch()`. Helpers in [src/lib/time.ts](src/lib/time.ts). The earlier scaffold mixed `Date.now()` (ms) and `unixepoch()` (s); standardized on seconds.
@@ -791,10 +804,9 @@ Features deferred to after MVP launch. Update this list as priorities shift; the
 
 ### Prioritized next — Chunk B: Search, filters, storefront UX polish
 
-6. **Reviews list search + filters in admin** (full Reviews tab redesign):
-   - Filter by rating, date range, product, customer email, status, verified_kind, has-merchant-reply
-   - Full-text search across title and body (SQLite FTS5)
-   - Sort options
+6. **Reviews list search + filters in admin** (full Reviews tab redesign): **🟡 partially done** —
+   - ✅ Filter by rating, date range, product, reviewer (email/name), status; sortable columns; real product + variant names. (Shipped in the admin overhaul.)
+   - ⬜ Still to do: full-text content search across title and body (SQLite FTS5), and filters for verified_kind / has-merchant-reply.
 7. **Storefront sort/filter on reviews list**:
    - Content search box
    - Sort by rating (high-to-low, low-to-high)
