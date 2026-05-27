@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { config } from './config.js';
 import { closeDb, migrate } from './db/client.js';
 import { seedDefaultEmailTemplates } from './email/email-config.js';
+import { seedDefaultProfanityWordlist } from './lib/profanity.js';
 import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
@@ -13,6 +14,7 @@ import { startScheduler } from './scheduler/cron.js';
 
 migrate();
 seedDefaultEmailTemplates();
+seedDefaultProfanityWordlist();
 startScheduler();
 
 const app = new Hono();

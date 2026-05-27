@@ -51,7 +51,7 @@ import {
   type ReportReason,
 } from '../db/queries.js';
 import { sendTemplateEmail, sendTemplateEmailByTrigger } from '../email/send-template.js';
-import { getProfanityWordlist, setProfanityWordlist, recensorAllReviews } from '../lib/profanity.js';
+import { getProfanityWordlist, getProfanityWordlistText, setProfanityWordlistText, recensorAllReviews } from '../lib/profanity.js';
 import { getNewReviewNotifyConfig, setNewReviewNotifyConfig } from '../email/notify-new-review.js';
 import {
   getPauseState,
@@ -637,6 +637,7 @@ admin.get('/reviews', (c) => {
   // Moderation sub-tab (profanity filter + pause/panic), relocated here from
   // Settings so it lives alongside the reviews it governs.
   const profanityList = getProfanityWordlist();
+  const profanityText = getProfanityWordlistText();
   const pauseState = getPauseState();
   const panicEvents = listPanicEvents(20);
   const modFlash =
@@ -753,7 +754,7 @@ admin.get('/reviews', (c) => {
         <p class="muted">Words listed here are censored to <code>****</code> in review titles and bodies. Whole-word match, case-insensitive. One word per line; lines starting with <code>#</code> are comments. Reviewer names are never censored. This is a light filter, not a held-pending queue — reviews still publish immediately; for full removal, retract the review.</p>
         <form method="POST" action="/admin/settings/profanity">
           <label for="profanity_wordlist">Wordlist</label>
-          <textarea id="profanity_wordlist" name="profanity_wordlist" rows="8" class="profanity-blur" style="font-family:monospace;font-size:13px;" placeholder="One word per line">${escapeHtml(profanityList.join('\n'))}</textarea>
+          <textarea id="profanity_wordlist" name="profanity_wordlist" rows="10" class="profanity-blur" style="font-family:monospace;font-size:13px;" placeholder="One word per line">${escapeHtml(profanityText)}</textarea>
           <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
             <button type="button" id="profanity-reveal">Reveal list</button>
             <span class="muted" style="font-size:12px;">${profanityList.length === 0 ? 'No words configured — filter inactive.' : `${profanityList.length} word${profanityList.length === 1 ? '' : 's'} active.`}</span>
@@ -3043,9 +3044,6 @@ admin.get('/settings', (c) => {
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
-  const profanityList = getProfanityWordlist();
-  const pauseState = getPauseState();
-  const panicEvents = listPanicEvents(20);
   const notifyConfig = getNewReviewNotifyConfig();
 
   const activeTheme = getActiveAdminTheme();
@@ -3484,15 +3482,12 @@ admin.post('/settings/new-review-notify', async (c) => {
 admin.post('/settings/profanity', async (c) => {
   const form = await c.req.formData();
   const raw = String(form.get('profanity_wordlist') ?? '');
-  const words = raw
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#'));
-  setProfanityWordlist(words);
-  // Re-derive every review's censored display copy from its stored original so
-  // added words censor old reviews and removed words un-censor them.
+  // Store verbatim (comments preserved); parsing to active words happens at
+  // censor time. Then re-derive every review's censored copy from its original
+  // so added words censor old reviews and removed words un-censor them.
+  setProfanityWordlistText(raw);
   const recensored = recensorAllReviews();
-  log('info', 'admin updated profanity wordlist', { wordCount: words.length, recensored });
+  log('info', 'admin updated profanity wordlist', { recensored });
   return c.redirect(`/admin/reviews?recensored=${recensored}#moderation`);
 });
 
