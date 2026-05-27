@@ -140,7 +140,7 @@ export const markPurchaseFulfilled = (input: {
 export const markOrderFulfilled = (input: {
   shopifyOrderId: string;
   fulfilledAt: number;
-  dueAt: number;
+  dueAt: number | null;
 }): number => {
   const result = getDb().prepare(`
     UPDATE purchases
@@ -233,6 +233,7 @@ export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
     WHERE p.due_at IS NOT NULL
       AND p.due_at <= unixepoch()
       AND p.reviewed_at IS NULL
+      AND p.fulfilled_at >= CAST((SELECT value FROM settings WHERE key='request_cutoff_at') AS INTEGER)
       AND p.product_opt_out = 0
       AND c.global_opt_out = 0
       AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
@@ -290,6 +291,7 @@ export const auditSuppressions = (): SuppressionAudit => {
     WHERE p.due_at IS NOT NULL
       AND p.due_at <= unixepoch()
       AND p.reviewed_at IS NULL
+      AND p.fulfilled_at >= CAST((SELECT value FROM settings WHERE key='request_cutoff_at') AS INTEGER)
   `).get() as {
     global_opt_out: number | null;
     product_opt_out: number | null;

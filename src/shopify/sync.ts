@@ -77,6 +77,11 @@ export const backfillRecentOrders = async (daysBack = 90): Promise<BackfillResul
   };
 
   const requestDelaySec = daysToSec(getSettingNumber('request_delay_days', 7));
+  // Go-live guard: orders fulfilled before this cutoff are imported for
+  // reference but never armed (due_at stays NULL), so backfilling a live store
+  // with historical orders can't trigger a flood of requests to pre-existing
+  // customers. 0 = disabled (dev default). See development-plan.md §10.
+  const requestCutoffAt = getSettingNumber('request_cutoff_at', 0);
 
   interface OrdersResponse {
     orders: {
@@ -124,10 +129,11 @@ export const backfillRecentOrders = async (daysBack = 90): Promise<BackfillResul
           .map((f) => isoToSec(f.createdAt))
           .sort((a, b) => b - a)[0];
         if (lastFulfillment) {
+          const armed = lastFulfillment >= requestCutoffAt;
           markOrderFulfilled({
             shopifyOrderId: orderId,
             fulfilledAt: lastFulfillment,
-            dueAt: lastFulfillment + requestDelaySec,
+            dueAt: armed ? lastFulfillment + requestDelaySec : null,
           });
           result.ordersMarkedFulfilled += 1;
         }

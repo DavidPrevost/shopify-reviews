@@ -2028,6 +2028,29 @@ const widgetMockupCss = `
   .range-field-inputs { display: flex; align-items: center; gap: 12px; }
   .range-field-inputs input[type="range"] { flex: 1; max-width: 240px; }
   .range-field-inputs .range-value { font-family: monospace; min-width: 40px; }
+
+  /* Shared color editor: chip selector + one picker */
+  .color-elements { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .color-chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-strong, #ccc); border-radius: 6px;
+    background: var(--surface, #fff); color: var(--text, #222);
+    cursor: pointer; text-align: left;
+  }
+  .color-chip:hover { border-color: #0a8a3a; }
+  .color-chip.active { border-color: #0a8a3a; outline: 2px solid #0a8a3a; outline-offset: -2px; }
+  .color-chip .chip-swatch { width: 22px; height: 22px; flex: none; border: 1px solid rgba(0,0,0,0.2); border-radius: 4px; }
+  .color-chip .chip-text { display: flex; flex-direction: column; line-height: 1.2; }
+  .color-chip .chip-label { font-size: 13px; font-weight: 600; }
+  .color-chip .chip-status { font-size: 11px; color: #888; }
+  .color-editor {
+    display: grid; gap: 8px;
+    padding: 16px; margin-bottom: 20px;
+    border: 1px solid var(--border, #e0e0e0); border-radius: 6px;
+    background: var(--surface-alt, #fafafa);
+  }
+  .color-editor label { font-weight: 600; }
 `;
 
 const renderBrandingMockup = (): string => `
@@ -2096,85 +2119,11 @@ admin.get('/branding', (c) => {
   const flash = (c.req.query('saved') === '1' ? '<div class="ok">Branding saved.</div>' : '')
     + (logoErr ? `<div class="err">Logo upload failed: ${escapeHtml(logoErr)}</div>` : '');
 
-  const presetSwatches = (fieldId: string) => PRESET_PALETTE
-    .map((p) => `<button type="button" data-preset-for="${fieldId}" data-color="${p.hex}" style="background:${p.hex};" title="${escapeHtml(p.name)} (${p.hex})" aria-label="${escapeHtml(p.name)}"></button>`)
+  // Preset palette swatches for the shared color editor; clicking one applies
+  // its color to whichever field is currently active in the picker.
+  const editorPresets = PRESET_PALETTE
+    .map((p) => `<button type="button" data-editor-preset data-color="${p.hex}" style="background:${p.hex};" title="${escapeHtml(p.name)} (${p.hex})" aria-label="${escapeHtml(p.name)}"></button>`)
     .join('');
-
-  // Distinct swatch row showing the colors synced from Shopify (when present),
-  // so the merchant can apply their actual brand colors to any field in one
-  // click. Reuses the same data-preset-for click handling as the palette.
-  // Reads the brand vars lazily (they're assigned further down, before the
-  // widgetTab template that calls this runs).
-  const brandSwatches = (fieldId: string): string => {
-    const data = [
-      { name: 'Brand primary', hex: brandPrimaryBg },
-      { name: 'Brand primary text', hex: brandPrimaryFg },
-      { name: 'Brand secondary', hex: brandSecondaryBg },
-      { name: 'Brand secondary text', hex: brandSecondaryFg },
-    ].filter((s) => s.hex);
-    if (data.length === 0) return '';
-    return `<div class="color-presets" style="margin-top:2px;align-items:center;">
-       <span class="muted" style="font-size:11px;margin-right:4px;">Shopify brand:</span>
-       ${data.map((s) => `<button type="button" data-preset-for="${fieldId}" data-color="${escapeHtml(s.hex)}" style="background:${escapeHtml(s.hex)};" title="${escapeHtml(s.name)} (${escapeHtml(s.hex)})" aria-label="${escapeHtml(s.name)}"></button>`).join('')}
-     </div>`;
-  };
-
-  const colorField = (opts: {
-    id: string;
-    label: string;
-    description: string;
-    overrideValue: string | null;
-    shopifyValue: string | null;
-    hardcodedFallback: string;
-  }) => {
-    const effective = opts.overrideValue ?? opts.shopifyValue ?? opts.hardcodedFallback;
-    const hasOverride = opts.overrideValue !== null;
-    const defaultSource = opts.shopifyValue ? `Shopify default: <code>${escapeHtml(opts.shopifyValue)}</code>` : `Default: <code>${escapeHtml(opts.hardcodedFallback)}</code>`;
-    return `
-      <div class="color-field-row" data-field-row="${opts.id}">
-        <label for="cf-${opts.id}-color">${escapeHtml(opts.label)}</label>
-        <p class="muted" style="margin:0;">${opts.description}</p>
-        <div class="color-field-inputs">
-          <input type="color" id="cf-${opts.id}-color" data-color-input="${opts.id}" value="${escapeHtml(effective)}">
-          <input type="text"  id="cf-${opts.id}-text"  data-text-input="${opts.id}" value="${escapeHtml(effective)}" maxlength="7" pattern="^#[0-9a-fA-F]{6}$" placeholder="#RRGGBB">
-          <button type="button" class="color-field-reset" data-reset-for="${opts.id}" ${hasOverride ? '' : 'disabled'}>Reset to default</button>
-        </div>
-        <div class="color-field-default">${defaultSource}${hasOverride ? ' · <strong style="color:#0a8a3a;">overridden</strong>' : ''}</div>
-        <div class="color-presets">${presetSwatches(opts.id)}</div>
-        ${brandSwatches(opts.id)}
-        <input type="hidden" name="${opts.id}" data-hidden-for="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}">
-      </div>
-    `;
-  };
-
-  // Like colorField, but for fields that inherit from the storefront theme by
-  // default (no Shopify-brand equivalent). When there's no override the text
-  // input is empty and the row reads "Inherits your storefront theme"; the
-  // color picker shows a neutral display value just so it has something to show.
-  const inheritColorField = (opts: {
-    id: string;
-    label: string;
-    description: string;
-    overrideValue: string | null;
-    displayWhenInherit: string;
-  }) => {
-    const hasOverride = opts.overrideValue !== null;
-    const display = opts.overrideValue ?? opts.displayWhenInherit;
-    return `
-      <div class="color-field-row" data-field-row="${opts.id}">
-        <label for="cf-${opts.id}-color">${escapeHtml(opts.label)}</label>
-        <p class="muted" style="margin:0;">${opts.description}</p>
-        <div class="color-field-inputs">
-          <input type="color" id="cf-${opts.id}-color" data-color-input="${opts.id}" value="${escapeHtml(display)}">
-          <input type="text"  id="cf-${opts.id}-text"  data-text-input="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}" maxlength="7" pattern="^#[0-9a-fA-F]{6}$" placeholder="inherit (theme)">
-          <button type="button" class="color-field-reset" data-reset-for="${opts.id}" ${hasOverride ? '' : 'disabled'}>Reset to inherit</button>
-        </div>
-        <div class="color-field-default">${hasOverride ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Inherits your storefront theme'}</div>
-        <div class="color-presets">${presetSwatches(opts.id)}</div>
-        <input type="hidden" name="${opts.id}" data-hidden-for="${opts.id}" value="${hasOverride ? escapeHtml(opts.overrideValue!) : ''}">
-      </div>
-    `;
-  };
 
   // Brand colors feed the "Shopify default" fallback for the widget (and email
   // / the future admin "brand" theme). Auto-sync from Shopify needs Storefront
@@ -2209,10 +2158,121 @@ admin.get('/branding', (c) => {
     brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — re-save below to overwrite)</p>';
   }
 
+  // Shopify-brand swatch row for the shared editor (only shown when brand
+  // colors are present). Clicking one applies its color to the active field.
+  const editorBrandSwatchData = [
+    { name: 'Brand primary', hex: brandPrimaryBg },
+    { name: 'Brand primary text', hex: brandPrimaryFg },
+    { name: 'Brand secondary', hex: brandSecondaryBg },
+    { name: 'Brand secondary text', hex: brandSecondaryFg },
+  ].filter((s) => s.hex);
+  const editorBrandSwatches = editorBrandSwatchData.length === 0 ? '' : `
+    <div class="color-presets" style="margin-top:2px;align-items:center;">
+      <span class="muted" style="font-size:11px;margin-right:4px;">Shopify brand:</span>
+      ${editorBrandSwatchData.map((s) => `<button type="button" data-editor-brand data-color="${escapeHtml(s.hex)}" style="background:${escapeHtml(s.hex)};" title="${escapeHtml(s.name)} (${escapeHtml(s.hex)})" aria-label="${escapeHtml(s.name)}"></button>`).join('')}
+    </div>`;
+
+  // The five widget color fields all share one picker; the chip selector
+  // chooses which field is active. `def` is the true reset target — the synced
+  // Shopify brand color when present, else the hardcoded fallback. `inherit`
+  // fields have no brand equivalent and reset to "inherit the theme" instead.
+  const colorFieldMeta: Record<string, { label: string; desc: string; kind: 'default' | 'inherit'; def?: string; display?: string }> = {
+    starColor:     { label: 'Star color', kind: 'default', def: shopify.starColor ?? HARDCODED_DEFAULTS.starColor, desc: 'Used for review-rating stars throughout the storefront.' },
+    ctaBackground: { label: 'CTA button background', kind: 'default', def: shopify.ctaBackground ?? HARDCODED_DEFAULTS.ctaBackground, desc: 'Background of the "Write a review" and "Submit" buttons.' },
+    ctaForeground: { label: 'CTA button text', kind: 'default', def: shopify.ctaForeground ?? HARDCODED_DEFAULTS.ctaForeground, desc: 'Text color on the "Write a review" and "Submit" buttons. Pick a color with strong contrast against the button background.' },
+    background:    { label: 'Widget background', kind: 'inherit', display: '#ffffff', desc: 'Background of the reviews widget container. Inherits your storefront theme by default — the preview shows a neutral card because the live storefront background cannot be seen here. Set a color to override.' },
+    text:          { label: 'Widget text', kind: 'inherit', display: '#222222', desc: 'Text color inside the widget. Inherits your storefront theme by default.' },
+  };
+  const colorFieldOrder = ['starColor', 'ctaBackground', 'ctaForeground', 'background', 'text'];
+  const colorValues: Record<string, string | null> = {
+    starColor: overrides.starColor,
+    ctaBackground: overrides.ctaBackground,
+    ctaForeground: overrides.ctaForeground,
+    background: overrides.background,
+    text: overrides.text,
+  };
+  // The color a chip's swatch should show: the override, or the field's
+  // effective default (brand/hardcoded for default fields, a neutral display
+  // color for inherit fields).
+  const effectiveChipColor = (id: string): string => {
+    const v = colorValues[id];
+    if (v) return v;
+    const m = colorFieldMeta[id]!;
+    return (m.kind === 'inherit' ? m.display : m.def) as string;
+  };
+  const chipStatusLabel = (id: string): string => {
+    if (colorValues[id]) return 'overridden';
+    return colorFieldMeta[id]!.kind === 'inherit' ? 'inherits theme' : 'default';
+  };
+
   const widgetTab = `
+    <p class="muted">Click any element on the mockup to edit it, or pick one below. Edits show in the preview instantly. Each color falls back to your Shopify brand colors (or the theme) until you override it — use "Reset" to drop an override. Set your brand colors on the <strong>Brand colors</strong> tab.</p>
+
+    ${renderBrandingMockup()}
+
+    <form method="POST" action="/admin/branding" id="branding-form">
+      <input type="hidden" name="tab" value="widget">
+      <h3 style="margin-top:0;">Widget colors</h3>
+
+      <div class="color-elements">
+        ${colorFieldOrder.map((id, i) => `
+          <button type="button" class="color-chip${i === 0 ? ' active' : ''}" data-chip="${id}">
+            <span class="chip-swatch" data-chip-swatch="${id}" style="background:${escapeHtml(effectiveChipColor(id))};"></span>
+            <span class="chip-text">
+              <span class="chip-label">${escapeHtml(colorFieldMeta[id]!.label)}</span>
+              <span class="chip-status" data-chip-status="${id}"${colorValues[id] ? ' style="color:#0a8a3a;"' : ''}>${chipStatusLabel(id)}</span>
+            </span>
+          </button>`).join('')}
+      </div>
+
+      <div class="color-editor">
+        <label id="editor-label"></label>
+        <p class="muted" id="editor-desc" style="margin:0;"></p>
+        <div class="color-field-inputs">
+          <input type="color" id="editor-color">
+          <input type="text" id="editor-text" maxlength="7" pattern="^#[0-9a-fA-F]{6}$" placeholder="#RRGGBB">
+          <button type="button" class="color-field-reset" id="editor-reset">Reset to default</button>
+        </div>
+        <div class="color-field-default" id="editor-status"></div>
+        <div class="color-presets">${editorPresets}</div>
+        ${editorBrandSwatches}
+      </div>
+
+      ${colorFieldOrder.map((id) => `<input type="hidden" name="${id}" data-hidden-for="${id}" value="${colorValues[id] ? escapeHtml(colorValues[id] as string) : ''}">`).join('')}
+
+      <div class="color-field-row">
+        <label for="cf-borderRadius-range">Border radius</label>
+        <p class="muted" style="margin:0;">How rounded the CTA buttons appear. 0 is fully square; 20 is fully pill-shaped.</p>
+        <div class="range-field-inputs">
+          <input type="range" id="cf-borderRadius-range" min="0" max="20" step="1" value="${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}" data-range-input="borderRadius">
+          <span class="range-value" data-range-value="borderRadius">${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}px</span>
+          <button type="button" class="color-field-reset" data-reset-for="borderRadius" ${overrides.borderRadius !== null ? '' : 'disabled'}>Reset to default</button>
+        </div>
+        <input type="hidden" name="borderRadius" data-hidden-for="borderRadius" value="${overrides.borderRadius !== null ? overrides.borderRadius : ''}">
+      </div>
+
+      <div class="color-field-row" data-field-row="ctaLabel">
+        <label for="cf-ctaLabel">"Write a review" button text</label>
+        <p class="muted" style="margin:0;">The label on the review call-to-action button shown to logged-in customers.</p>
+        <input type="text" id="cf-ctaLabel" name="ctaLabel" value="${escapeHtml(overrides.ctaLabel ?? '')}" maxlength="40" placeholder="Write a review">
+        <div class="color-field-default">${overrides.ctaLabel ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Default: <code>Write a review</code>'}</div>
+      </div>
+
+      <div style="margin-top:24px;">
+        <button type="submit" class="primary">Save branding</button>
+      </div>
+    </form>
+
+    <form method="POST" action="/admin/branding/reset" style="margin-top:12px;" onsubmit="return confirm('Reset all widget styling to the Shopify-synced brand defaults? This clears every override above.');">
+      <button type="submit">Reset all widget styling to Shopify defaults</button>
+      <p class="muted" style="font-size:12px;margin-top:4px;">Clears every override on this tab so colors fall back to your synced Shopify brand colors (and background/text return to inheriting the theme).</p>
+    </form>
+  `;
+
+  const brandTab = `
     <div class="card">
       <h3 style="margin-top:0;">Brand colors</h3>
-      <p class="muted">These are the defaults the widget (and emails, and the dashboard "brand" theme) fall back to when you haven't set a custom value. <strong>Primary</strong> is your main brand color — used for the CTA button background; its text color is the button text. <strong>Secondary</strong> is your accent — used for the stars. If your storefront theme includes the <code>data-brand-*</code> attributes on the widget (see Branding → Email → App Proxy setup, or the snippet on the dev store), your Shopify brand colors and logo sync here automatically on the next storefront visit and take precedence — set them manually here only if your store has no brand assets in Shopify.</p>
+      <p class="muted">These are the defaults the widget, emails, and the dashboard "Brand" theme fall back to when you haven't set a custom value. <strong>Primary</strong> is your main brand color — used for the CTA button background; its text color is the button text. <strong>Secondary</strong> is your accent — used for the stars. If your storefront theme includes the <code>data-brand-*</code> attributes on the widget (see the Email tab → App Proxy setup, or the snippet on the dev store), your Shopify brand colors and logo sync here automatically on the next storefront visit and take precedence — set them manually here only if your store has no brand assets in Shopify.</p>
       ${brandPreviewHtml}
       <form method="POST" action="/admin/branding/brand-colors">
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
@@ -2250,85 +2310,6 @@ admin.get('/branding', (c) => {
         </div>
       </form>
     </div>
-
-    <p class="muted">Click any element on the mockup below to jump to its editor. Edit any field below the mockup to see changes reflected instantly. Fields default to Shopify brand colors when you haven't set a custom value; click "Reset to default" on any field to clear the override.</p>
-
-    ${renderBrandingMockup()}
-
-    <form method="POST" action="/admin/branding" id="branding-form">
-      <input type="hidden" name="tab" value="widget">
-      <h3 style="margin-top:0;">Widget colors and shape</h3>
-
-      ${colorField({
-        id: 'starColor',
-        label: 'Star color',
-        description: 'Used for review-rating stars throughout the storefront.',
-        overrideValue: overrides.starColor,
-        shopifyValue: shopify.starColor,
-        hardcodedFallback: HARDCODED_DEFAULTS.starColor,
-      })}
-
-      ${colorField({
-        id: 'ctaBackground',
-        label: 'CTA button background',
-        description: 'Background of the "Write a review" and "Submit" buttons.',
-        overrideValue: overrides.ctaBackground,
-        shopifyValue: shopify.ctaBackground,
-        hardcodedFallback: HARDCODED_DEFAULTS.ctaBackground,
-      })}
-
-      ${colorField({
-        id: 'ctaForeground',
-        label: 'CTA button text',
-        description: 'Text color on the "Write a review" and "Submit" buttons. Pick a color with strong contrast against the button background.',
-        overrideValue: overrides.ctaForeground,
-        shopifyValue: shopify.ctaForeground,
-        hardcodedFallback: HARDCODED_DEFAULTS.ctaForeground,
-      })}
-
-      <div class="color-field-row">
-        <label for="cf-borderRadius-range">Border radius</label>
-        <p class="muted" style="margin:0;">How rounded the CTA buttons appear. 0 is fully square; 20 is fully pill-shaped.</p>
-        <div class="range-field-inputs">
-          <input type="range" id="cf-borderRadius-range" min="0" max="20" step="1" value="${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}" data-range-input="borderRadius">
-          <span class="range-value" data-range-value="borderRadius">${overrides.borderRadius ?? HARDCODED_DEFAULTS.borderRadius}px</span>
-          <button type="button" class="color-field-reset" data-reset-for="borderRadius" ${overrides.borderRadius !== null ? '' : 'disabled'}>Reset to default</button>
-        </div>
-        <input type="hidden" name="borderRadius" data-hidden-for="borderRadius" value="${overrides.borderRadius !== null ? overrides.borderRadius : ''}">
-      </div>
-
-      ${inheritColorField({
-        id: 'background',
-        label: 'Widget background',
-        description: 'Background of the reviews widget container. By default it inherits your theme — the preview shows a neutral card because the live storefront background cannot be seen here. Set a color to override.',
-        overrideValue: overrides.background,
-        displayWhenInherit: '#ffffff',
-      })}
-
-      ${inheritColorField({
-        id: 'text',
-        label: 'Widget text',
-        description: 'Text color inside the widget. Inherits your theme by default.',
-        overrideValue: overrides.text,
-        displayWhenInherit: '#222222',
-      })}
-
-      <div class="color-field-row" data-field-row="ctaLabel">
-        <label for="cf-ctaLabel">"Write a review" button text</label>
-        <p class="muted" style="margin:0;">The label on the review call-to-action button shown to logged-in customers.</p>
-        <input type="text" id="cf-ctaLabel" name="ctaLabel" value="${escapeHtml(overrides.ctaLabel ?? '')}" maxlength="40" placeholder="Write a review">
-        <div class="color-field-default">${overrides.ctaLabel ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Default: <code>Write a review</code>'}</div>
-      </div>
-
-      <div style="margin-top:24px;">
-        <button type="submit" class="primary">Save branding</button>
-      </div>
-    </form>
-
-    <form method="POST" action="/admin/branding/reset" style="margin-top:12px;" onsubmit="return confirm('Reset all widget styling to the Shopify-synced brand defaults? This clears every override above.');">
-      <button type="submit">Reset all widget styling to Shopify defaults</button>
-      <p class="muted" style="font-size:12px;margin-top:4px;">Clears every override on this tab so colors fall back to your synced Shopify brand colors (and background/text return to inheriting the theme).</p>
-    </form>
   `;
 
   // --- Email tab ---
@@ -2541,10 +2522,12 @@ admin.get('/branding', (c) => {
     <nav class="tabs" id="branding-tabs">
       <a href="#widget" data-tab="widget">Widget</a>
       <a href="#email"  data-tab="email">Email</a>
+      <a href="#brand"  data-tab="brand">Brand colors</a>
     </nav>
 
     <section id="tab-widget" class="tab-panel" data-tab="widget">${widgetTab}</section>
     <section id="tab-email"  class="tab-panel" data-tab="email">${emailTab}</section>
+    <section id="tab-brand"  class="tab-panel" data-tab="brand">${brandTab}</section>
 
     <style>${widgetMockupCss}</style>
 
@@ -2583,128 +2566,105 @@ admin.get('/branding', (c) => {
           });
         });
 
-        // --- Color field wiring: color picker, text input, presets, reset ---
-        function setOverrideField(field, value) {
-          // value === null means "no override" (reset to default).
-          var hidden = document.querySelector('[data-hidden-for="' + field + '"]');
-          var resetBtn = document.querySelector('[data-reset-for="' + field + '"]');
-          var resolvedNote = document.querySelector('[data-field-row="' + field + '"] .color-field-default strong');
-          hidden.value = value === null ? '' : value;
-          if (resetBtn) resetBtn.disabled = value === null;
-        }
-        function syncColorField(field, value) {
-          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
-          var textInput = document.querySelector('[data-text-input="' + field + '"]');
-          if (colorInput) colorInput.value = value;
-          if (textInput)  textInput.value = value;
-        }
-        ['starColor', 'ctaBackground', 'ctaForeground'].forEach(function (field) {
-          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
-          var textInput  = document.querySelector('[data-text-input="' + field + '"]');
-          var resetBtn   = document.querySelector('[data-reset-for="' + field + '"]');
+        // --- Single shared color editor ---
+        // All five widget color fields are edited through one picker; the chip
+        // selector chooses which field is active. Hidden inputs (one per field)
+        // carry the override values on submit; "" means no override (the field
+        // falls back to its Shopify-brand/hardcoded default, or to the theme).
+        var meta = ${JSON.stringify(colorFieldMeta)};
+        var values = ${JSON.stringify(colorValues)};
+        var order = ${JSON.stringify(colorFieldOrder)};
+        var active = order[0];
 
-          colorInput.addEventListener('input', function () {
-            var v = colorInput.value;
-            textInput.value = v;
-            applyToMockup(field, v);
-            setOverrideField(field, v);
-          });
-          textInput.addEventListener('input', function () {
-            var v = textInput.value.trim();
-            if (/^#[0-9a-fA-F]{6}$/.test(v)) {
-              colorInput.value = v;
-              applyToMockup(field, v);
-              setOverrideField(field, v);
-            }
-          });
-          resetBtn.addEventListener('click', function () {
-            // Reset to whatever the resolved default was at page load.
-            var v = resolved[field];
-            colorInput.value = v;
-            textInput.value = v;
-            applyToMockup(field, v);
-            setOverrideField(field, null);
-            // Reload the page after save to re-render the "overridden" tag.
-            // For now, just visually clear it.
-            var note = document.querySelector('[data-field-row="' + field + '"] .color-field-default strong');
-            if (note) note.remove();
-          });
+        var editorColor  = document.getElementById('editor-color');
+        var editorText   = document.getElementById('editor-text');
+        var editorReset  = document.getElementById('editor-reset');
+        var editorLabel  = document.getElementById('editor-label');
+        var editorDesc   = document.getElementById('editor-desc');
+        var editorStatus = document.getElementById('editor-status');
 
-          // Preset swatches
-          document.querySelectorAll('[data-preset-for="' + field + '"]').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-              var v = btn.dataset.color;
-              colorInput.value = v;
-              textInput.value = v;
-              applyToMockup(field, v);
-              setOverrideField(field, v);
-            });
+        // The color to show for a field: its override, or its effective default.
+        function fieldEffective(id) {
+          var v = values[id], m = meta[id];
+          if (v) return v;
+          return m.kind === 'inherit' ? m.display : m.def;
+        }
+        function renderEditor() {
+          var id = active, m = meta[id], v = values[id];
+          editorLabel.textContent = m.label;
+          editorDesc.textContent = m.desc;
+          editorColor.value = fieldEffective(id);
+          editorText.value = v || '';
+          editorText.placeholder = m.kind === 'inherit' ? 'inherit (theme)' : '#RRGGBB';
+          editorReset.textContent = m.kind === 'inherit' ? 'Reset to inherit' : 'Reset to default';
+          editorReset.disabled = !v;
+          editorStatus.innerHTML = v
+            ? '<strong style="color:#0a8a3a;">overridden</strong>'
+            : (m.kind === 'inherit' ? 'Inherits your storefront theme' : 'Default: <code>' + m.def + '</code>');
+        }
+        // Push a field's current value to the mockup, its hidden input, and its
+        // chip; if it's the active field, refresh the editor too.
+        function refreshField(id) {
+          var v = values[id], m = meta[id];
+          var hidden = document.querySelector('[data-hidden-for="' + id + '"]');
+          if (hidden) hidden.value = v || '';
+          // Default fields always show a color in the mockup (override or def);
+          // inherit fields show the override or fall back to the theme (null).
+          applyToMockup(id, m.kind === 'inherit' ? v : (v || m.def));
+          var sw = document.querySelector('[data-chip-swatch="' + id + '"]');
+          if (sw) sw.style.background = fieldEffective(id);
+          var cs = document.querySelector('[data-chip-status="' + id + '"]');
+          if (cs) {
+            cs.textContent = v ? 'overridden' : (m.kind === 'inherit' ? 'inherits theme' : 'default');
+            cs.style.color = v ? '#0a8a3a' : '';
+          }
+          if (id === active) renderEditor();
+        }
+        function selectField(id) {
+          if (!meta[id]) return;
+          active = id;
+          document.querySelectorAll('[data-chip]').forEach(function (c) {
+            c.classList.toggle('active', c.getAttribute('data-chip') === id);
           });
+          renderEditor();
+        }
+        // Set the active field's override (null clears it), then refresh.
+        function setActiveValue(value) {
+          values[active] = value;
+          refreshField(active);
+        }
+
+        editorColor.addEventListener('input', function () { setActiveValue(editorColor.value); });
+        editorText.addEventListener('input', function () {
+          var v = editorText.value.trim();
+          if (v === '') { setActiveValue(null); return; }
+          if (/^#[0-9a-fA-F]{6}$/.test(v)) setActiveValue(v);
         });
+        editorReset.addEventListener('click', function () { setActiveValue(null); });
+        document.querySelectorAll('[data-chip]').forEach(function (chip) {
+          chip.addEventListener('click', function () { selectField(chip.getAttribute('data-chip')); });
+        });
+        document.querySelectorAll('[data-editor-preset], [data-editor-brand]').forEach(function (btn) {
+          btn.addEventListener('click', function () { setActiveValue(btn.getAttribute('data-color')); });
+        });
+        order.forEach(function (id) { refreshField(id); });
+        selectField(order[0]);
 
         // --- Border-radius range slider ---
-        var rangeInput = document.querySelector('[data-range-input="borderRadius"]');
-        var rangeValue = document.querySelector('[data-range-value="borderRadius"]');
-        var rangeReset = document.querySelector('[data-reset-for="borderRadius"]');
-        rangeInput.addEventListener('input', function () {
-          var v = Number(rangeInput.value);
-          rangeValue.textContent = v + 'px';
-          applyToMockup('borderRadius', v);
-          setOverrideField('borderRadius', v);
-        });
-        rangeReset.addEventListener('click', function () {
-          var v = resolved.borderRadius;
+        var rangeInput  = document.querySelector('[data-range-input="borderRadius"]');
+        var rangeValue  = document.querySelector('[data-range-value="borderRadius"]');
+        var rangeReset  = document.querySelector('[data-reset-for="borderRadius"]');
+        var rangeHidden = document.querySelector('[data-hidden-for="borderRadius"]');
+        var borderRadiusDefault = ${HARDCODED_DEFAULTS.borderRadius};
+        function setRadius(v, isOverride) {
           rangeInput.value = v;
           rangeValue.textContent = v + 'px';
           applyToMockup('borderRadius', v);
-          setOverrideField('borderRadius', null);
-        });
-
-        // --- Background / text: inherit-by-default color fields ---
-        ['background', 'text'].forEach(function (field) {
-          var colorInput = document.querySelector('[data-color-input="' + field + '"]');
-          var textInput  = document.querySelector('[data-text-input="' + field + '"]');
-          var resetBtn   = document.querySelector('[data-reset-for="' + field + '"]');
-          function setNote(isOverride) {
-            var noteEl = document.querySelector('[data-field-row="' + field + '"] .color-field-default');
-            if (noteEl) noteEl.innerHTML = isOverride
-              ? '<strong style="color:#0a8a3a;">overridden</strong>'
-              : 'Inherits your storefront theme';
-          }
-          colorInput.addEventListener('input', function () {
-            var v = colorInput.value;
-            textInput.value = v;
-            applyToMockup(field, v);
-            setOverrideField(field, v);
-            setNote(true);
-          });
-          textInput.addEventListener('input', function () {
-            var v = textInput.value.trim();
-            if (v === '') { applyToMockup(field, null); setOverrideField(field, null); setNote(false); return; }
-            if (/^#[0-9a-fA-F]{6}$/.test(v)) {
-              colorInput.value = v;
-              applyToMockup(field, v);
-              setOverrideField(field, v);
-              setNote(true);
-            }
-          });
-          resetBtn.addEventListener('click', function () {
-            textInput.value = '';
-            applyToMockup(field, null);
-            setOverrideField(field, null);
-            setNote(false);
-          });
-          document.querySelectorAll('[data-preset-for="' + field + '"]').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-              var v = btn.dataset.color;
-              colorInput.value = v;
-              textInput.value = v;
-              applyToMockup(field, v);
-              setOverrideField(field, v);
-              setNote(true);
-            });
-          });
-        });
+          rangeHidden.value = isOverride ? v : '';
+          rangeReset.disabled = !isOverride;
+        }
+        rangeInput.addEventListener('input', function () { setRadius(Number(rangeInput.value), true); });
+        rangeReset.addEventListener('click', function () { setRadius(borderRadiusDefault, false); });
 
         // --- CTA button label: live-update the mockup button text ---
         var ctaLabelInput = document.getElementById('cf-ctaLabel');
@@ -2715,22 +2675,21 @@ admin.get('/branding', (c) => {
           });
         }
 
-        // --- Click-to-edit on the mockup: scroll the relevant form field
-        //     into view and flash a highlight so the user knows where to go. ---
+        // --- Click-to-edit on the mockup: select that field in the picker and
+        //     scroll the editor into view with a brief highlight flash. ---
         document.querySelectorAll('.rv-mockup-target').forEach(function (el) {
           el.addEventListener('click', function (e) {
             e.preventDefault();
             var field = el.dataset.rvEdit;
-            var row = document.querySelector('[data-field-row="' + field + '"]');
-            if (!row) return;
-            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            // Brief highlight flash so it's clear which row matches.
-            row.style.transition = 'background-color 0.4s';
-            row.style.backgroundColor = '#fffbcc';
-            setTimeout(function () { row.style.backgroundColor = ''; }, 800);
-            // Focus the text input for immediate editing.
-            var textInput = row.querySelector('[data-text-input="' + field + '"]');
-            if (textInput) textInput.focus();
+            if (!meta[field]) return;
+            selectField(field);
+            var box = document.querySelector('.color-editor');
+            if (box) {
+              box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              box.style.transition = 'background-color 0.4s';
+              box.style.backgroundColor = '#fffbcc';
+              setTimeout(function () { box.style.backgroundColor = ''; }, 800);
+            }
           });
         });
       })();
@@ -3103,6 +3062,7 @@ admin.get('/settings', (c) => {
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
+  const requestCutoffAt = getSettingNumber('request_cutoff_at', 0);
   const notifyConfig = getNewReviewNotifyConfig();
 
   const activeTheme = getActiveAdminTheme();
@@ -3178,6 +3138,22 @@ admin.get('/settings', (c) => {
           <button type="submit" class="primary">Save settings</button>
         </div>
       </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Go-live guard</h3>
+      <p class="muted">When you launch on a live store, you only want automated review requests for orders placed <em>after</em> launch — not the store's pre-existing customers (reach out to those individually). This sets a cutoff: only orders <strong>fulfilled on or after</strong> it are ever auto-emailed. Imported older orders are still captured for reference, but stay un-queued. Leave it disabled on the dev/test store.</p>
+      ${requestCutoffAt > 0
+        ? `<div class="ok" style="margin:8px 0;">Active — only orders fulfilled on or after <strong>${formatTs(requestCutoffAt)}</strong> (UTC) receive automated requests.</div>`
+        : `<div style="margin:8px 0;padding:8px 12px;background:var(--surface-alt);border-radius:4px;font-size:13px;">Disabled — every imported order is eligible. Correct for dev/testing; set the cutoff before going live.</div>`}
+      <form method="POST" action="/admin/settings/launch-cutoff" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;" onsubmit="return confirm('Set the go-live cutoff to right now? Only orders fulfilled from this moment on will get automated review requests.');">
+        <button type="submit" name="action" value="set_now" class="primary">Set cutoff to now (go-live)</button>
+      </form>
+      ${requestCutoffAt > 0
+        ? `<form method="POST" action="/admin/settings/launch-cutoff" style="margin-top:8px;" onsubmit="return confirm('Disable the go-live guard? Every imported order — including pre-existing customers — becomes eligible for automated requests.');">
+             <button type="submit" name="action" value="clear">Disable guard (make all history eligible)</button>
+           </form>`
+        : ''}
     </div>
     </section>
 
@@ -3428,6 +3404,22 @@ admin.post('/settings', async (c) => {
 
   log('info', 'admin settings updated', { scheduleChanged, immediateOnFulfillment: immediateChecked });
   return c.redirect('/admin/settings?saved=1');
+});
+
+// Go-live guard: set or clear the request cutoff. "set_now" stamps the current
+// server time (avoids any timezone math — it's a "from this moment on" line);
+// "clear" makes the whole imported history eligible again.
+admin.post('/settings/launch-cutoff', async (c) => {
+  const form = await c.req.formData();
+  const action = String(form.get('action') ?? '');
+  if (action === 'set_now') {
+    setSetting('request_cutoff_at', String(nowSec()));
+    log('info', 'go-live guard: request cutoff set to now');
+  } else if (action === 'clear') {
+    setSetting('request_cutoff_at', '0');
+    log('info', 'go-live guard: request cutoff cleared');
+  }
+  return c.redirect('/admin/settings?saved=1#cadence');
 });
 
 // --- Panic button: pause / extend / resume ---

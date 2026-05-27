@@ -607,6 +607,8 @@ LIMIT (SELECT CAST(value AS INTEGER) FROM settings WHERE key='cadence_dispatcher
 
 The per-run cap (`cadence_dispatcher_batch`) defaults to 100 and is configurable via the admin settings page. It's a defensive guard against runaway-bug scenarios and Gmail deliverability spikes — Gmail's free-tier sending ceiling is around 500/day, so the cap should always stay comfortably below that. Raise it as the brand grows.
 
+**Go-live guard (`request_cutoff_at`).** The eligibility query carries one more clause: `AND p.fulfilled_at >= (SELECT value FROM settings WHERE key='request_cutoff_at')`. The setting is a unix timestamp; `0` (the dev default) disables the guard so the whole imported history is eligible. Its purpose is the live-launch flood problem: a live store has years of fulfilled orders, and the backfill arms each fulfilled order with a past `due_at`, so without this guard the first dispatcher run would email every historical customer. At launch the owner sets the cutoff to "now" (Settings → Cadence → **Go-live guard**, "Set cutoff to now"), so only orders fulfilled from launch onward are ever auto-requested; the store's handful of pre-existing customers are reached out to manually (and excluded naturally by the `NOT EXISTS reviews` clause once they've reviewed). Defense-in-depth: the backfill *also* leaves pre-cutoff fulfillments un-armed (`due_at` NULL) so they're captured for reference but never queued — meaning the guard holds regardless of the order in which the owner backfills vs. sets the cutoff. New fulfillments arriving via the `orders/fulfilled` webhook are always stamped with the current time, so they're always post-cutoff and need no special handling.
+
 For each row returned:
 
 1. Pick template: `repeat` if `EXISTS (SELECT 1 FROM reviews WHERE customer_id = c.id)`, else `first`.
@@ -776,6 +778,7 @@ These were either added during the build as user-priority items or evolved from 
 4. Stand up `/opt/stacks/shopify-reviews/` prod stack on Mercury with fresh secrets, live store domain, and host port 8070.
 5. DNS A record for `reviews.<brand>` at Squarespace (already done for dev).
 6. App Proxy configuration on the live-store install for storefront-customer review submission.
+7. **Set the go-live guard** (Settings → Cadence → "Set cutoff to now") on the prod stack as part of cutover, so the store's pre-existing customers are never auto-emailed. The backfill also leaves pre-cutoff orders un-armed, but set the cutoff regardless — it's the explicit launch line. Then reach out to the ~half-dozen legacy customers by hand. See §10 "Go-live guard."
 
 ---
 
@@ -850,6 +853,8 @@ Features deferred to after MVP launch. Update this list as priorities shift; the
 - **Multi-tenant retrofit** if the project ever serves more than one store. Estimated 2-3 weeks with the email layer being the largest single piece.
 - **Self-hosted small websites** on the same Mercury + GCP relay stack — would coexist via additional subdomains routed through the same Caddy instance.
 - **Outgoing webhooks** — fire events to external services (Klaviyo, Slack, custom integrations) when reviews submit or get reported. Build iteratively as specific integrations are requested rather than speculatively.
+- **Pre-existing-customer onboarding (multi-tenant).** Today's go-live guard (`request_cutoff_at`) is deliberately blunt: at launch we draw a line and ignore everything fulfilled before it, handling our own ~half-dozen legacy customers by hand. A store adopting this platform later would want richer options for how to bring pre-launch customers into the review workflow — e.g. a one-time "invite your back-catalog" campaign with its own gentler cadence, a per-customer/per-order opt-in import, a choice of cutoff date vs. selective import, and clear dedupe against anyone who already reviewed. This is a tenant-onboarding feature, not core cadence; design it alongside the multi-tenant retrofit. (Owner flagged this explicitly as a future direction, 2026-05.)
+- **One-click / near-zero-config store install.** The dev install necessarily involves the Dev Dashboard, an Admin API token, App Proxy config, GDPR webhook topics, and a `.env` — fine for us, but a non-starter for non-technical store owners if the platform is ever offered to others. A productized install should hide essentially all of this: ideally an OAuth "Add app → approve scopes → done" flow that captures the token and configures webhooks/App Proxy automatically, with no manual settings or secret-handling by the owner. This pulls back in the OAuth installation flow we deliberately skipped for the single-store build (§2 non-goals, §5) — revisit it only when multi-store is real. Not a concern for our own go-live. (Owner flagged this explicitly, 2026-05.)
 
 ### Explicitly NOT building (decisions made during planning)
 
