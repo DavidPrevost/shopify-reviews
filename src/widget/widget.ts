@@ -1001,6 +1001,36 @@ const renderAggregate = async (el: HTMLElement, productId: string): Promise<void
   }
 };
 
+// Relay the store's brand assets to our backend, once per browser session.
+// The theme renders the brand colors + logo (Liquid `shop.brand`) onto the
+// widget div as data attributes; this hands them to the App-Proxy-verified
+// /brand endpoint so the backend's shop_brand_json (widget/email/theme
+// defaults) stays in sync with Shopify without Storefront API access. The
+// endpoint no-ops when nothing changed, and the session guard keeps it to one
+// POST per visit. Best-effort: any failure is silent.
+const BRAND_RELAYED_KEY = 'rv-brand-relayed';
+const relayBrand = (el: HTMLElement): void => {
+  let already = false;
+  try { already = !!sessionStorage.getItem(BRAND_RELAYED_KEY); } catch { return; }
+  if (already) return;
+  const payload = {
+    primaryBg: el.getAttribute('data-brand-primary-bg') || '',
+    primaryFg: el.getAttribute('data-brand-primary-fg') || '',
+    secondaryBg: el.getAttribute('data-brand-secondary-bg') || '',
+    secondaryFg: el.getAttribute('data-brand-secondary-fg') || '',
+    logo: el.getAttribute('data-brand-logo') || '',
+  };
+  // Theme didn't pass any brand attributes → nothing to relay.
+  if (!payload.primaryBg && !payload.secondaryBg && !payload.logo) return;
+  try { sessionStorage.setItem(BRAND_RELAYED_KEY, '1'); } catch { /* ignore */ }
+  void fetch(proxyUrl('/brand'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).catch(() => { /* best-effort */ });
+};
+
 // Initialize a single widget element. Idempotent: a `data-rv-initialized`
 // flag stops us from rendering twice if the element gets re-visited (e.g.
 // the MutationObserver fires for a node we already handled in the initial
@@ -1008,6 +1038,10 @@ const renderAggregate = async (el: HTMLElement, productId: string): Promise<void
 const initializeElement = (el: HTMLElement): void => {
   if (el.hasAttribute('data-rv-initialized')) return;
   el.setAttribute('data-rv-initialized', 'true');
+
+  // Brand relay reads attributes off the widget div; attempt it before the
+  // product-id guard so an aggregate/collection card can carry brand data too.
+  relayBrand(el);
 
   const mode = el.getAttribute('data-reviews-widget');
   const productId = el.getAttribute('data-product-id');

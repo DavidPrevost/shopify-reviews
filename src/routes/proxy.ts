@@ -18,6 +18,8 @@ import {
   updateReviewContent,
   customerHasPurchasedProduct,
   upsertCustomer,
+  getSetting,
+  setSetting,
   type ReviewRow,
 } from '../db/queries.js';
 import { verifyAppProxySignature } from '../shopify/app-proxy-verify.js';
@@ -26,6 +28,7 @@ import { sanitizeReviewText } from '../lib/profanity.js';
 import { isReviewsPaused } from '../lib/panic.js';
 import { notifyOnNewReview } from '../email/notify-new-review.js';
 import { log } from '../lib/logger.js';
+import { nowSec } from '../lib/time.js';
 
 const proxy = new Hono();
 
@@ -64,18 +67,83 @@ proxy.use('*', async (c, next) => {
     log('warn', 'app proxy verification failed', { path: url.pathname });
     return c.json({ error: 'invalid_signature' }, 401);
   }
-  // App Proxy still forwards requests for non-logged-in storefront visitors.
-  // We require an actual customer for every endpoint in this file, so reject
-  // here with a clear-enough signal for the widget to handle (anonymous
-  // visitors are shown a "log in to review" affordance, not the form).
-  if (!verified.loggedInCustomerId) {
-    return c.json({ error: 'not_logged_in' }, 401);
+  // Stash the customer id when present. Routes that need a logged-in customer
+  // enforce it via the /customer/* middleware below; shop-level routes (the
+  // brand relay) work for any verified storefront visitor, logged in or not.
+  if (verified.loggedInCustomerId) {
+    c.set('customerShopifyId' as never, verified.loggedInCustomerId as never);
   }
-  c.set('customerShopifyId' as never, verified.loggedInCustomerId as never);
   // App Proxy responses must not be cached by Shopify's edge — per-customer
   // data and write responses are dynamic.
   c.header('Cache-Control', 'no-store');
   await next();
+});
+
+// Customer-scoped routes require an actual logged-in customer. Anonymous
+// visitors are shown a "log in to review" affordance by the widget, not the
+// form, so a 401 here is the expected signal.
+proxy.use('/customer/*', async (c, next) => {
+  if (!c.get('customerShopifyId' as never)) {
+    return c.json({ error: 'not_logged_in' }, 401);
+  }
+  await next();
+});
+
+// Brand relay: the theme passes the store's Liquid-rendered brand colors + logo
+// as data attributes on the widget div; the widget posts them here. This is how
+// brand assets reach our backend without Storefront API access — the storefront
+// already has them via Liquid, and this endpoint is HMAC-verified (above) as
+// genuinely from the shop. Writes shop_brand_json (the same blob the dormant
+// Shopify sync would have), so the widget, emails, and dashboard share one
+// source. Skips when the store has no brand data (manual entry stays the
+// fallback) and no-ops when nothing changed (avoids churn from page views).
+proxy.post('/brand', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as {
+    primaryBg?: string; primaryFg?: string; secondaryBg?: string; secondaryFg?: string; logo?: string;
+  };
+  const hex = (v: unknown): string | null =>
+    typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.trim()) ? v.trim().toLowerCase() : null;
+  const primaryBg = hex(body.primaryBg);
+  const primaryFg = hex(body.primaryFg);
+  const secondaryBg = hex(body.secondaryBg);
+  const secondaryFg = hex(body.secondaryFg);
+  // Logo becomes an <img src> in emails, so only accept a Shopify CDN URL —
+  // defense in depth on top of the HMAC verification.
+  const rawLogo = typeof body.logo === 'string' ? body.logo.trim() : '';
+  const logo = /^https:\/\/[a-z0-9.-]*shopify(?:cdn)?\.(?:com|net)\//i.test(rawLogo) ? rawLogo : null;
+
+  if (!primaryBg && !secondaryBg && !logo) {
+    return c.json({ ok: true, skipped: 'no_brand_data' });
+  }
+
+  let current: {
+    colors?: { primary?: { background?: string | null; foreground?: string | null }; secondary?: { background?: string | null; foreground?: string | null } };
+    logoUrl?: string | null;
+  } = {};
+  try { current = JSON.parse(getSetting('shop_brand_json') ?? '{}'); } catch { current = {}; }
+
+  const nextLogo = logo ?? current.logoUrl ?? null;
+  const unchanged =
+    (current.colors?.primary?.background ?? null) === primaryBg &&
+    (current.colors?.primary?.foreground ?? null) === primaryFg &&
+    (current.colors?.secondary?.background ?? null) === secondaryBg &&
+    (current.colors?.secondary?.foreground ?? null) === secondaryFg &&
+    (current.logoUrl ?? null) === nextLogo;
+  if (unchanged) return c.json({ ok: true, changed: false });
+
+  const blob = {
+    ...current,
+    colors: {
+      primary: { background: primaryBg, foreground: primaryFg },
+      secondary: { background: secondaryBg, foreground: secondaryFg },
+    },
+    logoUrl: nextLogo,
+    syncedAt: nowSec(),
+    source: 'liquid',
+  };
+  setSetting('shop_brand_json', JSON.stringify(blob, null, 2));
+  log('info', 'brand relay updated shop_brand_json', { hasLogo: !!logo });
+  return c.json({ ok: true, changed: true });
 });
 
 // Returns the logged-in customer's existing review for a product, or null.

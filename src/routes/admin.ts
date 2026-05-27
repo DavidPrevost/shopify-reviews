@@ -2192,7 +2192,7 @@ admin.get('/branding', (c) => {
   const widgetTab = `
     <div class="card">
       <h3 style="margin-top:0;">Brand colors</h3>
-      <p class="muted">These are the defaults the widget (and emails, and the dashboard "brand" theme) fall back to when you haven't set a custom value. <strong>Primary</strong> is your main brand color — used for the CTA button background; its text color is the button text. <strong>Secondary</strong> is your accent — used for the stars. Automatic sync from Shopify needs Storefront API access, which isn't available for this single-store app, so set them here.</p>
+      <p class="muted">These are the defaults the widget (and emails, and the dashboard "brand" theme) fall back to when you haven't set a custom value. <strong>Primary</strong> is your main brand color — used for the CTA button background; its text color is the button text. <strong>Secondary</strong> is your accent — used for the stars. If your storefront theme includes the <code>data-brand-*</code> attributes on the widget (see Branding → Email → App Proxy setup, or the snippet on the dev store), your Shopify brand colors and logo sync here automatically on the next storefront visit and take precedence — set them manually here only if your store has no brand assets in Shopify.</p>
       ${brandPreviewHtml}
       <form method="POST" action="/admin/branding/brand-colors">
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
@@ -3253,8 +3253,14 @@ admin.get('/settings', (c) => {
   data-product-id="{{ product.id }}"
   data-variant-id="{{ product.selected_or_first_available_variant.id }}"
   data-customer-id="{{ customer.id }}"
+  data-brand-primary-bg="{{ shop.brand.colors.primary[0].background }}"
+  data-brand-primary-fg="{{ shop.brand.colors.primary[0].foreground }}"
+  data-brand-secondary-bg="{{ shop.brand.colors.secondary[0].background }}"
+  data-brand-secondary-fg="{{ shop.brand.colors.secondary[0].foreground }}"
+  data-brand-logo="{{ shop.brand.logo | image_url: width: 400 }}"
 &gt;&lt;/div&gt;</pre>
           <p>The <code>data-customer-id</code> Liquid variable resolves to the logged-in customer's numeric ID when they're signed in, or an empty string when they aren't. The widget reads this to decide whether to render "Write a review" / "Edit your review" / "Log in to write a review."</p>
+          <p>The <code>data-brand-*</code> attributes pull your store's brand colors and logo (Shopify admin → Settings → Brand) straight from Liquid. The widget relays them to the app once per visitor session, so your widget, emails, and dashboard branding stay in sync with Shopify automatically — no API access needed. They're optional: leave them off and you can set brand colors manually on the Branding → Widget tab instead.</p>
         </div>
       </details>
 
