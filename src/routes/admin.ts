@@ -2156,39 +2156,78 @@ admin.get('/branding', (c) => {
     `;
   };
 
-  // Shopify brand sync block — moved here from Settings since brand info
-  // feeds the widget styling defaults. Mirrors the previous Settings block.
-  const brandJsonRaw = getSetting('shop_brand_json') ?? '{}';
+  // Brand colors feed the "Shopify default" fallback for the widget (and email
+  // / the future admin "brand" theme). Auto-sync from Shopify needs Storefront
+  // API access, which isn't available for this single-store custom app, so they
+  // are entered manually and stored in the same shop_brand_json blob the sync
+  // would have written — every consumer behaves identically.
+  let brandPrimaryBg = '', brandPrimaryFg = '', brandSecondaryBg = '', brandSecondaryFg = '';
   let brandPreviewHtml = '';
   try {
-    const parsed = JSON.parse(brandJsonRaw);
+    const parsed = JSON.parse(getSetting('shop_brand_json') ?? '{}');
     const primary = parsed?.colors?.primary;
     const secondary = parsed?.colors?.secondary;
+    brandPrimaryBg = primary?.background ?? '';
+    brandPrimaryFg = primary?.foreground ?? '';
+    brandSecondaryBg = secondary?.background ?? '';
+    brandSecondaryFg = secondary?.foreground ?? '';
     const hasAny = !!(primary?.background || secondary?.background || parsed?.logoUrl);
     if (hasAny) {
       const swatch = (label: string, bg: string | null | undefined, fg: string | null | undefined) =>
         bg ? `<div style="display:inline-block;margin-right:12px;"><div style="display:inline-block;width:20px;height:20px;background:${escapeHtml(bg)};border:1px solid #ccc;border-radius:3px;vertical-align:middle;"></div> ${escapeHtml(label)} <code style="color:#666;">${escapeHtml(bg)}</code>${fg ? ` / <code style="color:#666;">${escapeHtml(fg)}</code>` : ''}</div>` : '';
       brandPreviewHtml = `
-        <div style="margin: 8px 0 16px; padding: 12px; background:#f9f9f9; border-radius: 4px; font-size: 13px;">
+        <div style="margin: 8px 0 16px; padding: 12px; background:var(--surface-alt); border-radius: 4px; font-size: 13px;">
           ${swatch('Primary', primary?.background, primary?.foreground)}
           ${swatch('Secondary', secondary?.background, secondary?.foreground)}
           ${parsed?.logoUrl ? `<div style="margin-top:8px;">Logo: <a href="${escapeHtml(parsed.logoUrl)}" target="_blank">${escapeHtml(parsed.logoUrl)}</a></div>` : ''}
-          ${parsed?.syncedAt ? `<div class="muted" style="margin-top:4px;">Synced ${escapeHtml(formatTs(parsed.syncedAt))}</div>` : ''}
+          ${parsed?.syncedAt ? `<div class="muted" style="margin-top:4px;">Set ${escapeHtml(formatTs(parsed.syncedAt))}</div>` : ''}
         </div>`;
     } else {
-      brandPreviewHtml = `<p class="muted" style="margin: 8px 0 16px;">No brand info synced yet. Click below to fetch from Shopify, or set brand colors in your Shopify admin (Settings → Brand) first.</p>`;
+      brandPreviewHtml = `<p class="muted" style="margin: 8px 0 16px;">No brand colors set yet — enter them below.</p>`;
     }
   } catch {
-    brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — sync to overwrite)</p>';
+    brandPreviewHtml = '<p class="muted">(unparseable shop_brand_json — re-save below to overwrite)</p>';
   }
 
   const widgetTab = `
     <div class="card">
-      <h3 style="margin-top:0;">Shopify brand defaults</h3>
-      <p class="muted">These values are pulled from your Shopify store (Settings → Brand) and used as the defaults for every field below. Edit your brand colors on Shopify's side and click the sync button to pull updates.</p>
+      <h3 style="margin-top:0;">Brand colors</h3>
+      <p class="muted">These are the defaults the widget (and emails, and the dashboard "brand" theme) fall back to when you haven't set a custom value. <strong>Primary</strong> is your main brand color — used for the CTA button background; its text color is the button text. <strong>Secondary</strong> is your accent — used for the stars. Automatic sync from Shopify needs Storefront API access, which isn't available for this single-store app, so set them here.</p>
       ${brandPreviewHtml}
-      <form method="POST" action="/admin/settings/sync-brand" style="margin:0;">
-        <button type="submit">Sync brand info from Shopify</button>
+      <form method="POST" action="/admin/branding/brand-colors">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
+          <div>
+            <label>Primary — background</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="color" value="${escapeHtml(brandPrimaryBg || '#222222')}" oninput="this.nextElementSibling.value=this.value" style="width:44px;padding:2px;">
+              <input type="text" name="primary_bg" value="${escapeHtml(brandPrimaryBg)}" placeholder="#RRGGBB" maxlength="7" style="width:120px;">
+            </div>
+          </div>
+          <div>
+            <label>Primary — text on it</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="color" value="${escapeHtml(brandPrimaryFg || '#ffffff')}" oninput="this.nextElementSibling.value=this.value" style="width:44px;padding:2px;">
+              <input type="text" name="primary_fg" value="${escapeHtml(brandPrimaryFg)}" placeholder="#RRGGBB" maxlength="7" style="width:120px;">
+            </div>
+          </div>
+          <div>
+            <label>Secondary — accent</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="color" value="${escapeHtml(brandSecondaryBg || '#f5a623')}" oninput="this.nextElementSibling.value=this.value" style="width:44px;padding:2px;">
+              <input type="text" name="secondary_bg" value="${escapeHtml(brandSecondaryBg)}" placeholder="#RRGGBB" maxlength="7" style="width:120px;">
+            </div>
+          </div>
+          <div>
+            <label>Secondary — text on it</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="color" value="${escapeHtml(brandSecondaryFg || '#222222')}" oninput="this.nextElementSibling.value=this.value" style="width:44px;padding:2px;">
+              <input type="text" name="secondary_fg" value="${escapeHtml(brandSecondaryFg)}" placeholder="#RRGGBB" maxlength="7" style="width:120px;">
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <button type="submit" class="primary">Save brand colors</button>
+        </div>
       </form>
     </div>
 
@@ -3501,6 +3540,32 @@ admin.post('/settings/theme', async (c) => {
     setSetting('admin_theme', theme);
   }
   return c.redirect('/admin/settings?saved=1');
+});
+
+// Manual brand-colors entry — writes the same shop_brand_json blob that the
+// (dormant) Shopify sync would have, so the widget defaults, email defaults,
+// and future brand theme all read from one place regardless of source.
+admin.post('/branding/brand-colors', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const hex = (k: string): string | null => {
+    const v = String(form.get(k) ?? '').trim();
+    return isValidHexColor(v) ? v : null;
+  };
+  let existing: Record<string, unknown> = {};
+  try { existing = JSON.parse(getSetting('shop_brand_json') ?? '{}') as Record<string, unknown>; } catch { /* overwrite */ }
+  const blob = {
+    ...existing,
+    colors: {
+      primary: { background: hex('primary_bg'), foreground: hex('primary_fg') },
+      secondary: { background: hex('secondary_bg'), foreground: hex('secondary_fg') },
+    },
+    syncedAt: nowSec(),
+    source: 'manual',
+  };
+  setSetting('shop_brand_json', JSON.stringify(blob, null, 2));
+  log('info', 'admin saved manual brand colors');
+  return c.redirect('/admin/branding?saved=1#widget');
 });
 
 admin.post('/settings/sync-brand', async (c) => {
