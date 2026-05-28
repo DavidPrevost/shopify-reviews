@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { closeDb, migrate } from './db/client.js';
 import { seedDefaultEmailTemplates } from './email/email-config.js';
 import { seedDefaultProfanityWordlist } from './lib/profanity.js';
+import { ensureCurrentShop } from './lib/tenant.js';
 import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
@@ -13,6 +14,7 @@ import widget from './routes/widget.js';
 import { startScheduler } from './scheduler/cron.js';
 
 migrate();
+ensureCurrentShop();
 seedDefaultEmailTemplates();
 seedDefaultProfanityWordlist();
 startScheduler();

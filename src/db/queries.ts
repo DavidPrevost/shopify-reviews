@@ -49,7 +49,7 @@ export const upsertCustomer = (input: {
   db.prepare(`
     INSERT INTO customers (shopify_customer_id, email, first_name, last_name, created_at)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(email) DO UPDATE SET
+    ON CONFLICT(shop_id, email) DO UPDATE SET
       shopify_customer_id = COALESCE(excluded.shopify_customer_id, customers.shopify_customer_id),
       first_name = COALESCE(excluded.first_name, customers.first_name),
       last_name = COALESCE(excluded.last_name, customers.last_name)
@@ -106,7 +106,7 @@ export const upsertPurchase = (input: {
       (customer_id, shopify_order_id, shopify_product_id, shopify_variant_id,
        fulfilled_at, due_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(shopify_order_id, shopify_product_id) DO UPDATE SET
+    ON CONFLICT(shop_id, shopify_order_id, shopify_product_id) DO UPDATE SET
       shopify_variant_id = COALESCE(excluded.shopify_variant_id, purchases.shopify_variant_id),
       fulfilled_at = COALESCE(excluded.fulfilled_at, purchases.fulfilled_at),
       due_at = COALESCE(excluded.due_at, purchases.due_at)
@@ -600,7 +600,7 @@ export const banReporter = (input: { email: string; bannedBy: string }): void =>
   getDb().prepare(`
     INSERT INTO banned_reporters (email, banned_by, banned_at)
     VALUES (?, ?, ?)
-    ON CONFLICT(email) DO NOTHING
+    ON CONFLICT(shop_id, email) DO NOTHING
   `).run(input.email.toLowerCase(), input.bannedBy, nowSec());
 };
 
@@ -994,7 +994,7 @@ export const upsertEmailTemplate = (input: {
     INSERT INTO email_templates
       (template_key, display_name, is_active, subject, body_html, cta_enabled, cta_label, trigger_event, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(template_key) DO UPDATE SET
+    ON CONFLICT(shop_id, template_key) DO UPDATE SET
       display_name  = excluded.display_name,
       is_active     = excluded.is_active,
       subject       = excluded.subject,
@@ -1423,7 +1423,7 @@ export const upsertProductCache = (input: {
   getDb().prepare(`
     INSERT INTO products_cache (shopify_product_id, handle, title, featured_image_url, variant_handling, variants_json, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(shopify_product_id) DO UPDATE SET
+    ON CONFLICT(shop_id, shopify_product_id) DO UPDATE SET
       handle = excluded.handle,
       title = excluded.title,
       featured_image_url = excluded.featured_image_url,

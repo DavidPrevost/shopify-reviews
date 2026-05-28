@@ -15,6 +15,7 @@ import { log } from '../lib/logger.js';
 import { nowSec, daysToSec } from '../lib/time.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { verifyShopifyWebhook } from '../shopify/webhook-verify.js';
+import { findShopIdByDomain } from '../lib/tenant.js';
 
 // Shape of the orders/* webhook payload we actually consume. Shopify sends much
 // more — we only type the fields we touch. Anything else is ignored.
@@ -61,9 +62,25 @@ const verifyAndParse = async <T>(c: import('hono').Context): Promise<T | null> =
   }
 };
 
+// Resolve the webhook's shop from the X-Shopify-Shop-Domain header (set by
+// Shopify on every delivery). Returns null if the header is missing or the
+// domain doesn't match any shop in our shops table — callers 200-noop on
+// null (the HMAC was valid, the webhook just isn't for a shop we know about,
+// which on a public app would be the wrong tenant; on our single-shop dev
+// install it'd be a misconfigured test). Defense in depth on top of HMAC.
+const resolveWebhookShop = (c: import('hono').Context): number | null => {
+  const domain = c.req.header('x-shopify-shop-domain');
+  const shopId = findShopIdByDomain(domain);
+  if (shopId === null) {
+    log('warn', 'webhook for unknown shop domain, ignoring', { topic: c.req.path, domain });
+  }
+  return shopId;
+};
+
 webhooks.post('/orders/paid', async (c) => {
   const body = await verifyAndParse<OrderPaidPayload>(c);
   if (!body) return c.text('Unauthorized', 401);
+  if (resolveWebhookShop(c) === null) return c.json({ ok: true, ignored: 'unknown_shop' });
 
   const orderId = String(body.id);
   const email = body.customer?.email ?? body.email ?? null;
@@ -103,6 +120,7 @@ webhooks.post('/orders/paid', async (c) => {
 webhooks.post('/orders/fulfilled', async (c) => {
   const body = await verifyAndParse<OrderFulfilledPayload>(c);
   if (!body) return c.text('Unauthorized', 401);
+  if (resolveWebhookShop(c) === null) return c.json({ ok: true, ignored: 'unknown_shop' });
 
   const orderId = String(body.id);
   const fulfilledAt = nowSec();
@@ -139,6 +157,7 @@ webhooks.post('/orders/fulfilled', async (c) => {
 webhooks.post('/customers/data_request', async (c) => {
   const body = await verifyAndParse<CustomerRedactPayload>(c);
   if (!body) return c.text('Unauthorized', 401);
+  if (resolveWebhookShop(c) === null) return c.json({ ok: true, ignored: 'unknown_shop' });
 
   // We don't auto-export. The owner handles data requests manually for a single store.
   log('info', 'customers/data_request received', {
@@ -151,6 +170,7 @@ webhooks.post('/customers/data_request', async (c) => {
 webhooks.post('/customers/redact', async (c) => {
   const body = await verifyAndParse<CustomerRedactPayload>(c);
   if (!body) return c.text('Unauthorized', 401);
+  if (resolveWebhookShop(c) === null) return c.json({ ok: true, ignored: 'unknown_shop' });
 
   const shopifyCustomerId = body.customer?.id ? String(body.customer.id) : null;
   const email = body.customer?.email ?? null;
@@ -174,22 +194,44 @@ webhooks.post('/shop/redact', async (c) => {
   const body = await verifyAndParse<unknown>(c);
   if (body === null) return c.text('Unauthorized', 401);
 
-  // Shop redact fires 48h after app uninstall. For our single-store self-hosted
-  // setup, the brand controls the only install — wiping the DB is acceptable.
+  // Shop redact fires 48h after app uninstall. Previously this wiped the entire
+  // database — a foot-gun the moment a stray test redact arrived for a domain
+  // that wasn't ours. Now we scope deletes to the redacting shop (resolved
+  // from X-Shopify-Shop-Domain). For unknown shops we no-op (200), per the
+  // same logic as every other webhook above.
+  const shopId = resolveWebhookShop(c);
+  if (shopId === null) return c.json({ ok: true, ignored: 'unknown_shop' });
+
   const db = getDb();
   db.transaction(() => {
-    db.exec(`
-      DELETE FROM email_events;
-      DELETE FROM review_media;
-      DELETE FROM reviews;
-      DELETE FROM questions;
-      DELETE FROM purchases;
-      DELETE FROM customers;
-      DELETE FROM products_cache;
-    `);
+    // Child/ops tables: no shop_id yet (deferred B2), scope via the parent FK.
+    db.prepare(`DELETE FROM email_events
+                WHERE customer_id IN (SELECT id FROM customers WHERE shop_id = ?)
+                   OR purchase_id IN (SELECT id FROM purchases WHERE shop_id = ?)`).run(shopId, shopId);
+    db.prepare(`DELETE FROM review_media
+                WHERE review_id IN (SELECT id FROM reviews WHERE shop_id = ?)`).run(shopId);
+    db.prepare(`DELETE FROM moderation_events
+                WHERE review_id IN (SELECT id FROM reviews WHERE shop_id = ?)`).run(shopId);
+    db.prepare(`DELETE FROM review_reports
+                WHERE review_id IN (SELECT id FROM reviews WHERE shop_id = ?)`).run(shopId);
+    // Shop-scoped tables (have shop_id since migration 016).
+    db.prepare('DELETE FROM reviews WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM purchases WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM customers WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM questions WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM sample_invitations WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM products_cache WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM email_templates WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM banned_reporters WHERE shop_id = ?').run(shopId);
+    // The shops row itself — the install is gone. ensureCurrentShop() will
+    // re-seed it from env on next boot if this app is reinstalled.
+    db.prepare('DELETE FROM shops WHERE id = ?').run(shopId);
+    // panic_events and settings are not yet shop-scoped (B1/B2 deferred);
+    // they stay untouched. shop_brand_json in settings is operationally
+    // per-shop but a setting key — overwritten on the next brand relay.
   })();
 
-  log('warn', 'shop/redact processed — all data wiped', {});
+  log('warn', 'shop/redact processed — shop data wiped', { shopId });
   return c.json({ ok: true });
 });
 
