@@ -29,6 +29,28 @@ export const findShopIdByDomain = (shopDomain: string | null | undefined): numbe
   return row?.id ?? null;
 };
 
+// A shop row with the columns the embedded admin / API client care about.
+export interface ShopRow {
+  id: number;
+  shop_domain: string;
+  storefront_origin: string | null;
+  brand_name: string | null;
+  api_version: string | null;
+  installed_at: number | null;
+  access_token: string | null;
+  access_scopes: string | null;
+}
+
+export const getShopByDomain = (shopDomain: string | null | undefined): ShopRow | null => {
+  if (!shopDomain) return null;
+  const row = getDb()
+    .prepare(`SELECT id, shop_domain, storefront_origin, brand_name, api_version,
+                     installed_at, access_token, access_scopes
+                FROM shops WHERE shop_domain = ?`)
+    .get(shopDomain) as ShopRow | undefined;
+  return row ?? null;
+};
+
 // Persist the OAuth-issued offline access token (and the scopes granted) for
 // a shop. Called from /auth/callback after a successful token exchange. The
 // Admin API client reads this column at request time and uses it instead of

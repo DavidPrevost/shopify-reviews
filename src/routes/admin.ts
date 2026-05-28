@@ -88,11 +88,13 @@ import { fetchShopifyBrand } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { restartScheduler } from '../scheduler/cron.js';
 import {
-  verifyAdminPassword,
-  signSessionCookie,
-  verifySessionCookie,
-  SESSION_COOKIE_NAME,
-} from '../lib/auth.js';
+  EMBED_SESSION_COOKIE,
+  bootstrapHtml,
+  signEmbedSession,
+  verifyEmbedSession,
+  verifySessionToken,
+} from '../lib/embed-auth.js';
+import { getShopByDomain } from '../lib/tenant.js';
 import { escapeHtml } from '../email/render.js';
 import { log } from '../lib/logger.js';
 import { config } from '../config.js';
@@ -104,9 +106,54 @@ import { EMAIL_VARIABLES } from '../email/variables.js';
 
 const admin = new Hono();
 
+// Top-level guard for every /admin/* request. Sets the CSP frame-ancestors
+// header that lets Shopify iframe us, then enforces auth:
+//   - GET with valid embed cookie → proceed and render normally.
+//   - GET without cookie → serve the App Bridge bootstrap (which exchanges a
+//     fresh session token for our cookie and reloads).
+//   - POST/PUT/DELETE without cookie → 401; the form was submitted from a
+//     stale page. Reloading bootstraps fresh.
+//   - The /admin/exchange-session endpoint authenticates by Authorization
+//     header (the session token itself), not the cookie, so it's the one
+//     path that's allowed through without a cookie.
+//   - If the configured shop has never completed an OAuth install
+//     (shops.access_token is NULL), redirect to /auth to start one.
+admin.use('*', async (c, next) => {
+  c.header('Content-Security-Policy', "frame-ancestors https://*.myshopify.com https://admin.shopify.com");
+
+  // /admin/exchange-session has its own auth path (session token in header).
+  if (c.req.path === '/admin/exchange-session') return next();
+
+  // Common case: a valid embed session cookie. Proceed.
+  if (verifyEmbedSession(getCookie(c, EMBED_SESSION_COOKIE))) return next();
+
+  // No valid cookie. Non-GET requests can't bootstrap — return 401.
+  if (c.req.method !== 'GET') {
+    return c.json({ error: 'session_expired', detail: 'Reload the app in Shopify admin to re-authenticate.' }, 401);
+  }
+
+  // Has the configured shop completed OAuth? If not, this is a pre-install
+  // visit — bounce to /auth so the merchant approves and gets a token.
+  const shop = getShopByDomain(config.shopify.shopDomain);
+  if (!shop || !shop.access_token) {
+    const shopParam = c.req.query('shop') || config.shopify.shopDomain;
+    if (!shopParam) {
+      return c.text('This app is not installed. Open it from Shopify admin to install.', 400);
+    }
+    return c.redirect(`/auth?shop=${encodeURIComponent(shopParam)}`);
+  }
+
+  // Installed, but no cookie yet — serve the bootstrap so App Bridge can
+  // exchange a session token for our cookie and reload.
+  return c.html(bootstrapHtml());
+});
+
+// Defense-in-depth guard reused by the per-route middlewares below. With the
+// top-level guard above always handling auth, this is effectively a no-op for
+// any request that reaches a sub-route — but keeping it means the per-route
+// `requireAuth` call sites continue to work as a backstop without churn.
 const requireAuth = async (c: import('hono').Context): Promise<boolean> => {
-  const cookie = getCookie(c, SESSION_COOKIE_NAME);
-  return verifySessionCookie(cookie);
+  return verifyEmbedSession(getCookie(c, EMBED_SESSION_COOKIE)) !== null;
 };
 
 const formatRemaining = (sec: number): string => {
@@ -172,6 +219,8 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="shopify-api-key" content="${escapeHtml(config.shopify.apiKey)}" />
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   <title>${escapeHtml(title)} — Reviews admin</title>
   <style>
     ${themeVars}
@@ -235,68 +284,54 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
   <header>
     <h1>Reviews admin</h1>
     <nav>${navHtml}</nav>
-    <a class="logout" href="/admin/logout">Sign out</a>
   </header>
   <main>${body}</main>
 </body>
 </html>`;
 };
 
-const loginShell = (errorMessage?: string): string => {
-  const err = errorMessage ? `<div class="err">${escapeHtml(errorMessage)}</div>` : '';
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in — Reviews admin</title>
-<style>
-  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; background:#f6f6f6; color:#222; margin:0; padding:64px 16px; }
-  .card { max-width: 360px; margin: 0 auto; background:#fff; padding: 32px; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06); }
-  h1 { font-size: 20px; margin: 0 0 24px; }
-  label { display:block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-  input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 15px; box-sizing: border-box; margin-bottom: 16px; }
-  button { width:100%; padding: 12px; background:#222; color:#fff; border:none; border-radius:4px; font-size: 15px; font-weight: 600; cursor: pointer; }
-  .err { background:#fee; border:1px solid #fcc; color:#933; padding:10px; border-radius:4px; margin-bottom: 16px; font-size: 13px; }
-</style></head>
-<body>
-  <div class="card">
-    <h1>Reviews admin</h1>
-    ${err}
-    <form method="POST" action="/admin/login">
-      <label for="password">Password</label>
-      <input id="password" type="password" name="password" required autofocus>
-      <button type="submit">Sign in</button>
-    </form>
-  </div>
-</body></html>`;
-};
+// --- Embedded session exchange ---
+//
+// The App Bridge bootstrap posts a freshly-fetched Shopify session token here
+// in the Authorization header; we verify the JWT, then mint a 24h signed
+// cookie that gates the rest of /admin/*. Cookie is SameSite=None Secure so
+// it's sent on same-origin requests made from inside the Shopify-admin iframe.
+admin.post('/exchange-session', async (c) => {
+  const authHeader = c.req.header('authorization') ?? '';
+  const m = /^Bearer\s+(.+)$/i.exec(authHeader);
+  if (!m) return c.json({ error: 'missing_bearer_token' }, 401);
 
-// --- Login / logout ---
-
-admin.get('/', (c) => c.html(loginShell()));
-
-admin.post('/login', async (c) => {
-  const form = await c.req.formData();
-  const password = String(form.get('password') ?? '');
-
-  if (!(await verifyAdminPassword(password))) {
-    log('warn', 'admin login failed', {});
-    return c.html(loginShell('Incorrect password.'), 401);
+  const result = verifySessionToken(m[1]!);
+  if (!result.ok) {
+    log('warn', 'admin session token verification failed', { reason: result.reason });
+    return c.json({ error: 'invalid_session_token', reason: result.reason }, 401);
   }
 
-  const token = signSessionCookie();
-  setCookie(c, SESSION_COOKIE_NAME, token, {
+  // Cross-check: the token's shop must be one we know (i.e., have under
+  // shops). For a public app this would also pin the cookie to that shop;
+  // single-tenant, this is the same shop every time but the check is correct.
+  const shopRow = getShopByDomain(result.shopDomain);
+  if (!shopRow) {
+    log('warn', 'session token shop unknown', { shop: result.shopDomain });
+    return c.json({ error: 'unknown_shop' }, 401);
+  }
+
+  const cookieValue = signEmbedSession(result.shopDomain);
+  setCookie(c, EMBED_SESSION_COOKIE, cookieValue, {
     path: '/admin',
     httpOnly: true,
-    secure: config.publicUrl.startsWith('https://'),
-    sameSite: 'Lax',
-    maxAge: daysToSec(config.admin.sessionTtlDays),
+    secure: true,
+    sameSite: 'None', // cookies sent from inside the Shopify iframe context
+    maxAge: 24 * 60 * 60,
   });
-  log('info', 'admin login success', {});
-  return c.redirect('/admin/dashboard');
+  log('info', 'admin embed session minted', { shop: result.shopDomain });
+  return c.json({ ok: true });
 });
 
-admin.get('/logout', (c) => {
-  deleteCookie(c, SESSION_COOKIE_NAME, { path: '/admin' });
-  return c.redirect('/admin');
-});
+// /admin (no path) — the App URL Shopify points at. The top-level guard
+// already handled auth + bootstrap; if we reach here, the cookie was valid,
+// so just bounce to the dashboard.
+admin.get('/', (c) => c.redirect('/admin/dashboard'));
 
 // --- Auth gate for everything below ---
 admin.use('/dashboard', async (c, next) => {

@@ -37,11 +37,10 @@ export const config = {
     // Sent to the developer/operator, not the merchant. Leave empty to skip.
     devNotificationEmail: process.env.DEV_NOTIFICATION_EMAIL ?? '',
   },
-  admin: {
-    passwordHash: process.env.ADMIN_PASSWORD_HASH ?? '',
-    sessionSecret: process.env.ADMIN_SESSION_SECRET ?? '',
-    sessionTtlDays: Number(process.env.ADMIN_SESSION_TTL_DAYS ?? 14),
-  },
+  // Note: the old admin password / session-secret env vars (ADMIN_PASSWORD_HASH,
+  // ADMIN_SESSION_SECRET, ADMIN_SESSION_TTL_DAYS) are no longer read — admin auth
+  // now goes through Shopify session tokens via App Bridge. The .env values are
+  // harmless to leave in place but ignored.
 };
 
 export const assertRequired = (...pairs: Array<readonly [string, string]>): void => {
