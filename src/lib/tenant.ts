@@ -29,6 +29,35 @@ export const findShopIdByDomain = (shopDomain: string | null | undefined): numbe
   return row?.id ?? null;
 };
 
+// Persist the OAuth-issued offline access token (and the scopes granted) for
+// a shop. Called from /auth/callback after a successful token exchange. The
+// Admin API client reads this column at request time and uses it instead of
+// SHOPIFY_ADMIN_TOKEN once it's populated.
+export const setShopAccessToken = (input: {
+  shopDomain: string;
+  accessToken: string;
+  scopes: string;
+}): void => {
+  const stmt = getDb().prepare(`
+    UPDATE shops
+       SET access_token  = ?,
+           access_scopes = ?,
+           installed_at  = COALESCE(installed_at, ?)
+     WHERE shop_domain = ?
+  `);
+  const result = stmt.run(input.accessToken, input.scopes, nowSec(), input.shopDomain);
+  if (result.changes === 0) {
+    // The shop row didn't exist — happens during fresh installs before
+    // ensureCurrentShop has run (or under a different shop domain than the
+    // one ensureCurrentShop seeded). Insert it.
+    getDb().prepare(`
+      INSERT INTO shops (shop_domain, access_token, access_scopes, installed_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(input.shopDomain, input.accessToken, input.scopes, nowSec(), nowSec());
+  }
+  log('info', 'shop access token persisted', { shopDomain: input.shopDomain, scopes: input.scopes });
+};
+
 // Upsert the single shops row (id=1) from env config on every boot.
 //
 // Migration 016 inserts a placeholder row so shop_id=1 is a valid FK target

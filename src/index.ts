@@ -8,6 +8,7 @@ import { ensureCurrentShop } from './lib/tenant.js';
 import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
+import auth from './routes/auth.js';
 import proxy from './routes/proxy.js';
 import webhooks from './routes/webhooks.js';
 import widget from './routes/widget.js';
@@ -25,6 +26,7 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 app.get('/', (c) => c.text('shopify-reviews'));
 
 app.route('/webhooks', webhooks);
+app.route('/auth', auth);
 app.route('/api', api);
 app.route('/admin', admin);
 app.route('/proxy', proxy);
