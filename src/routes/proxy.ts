@@ -46,7 +46,7 @@ import { fetchShopifyCustomer } from '../shopify/customer-info.js';
 import { sanitizeReviewText } from '../lib/profanity.js';
 import { isReviewsPaused } from '../lib/panic.js';
 import { notifyOnNewReview } from '../email/notify-new-review.js';
-import { sendTemplateEmailByTrigger } from '../email/send-template.js';
+import { sendTemplateEmailByTriggerForCampaign } from '../email/send-template.js';
 import { escapeHtml } from '../email/render.js';
 import { take as rateLimitTake } from '../lib/rate-limit.js';
 import { config } from '../config.js';
@@ -524,8 +524,9 @@ proxy.post('/campaigns/:slug/apply', async (c) => {
   // Fire-and-forget confirmation email. Failures are logged inside the send
   // path; we don't surface them to the applicant since the application IS
   // accepted regardless of whether the email arrives.
-  void sendTemplateEmailByTrigger({
+  void sendTemplateEmailByTriggerForCampaign({
     trigger: 'campaign_application_confirmation',
+    campaignId: camp.id,
     to: email,
     context: {
       firstName: escapeHtml(firstName),
@@ -596,7 +597,10 @@ const publicQuestion = (q: FeedbackQuestionRow): PublicFeedbackQuestion => ({
   options: parseQuestionOptions(q),
 });
 
-proxy.get('/campaigns/feedback/:key/config', (c) => {
+// GET /proxy/feedback/:key — returns the form schema. Used by the widget-
+// embed-in-Shopify-Page path (the hosted landing at /feedback/:key uses its
+// own server-rendered HTML, no widget JS).
+proxy.get('/feedback/:key', (c) => {
   const key = c.req.param('key');
   const form = findFeedbackFormByAccessKey(key);
   if (!form) return c.json({ error: 'not_found' }, 404);
@@ -609,7 +613,10 @@ proxy.get('/campaigns/feedback/:key/config', (c) => {
   });
 });
 
-proxy.post('/campaigns/feedback/:key/submit', async (c) => {
+// POST /proxy/feedback/:key — accepts a submitted response from the widget-
+// embedded form (JSON body). The server-rendered landing at /feedback/:key
+// has its own POST handler that accepts form-urlencoded.
+proxy.post('/feedback/:key', async (c) => {
   const key = c.req.param('key');
   const ip = getClientIp(c);
   if (!rateLimitTake(`feedback-submit:${ip}`, FEEDBACK_RATE_LIMIT, FEEDBACK_RATE_WINDOW_SEC)) {

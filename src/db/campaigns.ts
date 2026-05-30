@@ -83,6 +83,10 @@ export interface CampaignTermsVersionRow {
   campaign_id: number;
   version_number: number;
   body_text: string;
+  // Plain-language summary shown above the full body in the application
+  // form. Added in migration 020; NULL on versions created before that
+  // migration.
+  summary_text: string | null;
   created_at: number;
 }
 
@@ -149,6 +153,7 @@ export const createCampaign = (input: {
   discountPercent: number | null;
   discountExpiresDays: number | null;
   discountCodePrefix: string | null;
+  termsSummaryText: string;
   termsBodyText: string;
 }): { campaignId: number; termsVersionId: number } => {
   const now = nowSec();
@@ -179,9 +184,9 @@ export const createCampaign = (input: {
 
     const termsResult = db.prepare(`
       INSERT INTO campaign_terms_versions
-        (campaign_id, version_number, body_text, created_at)
-      VALUES (?, 1, ?, ?)
-    `).run(campaignId, input.termsBodyText, now);
+        (campaign_id, version_number, body_text, summary_text, created_at)
+      VALUES (?, 1, ?, ?, ?)
+    `).run(campaignId, input.termsBodyText, input.termsSummaryText, now);
     termsVersionId = Number(termsResult.lastInsertRowid);
   })();
 
@@ -380,9 +385,11 @@ export const getActiveTermsVersion = (campaignId: number): CampaignTermsVersionR
 
 // Creates a new terms version with version_number = max + 1. The merchant
 // saves a new version explicitly (no auto-versioning on every keystroke);
-// each save creates one row.
+// each save creates one row capturing both the plain-language summary and
+// the full legal body.
 export const saveTermsVersion = (input: {
   campaignId: number;
+  summaryText: string;
   bodyText: string;
 }): CampaignTermsVersionRow => {
   const db = getDb();
@@ -399,9 +406,9 @@ export const saveTermsVersion = (input: {
 
     const result = db.prepare(`
       INSERT INTO campaign_terms_versions
-        (campaign_id, version_number, body_text, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(input.campaignId, next, input.bodyText, now);
+        (campaign_id, version_number, body_text, summary_text, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(input.campaignId, next, input.bodyText, input.summaryText, now);
     newId = Number(result.lastInsertRowid);
   })();
 

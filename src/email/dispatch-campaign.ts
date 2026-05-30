@@ -9,6 +9,7 @@
 // reminder is status-neutral). All transitions stamp decided_at so the audit
 // trail captures when the send happened.
 
+import crypto from 'node:crypto';
 import { config } from '../config.js';
 import {
   findCampaignById,
@@ -18,13 +19,15 @@ import {
   updateMemberStatus,
   listInvitationsByCampaign,
   transitionCampaignStatus,
+  setMemberDiscountCode,
   type CampaignRow,
   type CampaignMemberRow,
   type CampaignMemberStatus,
   type CampaignInvitationRow,
 } from '../db/campaigns.js';
 import { listFeedbackFormsForCampaign, type FeedbackFormRow } from '../db/feedback.js';
-import { findActiveTemplateForTrigger, getSetting } from '../db/queries.js';
+import { findActiveTemplateForTriggerCampaignAware, getSetting } from '../db/queries.js';
+import { createCampaignDiscountCode } from '../shopify/discount-codes.js';
 import { renderString, renderTemplate, escapeHtml } from './render.js';
 import { resolveEmailBranding } from './email-config.js';
 import { sendMail } from './smtp-client.js';
@@ -43,6 +46,12 @@ export interface CampaignBatchResult {
   sent: number;
   failed: number;
   skipped: number;     // e.g. missing invitations, missing discount code
+  // launch_thanks only: how many codes were generated as part of this send,
+  // and any errors from the generation phase. If aborted=true, no emails were
+  // sent — the whole batch was abandoned because of generation failure.
+  codesCreated?: number;
+  codeErrors?: string[];
+  aborted?: boolean;
 }
 
 // Eligibility per trigger. Centralized so the admin counter ("X members ready
@@ -51,10 +60,10 @@ export interface CampaignBatchResult {
 // shipped_notification: members in `approved` status who have invitations.
 // review_reminder:      members already in `shipped` status (they got the
 //                       first email; reminder follows).
-// launch_thanks:        members in `shipped` OR `reviewed` status who have a
-//                       discount code on file. Members without a code are
-//                       skipped — Step 6's "generate codes" admin action
-//                       seeds them.
+// launch_thanks:        members in `shipped` OR `reviewed` status. Discount
+//                       codes are generated inline as part of this send (not
+//                       a separate admin step) so we don't pre-filter on
+//                       discount_code presence.
 const isEligible = (
   trigger: CampaignBatchTrigger,
   member: CampaignMemberRow,
@@ -66,8 +75,80 @@ const isEligible = (
     case 'campaign_review_reminder':
       return member.status === 'shipped';
     case 'campaign_launch_thanks':
-      return (member.status === 'shipped' || member.status === 'reviewed') && !!member.discount_code;
+      return member.status === 'shipped' || member.status === 'reviewed';
   }
+};
+
+// Generates a per-member discount code string. Same alphabet and length as
+// the previous standalone "Generate codes" action — kept here in the
+// dispatcher because code generation is now part of the launch send rather
+// than a separate admin step.
+const generateCodeString = (prefix: string | null): string => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skip O/0/I/1 for legibility
+  const bytes = crypto.randomBytes(8);
+  let suffix = '';
+  for (let i = 0; i < 8; i += 1) {
+    suffix += alphabet[bytes[i]! % alphabet.length];
+  }
+  return `${prefix ?? ''}${suffix}`;
+};
+
+// First phase of a launch_thanks send. Generates a Shopify discount code for
+// every eligible member who doesn't already have one. Returns ok=true only
+// if every required generation succeeded; on any failure, callers abort the
+// batch before any email goes out. The "all-or-nothing" semantics are by
+// design — partial generation followed by partial send leaves recipients
+// without codes, which is worse than nothing.
+const generateCodesForLaunch = async (
+  camp: CampaignRow,
+  eligibleMembers: CampaignMemberRow[],
+): Promise<{ ok: true; created: number } | { ok: false; created: number; errors: string[] }> => {
+  if (camp.discount_percent === null || camp.discount_expires_days === null) {
+    return { ok: false, created: 0, errors: ['Campaign has no discount terms configured.'] };
+  }
+  const needCodes = eligibleMembers.filter((m) => !m.discount_code);
+  if (needCodes.length === 0) {
+    return { ok: true, created: 0 };
+  }
+
+  const startsAt = new Date();
+  const endsAt = new Date(startsAt.getTime() + camp.discount_expires_days * 86400 * 1000);
+  const startsAtIso = startsAt.toISOString();
+  const endsAtIso = endsAt.toISOString();
+
+  let created = 0;
+  const errors: string[] = [];
+
+  for (const m of needCodes) {
+    const code = generateCodeString(camp.discount_code_prefix);
+    try {
+      const result = await createCampaignDiscountCode({
+        code,
+        title: `${camp.name} — Member ${m.id}`,
+        percentageOff: camp.discount_percent,
+        startsAtIso,
+        endsAtIso,
+      });
+      setMemberDiscountCode({ memberId: m.id, code, discountId: result.discountId });
+      created += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`Member ${m.id}: ${msg}`);
+      log('error', 'launch-batch code generation failed', {
+        campaignId: camp.id,
+        memberId: m.id,
+        error: msg,
+      });
+      // Abort early if every attempt is failing — three strikes is a sign of
+      // a systemic problem (rate limit, missing scope) rather than a one-off.
+      if (errors.length >= 3 && created === 0) break;
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, created, errors };
+  }
+  return { ok: true, created };
 };
 
 // Successful-send member-status transition. Null = no transition (reminder
@@ -124,24 +205,19 @@ const buildReviewLinksHtml = (
 };
 
 // Builds the {{ feedbackUrlsHtml }} block — one button per feedback form
-// attached to the campaign. Each button links to the public Shopify Page the
-// merchant set up for that form. NOTE: the URL we surface here is to the
-// admin's storefront page at /pages/<slug>?key=<accessKey>; since we don't
-// know the merchant's chosen page slug, we fall back to a copy-paste-ready
-// proxy URL. Merchants can swap their actual page URL in by editing the
-// template body if they prefer.
+// attached to the campaign. Each link points at our app-hosted landing
+// (/feedback/:key), which serves a server-rendered form directly — no
+// merchant setup, no Shopify Page required. The merchant can still embed
+// the widget version in a custom storefront page if they want; the email
+// uses the hosted landing as the always-works default.
 const buildFeedbackUrlsHtml = (
   forms: FeedbackFormRow[],
   colors: ResolvedBrandColors,
 ): string => {
   if (forms.length === 0) return '';
+  const publicBase = config.publicUrl.replace(/\/+$/, '');
   const cards = forms.map((f) => {
-    // No reliable way to know the merchant's storefront Page URL from the
-    // backend, so link via the storefront origin's App Proxy. The recipient
-    // hitting this URL hits the merchant's storefront, which 404s unless the
-    // merchant has the form embedded in a Page. For day-one usage, the
-    // merchant should edit the template to point to their actual Page URL.
-    const url = `${config.storefrontOrigin.replace(/\/+$/, '')}/apps/reviews/campaigns/feedback/${encodeURIComponent(f.access_key)}/landing`;
+    const url = `${publicBase}/feedback/${encodeURIComponent(f.access_key)}`;
     return `
       <div style="margin: 0 0 12px;">
         <a href="${url}"
@@ -236,7 +312,8 @@ export const sendCampaignBatch = async (input: {
     return { total: 0, sent: 0, failed: 0, skipped: 0 };
   }
 
-  const template = findActiveTemplateForTrigger(input.trigger);
+  // Campaign-aware lookup: a per-campaign template override beats the default.
+  const template = findActiveTemplateForTriggerCampaignAware(input.trigger, camp.id);
   if (!template) {
     log('warn', 'campaign batch: no active template', { trigger: input.trigger, campaignId: camp.id });
     return { total: 0, sent: 0, failed: 0, skipped: 0 };
@@ -261,6 +338,43 @@ export const sendCampaignBatch = async (input: {
     const invitations = invitationsByEmail.get(data.email.toLowerCase()) ?? [];
     if (!isEligible(input.trigger, m, invitations.length > 0)) continue;
     eligible.push({ member: m, data: { firstName: data.firstName, email: data.email }, invitations });
+  }
+
+  // launch_thanks: generate discount codes first, abort the batch on failure.
+  // This makes "code creation" and "email send" feel like one atomic action
+  // to the merchant — they click Send and either everyone gets the email
+  // with a fresh code, or no one does.
+  let codesCreated = 0;
+  if (input.trigger === 'campaign_launch_thanks') {
+    const codeResult = await generateCodesForLaunch(camp, eligible.map((e) => e.member));
+    if (!codeResult.ok) {
+      log('error', 'launch batch aborted — code generation failed', {
+        campaignId: camp.id,
+        created: codeResult.created,
+        errors: codeResult.errors,
+      });
+      return {
+        total: eligible.length,
+        sent: 0,
+        failed: 0,
+        skipped: 0,
+        codesCreated: codeResult.created,
+        codeErrors: codeResult.errors,
+        aborted: true,
+      };
+    }
+    codesCreated = codeResult.created;
+    // Re-fetch the members whose codes we just created, so the loop below
+    // sees the freshly-set discount_code field. The eligible list still has
+    // the pre-generation rows; refresh them in place.
+    if (codesCreated > 0) {
+      const refreshed = new Map<number, CampaignMemberRow>();
+      for (const m of listMembersByCampaign(camp.id)) refreshed.set(m.id, m);
+      for (const e of eligible) {
+        const fresh = refreshed.get(e.member.id);
+        if (fresh) e.member = fresh;
+      }
+    }
   }
 
   let sent = 0;
@@ -348,6 +462,13 @@ export const sendCampaignBatch = async (input: {
     sent,
     failed,
     skipped,
+    codesCreated,
   });
-  return { total: eligible.length, sent, failed, skipped };
+  return {
+    total: eligible.length,
+    sent,
+    failed,
+    skipped,
+    codesCreated: input.trigger === 'campaign_launch_thanks' ? codesCreated : undefined,
+  };
 };

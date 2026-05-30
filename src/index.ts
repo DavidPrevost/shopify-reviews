@@ -9,6 +9,7 @@ import { log } from './lib/logger.js';
 import admin from './routes/admin.js';
 import api from './routes/api.js';
 import auth from './routes/auth.js';
+import feedbackLanding from './routes/feedback-landing.js';
 import proxy from './routes/proxy.js';
 import webhooks from './routes/webhooks.js';
 import widget from './routes/widget.js';
@@ -30,6 +31,7 @@ app.route('/auth', auth);
 app.route('/api', api);
 app.route('/admin', admin);
 app.route('/proxy', proxy);
+app.route('/', feedbackLanding);
 app.route('/', widget);
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {

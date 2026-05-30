@@ -12,7 +12,12 @@
 // the template is missing or inactive — caller decides whether that's an
 // error or just a "no-op, the merchant disabled this notification."
 
-import { findEmailTemplate, findActiveTemplateForTrigger, type EmailTemplateRow } from '../db/queries.js';
+import {
+  findEmailTemplate,
+  findActiveTemplateForTrigger,
+  findActiveTemplateForTriggerCampaignAware,
+  type EmailTemplateRow,
+} from '../db/queries.js';
 import { renderString, renderTemplate, escapeHtml } from './render.js';
 import { sendMail } from './smtp-client.js';
 import { resolveEmailBranding } from './email-config.js';
@@ -53,6 +58,26 @@ export const sendTemplateEmailByTrigger = async (input: {
   const template = findActiveTemplateForTrigger(input.trigger);
   if (!template) {
     log('info', 'sendTemplateEmailByTrigger: no active template for trigger', { trigger: input.trigger });
+    return { sent: false, reason: 'no-active-template' };
+  }
+  return sendFromTemplate(template, input.to, input.context);
+};
+
+// Campaign-aware variant: prefers a campaign-specific template clone over
+// the shop default. Used by the application-confirmation send path so per-
+// campaign template edits land in the right email.
+export const sendTemplateEmailByTriggerForCampaign = async (input: {
+  trigger: string;
+  campaignId: number | null;
+  to: string;
+  context: Record<string, string | number>;
+}): Promise<{ sent: boolean; reason?: string }> => {
+  const template = findActiveTemplateForTriggerCampaignAware(input.trigger, input.campaignId);
+  if (!template) {
+    log('info', 'sendTemplateEmailByTriggerForCampaign: no active template', {
+      trigger: input.trigger,
+      campaignId: input.campaignId,
+    });
     return { sent: false, reason: 'no-active-template' };
   }
   return sendFromTemplate(template, input.to, input.context);

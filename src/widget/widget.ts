@@ -1300,7 +1300,7 @@ const renderFeedbackForm = async (el: HTMLElement, accessKey: string): Promise<v
 
   let cfg: FeedbackFormConfig;
   try {
-    const res = await fetch(proxyUrl(`/campaigns/feedback/${encodeURIComponent(accessKey)}/config`), {
+    const res = await fetch(proxyUrl(`/feedback/${encodeURIComponent(accessKey)}`), {
       credentials: 'include',
     });
     if (!res.ok) {
@@ -1374,7 +1374,7 @@ const renderFeedbackForm = async (el: HTMLElement, accessKey: string): Promise<v
     submitEl.textContent = 'Submitting…';
 
     try {
-      const res = await fetch(proxyUrl(`/campaigns/feedback/${encodeURIComponent(accessKey)}/submit`), {
+      const res = await fetch(proxyUrl(`/feedback/${encodeURIComponent(accessKey)}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -1411,11 +1411,13 @@ const renderFeedbackQuestion = (q: FeedbackQuestion): string => {
   const name = `q_${q.id}`;
   switch (q.type) {
     case 'rating_1_5': {
-      // Five radio buttons, big and tappable.
+      // Five radio buttons, big and tappable. Numbers only — labelling them
+      // as "stars" is presumptuous (the merchant may be asking about
+      // satisfaction, likelihood-to-recommend, etc., not a star rating).
       const radios = [1, 2, 3, 4, 5].map((n) => `
         <label style="display:inline-flex; align-items:center; gap:4px; margin-right:12px;">
           <input type="radio" name="${name}" value="${n}" ${q.required ? 'required' : ''} />
-          <span>${n}★</span>
+          <span>${n}</span>
         </label>
       `).join('');
       return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label><div>${radios}</div></div>`;

@@ -941,6 +941,11 @@ export const setProductOptOut = (purchaseId: number, customerId: number | null):
 
 export interface EmailTemplateRow {
   id: number;
+  // NULL = the shop-wide default template for this key/trigger. Non-NULL =
+  // a campaign-specific clone, edited from inside the campaign view. The
+  // dispatcher prefers a campaign-specific row when sending for that
+  // campaign; falls back to the default. See migration 020.
+  campaign_id: number | null;
   template_key: string;
   display_name: string;
   is_active: number;
@@ -953,15 +958,21 @@ export interface EmailTemplateRow {
   updated_at: number;
 }
 
+// Defaults-only lookup — never returns campaign-specific override rows.
+// Used by the Branding template editor and the email seed. Campaign-specific
+// rows live in their own routes via findCampaignTemplateRow.
 export const findEmailTemplate = (templateKey: string): EmailTemplateRow | null => {
   return (getDb()
-    .prepare('SELECT * FROM email_templates WHERE template_key = ?')
+    .prepare('SELECT * FROM email_templates WHERE template_key = ? AND campaign_id IS NULL')
     .get(templateKey) as EmailTemplateRow | undefined) ?? null;
 };
 
+// Defaults-only listing (same scope as findEmailTemplate). The Branding tab
+// shows only these — campaign-specific clones surface inside the campaign
+// detail view, not here.
 export const listEmailTemplates = (): EmailTemplateRow[] => {
   return getDb()
-    .prepare('SELECT * FROM email_templates ORDER BY id ASC')
+    .prepare('SELECT * FROM email_templates WHERE campaign_id IS NULL ORDER BY id ASC')
     .all() as EmailTemplateRow[];
 };
 
@@ -969,15 +980,103 @@ export const listEmailTemplates = (): EmailTemplateRow[] => {
 // moderation flows select templates this way (not by hardcoded key). If a
 // merchant marks two templates with the same trigger active, the lowest id
 // wins — deterministic and good enough; the UI nudges toward one-per-trigger.
+//
+// Defaults-only lookup — no campaign context. Use
+// findActiveTemplateForTriggerCampaignAware when sending for a campaign so
+// per-campaign template overrides (migration 020) take precedence.
 export const findActiveTemplateForTrigger = (trigger: string): EmailTemplateRow | null => {
   return (getDb()
-    .prepare(`SELECT * FROM email_templates WHERE trigger_event = ? AND is_active = 1 ORDER BY id ASC LIMIT 1`)
+    .prepare(`SELECT * FROM email_templates WHERE trigger_event = ? AND is_active = 1 AND campaign_id IS NULL ORDER BY id ASC LIMIT 1`)
     .get(trigger) as EmailTemplateRow | undefined) ?? null;
 };
 
-// Upsert by key. Used by the seed and by content edits. triggerEvent is
-// optional on update: passing null preserves the existing trigger (so a plain
-// content edit doesn't clear it), while the seed and create paths set it.
+// Campaign-aware template lookup: prefers a campaign-specific row, falls back
+// to the shop default. Used by the campaign batch dispatcher and the campaign
+// application-confirmation send so per-campaign template edits land in the
+// right email. Passing a null campaignId reproduces the default-only path.
+export const findActiveTemplateForTriggerCampaignAware = (
+  trigger: string,
+  campaignId: number | null,
+): EmailTemplateRow | null => {
+  if (campaignId !== null) {
+    const override = getDb()
+      .prepare(`
+        SELECT * FROM email_templates
+         WHERE trigger_event = ?
+           AND is_active = 1
+           AND campaign_id = ?
+         ORDER BY id ASC LIMIT 1
+      `)
+      .get(trigger, campaignId) as EmailTemplateRow | undefined;
+    if (override) return override;
+  }
+  return findActiveTemplateForTrigger(trigger);
+};
+
+// Looks up a campaign-specific template row by (campaign, trigger). Used to
+// decide whether the "Edit template" link in the campaign view opens an
+// existing clone or has to create one first via cloneTemplateForCampaign.
+export const findCampaignTemplateRow = (
+  campaignId: number,
+  trigger: string,
+): EmailTemplateRow | null => {
+  return (getDb()
+    .prepare(`
+      SELECT * FROM email_templates
+       WHERE trigger_event = ?
+         AND campaign_id = ?
+       ORDER BY id ASC LIMIT 1
+    `)
+    .get(trigger, campaignId) as EmailTemplateRow | undefined) ?? null;
+};
+
+// Clones the active default template for a trigger into a new row scoped to
+// the given campaign. Idempotent at the caller's request — if a campaign-
+// specific row already exists, returns that instead of creating a duplicate.
+// Returns the row the merchant should be editing.
+export const cloneTemplateForCampaign = (input: {
+  campaignId: number;
+  trigger: string;
+}): EmailTemplateRow | null => {
+  const existing = findCampaignTemplateRow(input.campaignId, input.trigger);
+  if (existing) return existing;
+  const source = findActiveTemplateForTrigger(input.trigger);
+  if (!source) return null;
+  const db = getDb();
+  const now = nowSec();
+  // template_key on the clone is the same as the default — the new
+  // UNIQUE(shop_id, campaign_id, template_key) tolerates this because the
+  // tuple differs in campaign_id.
+  const result = db.prepare(`
+    INSERT INTO email_templates
+      (campaign_id, template_key, display_name, is_active, subject, body_html,
+       cta_enabled, cta_label, trigger_event, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.campaignId,
+    source.template_key,
+    `${source.display_name} (campaign override)`,
+    source.is_active,
+    source.subject,
+    source.body_html,
+    source.cta_enabled,
+    source.cta_label,
+    source.trigger_event,
+    now,
+    now,
+  );
+  const id = Number(result.lastInsertRowid);
+  return (db
+    .prepare('SELECT * FROM email_templates WHERE id = ?')
+    .get(id) as EmailTemplateRow | undefined) ?? null;
+};
+
+// Upsert a DEFAULT template by key (campaign_id IS NULL). Used by the seed
+// and by the Branding-tab content editor. The ON CONFLICT target matches the
+// `uniq_default_template` partial index — SQLite needs the WHERE clause
+// repeated here so the conflict-resolution path picks the right index.
+// Campaign-specific overrides are written through updateEmailTemplateById
+// instead (the editor for those loads by id, not by key).
 export const upsertEmailTemplate = (input: {
   templateKey: string;
   displayName: string;
@@ -994,7 +1093,7 @@ export const upsertEmailTemplate = (input: {
     INSERT INTO email_templates
       (template_key, display_name, is_active, subject, body_html, cta_enabled, cta_label, trigger_event, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(shop_id, template_key) DO UPDATE SET
+    ON CONFLICT(shop_id, template_key) WHERE campaign_id IS NULL DO UPDATE SET
       display_name  = excluded.display_name,
       is_active     = excluded.is_active,
       subject       = excluded.subject,
@@ -1018,6 +1117,46 @@ export const upsertEmailTemplate = (input: {
   return findEmailTemplate(input.templateKey)!;
 };
 
+// Edit-by-id, used by the campaign-specific template editor (which loads by
+// id since template_key isn't unique across the campaign-clone rows). Same
+// editable fields as upsertEmailTemplate.
+export const updateEmailTemplateById = (input: {
+  id: number;
+  displayName: string;
+  subject: string;
+  bodyHtml: string;
+  ctaEnabled: boolean;
+  ctaLabel: string;
+  isActive: boolean;
+}): void => {
+  getDb().prepare(`
+    UPDATE email_templates
+       SET display_name = ?,
+           subject = ?,
+           body_html = ?,
+           cta_enabled = ?,
+           cta_label = ?,
+           is_active = ?,
+           updated_at = ?
+     WHERE id = ?
+  `).run(
+    input.displayName,
+    input.subject,
+    input.bodyHtml,
+    input.ctaEnabled ? 1 : 0,
+    input.ctaLabel,
+    input.isActive ? 1 : 0,
+    nowSec(),
+    input.id,
+  );
+};
+
+export const findEmailTemplateById = (id: number): EmailTemplateRow | null => {
+  return (getDb()
+    .prepare('SELECT * FROM email_templates WHERE id = ?')
+    .get(id) as EmailTemplateRow | undefined) ?? null;
+};
+
 // Creates a brand-new merchant-authored template with a generated unique key.
 // Returns the new row.
 export const createEmailTemplate = (input: {
@@ -1034,12 +1173,14 @@ export const createEmailTemplate = (input: {
   return upsertEmailTemplate({ ...input, templateKey: key });
 };
 
-// Deletes a template by key. The seed re-creates the four defaults on next
-// boot if they're missing, so deleting a default is not permanent across a
-// restart unless the merchant also recreates it; merchant-authored templates
-// (custom-*) stay deleted.
+// Deletes a default template by key. Campaign-specific clones aren't touched
+// (they're scoped to a campaign and managed from inside that campaign view).
+// The seed re-creates the four defaults on next boot if they're missing, so
+// deleting a default is not permanent across a restart unless the merchant
+// also recreates it; merchant-authored templates (custom-*) stay deleted.
 export const deleteEmailTemplate = (templateKey: string): void => {
-  getDb().prepare('DELETE FROM email_templates WHERE template_key = ?').run(templateKey);
+  getDb().prepare('DELETE FROM email_templates WHERE template_key = ? AND campaign_id IS NULL')
+    .run(templateKey);
 };
 
 // --- Sample invitations ---
@@ -1453,6 +1594,33 @@ export const findProductCache = (shopifyProductId: string): ProductCacheRow | nu
 export const clearProductCache = (): number => {
   const res = getDb().prepare('DELETE FROM products_cache').run();
   return res.changes;
+};
+
+// All cached product rows for picker UIs. Ordered alphabetically by title so
+// the merchant can scan a long list quickly. Featured image URL included so
+// the picker can render thumbnails next to names.
+export const listAllProductCacheRows = (): Array<{
+  shopifyProductId: string;
+  title: string;
+  handle: string;
+  featuredImageUrl: string | null;
+}> => {
+  const rows = getDb().prepare(`
+    SELECT shopify_product_id, title, handle, featured_image_url
+      FROM products_cache
+     ORDER BY title COLLATE NOCASE ASC
+  `).all() as Array<{
+    shopify_product_id: string;
+    title: string;
+    handle: string;
+    featured_image_url: string | null;
+  }>;
+  return rows.map((r) => ({
+    shopifyProductId: r.shopify_product_id,
+    title: r.title,
+    handle: r.handle,
+    featuredImageUrl: r.featured_image_url,
+  }));
 };
 
 // --- Email events ---

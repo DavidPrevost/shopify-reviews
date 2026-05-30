@@ -24,7 +24,7 @@ export const isFeedbackQuestionType = (v: unknown): v is FeedbackQuestionType =>
   typeof v === 'string' && (FEEDBACK_QUESTION_TYPES as readonly string[]).includes(v);
 
 export const FEEDBACK_QUESTION_TYPE_LABELS: Record<FeedbackQuestionType, string> = {
-  rating_1_5:    'Rating (1-5 stars)',
+  rating_1_5:    'Rating (1-5)',
   single_choice: 'Single choice',
   multi_choice:  'Multi choice',
   short_text:    'Short text',

@@ -37,7 +37,6 @@ import {
   memberHasInvitations,
   countInvitationsForMember,
   resetCapacityWarning,
-  setMemberDiscountCode,
   codeStats,
   listMembersForCodeCleanup,
   markMemberCodeDeleted,
@@ -53,6 +52,8 @@ import {
   type CampaignMemberRow,
 } from '../db/campaigns.js';
 import { upsertCustomer } from '../db/queries.js';
+import { getDb } from '../db/client.js';
+import { config } from '../config.js';
 import { daysToSec, nowSec } from '../lib/time.js';
 import { log } from '../lib/logger.js';
 import {
@@ -60,8 +61,15 @@ import {
   countEligibleForTrigger,
   type CampaignBatchTrigger,
 } from '../email/dispatch-campaign.js';
-import { createCampaignDiscountCode, deleteCampaignDiscountCode } from '../shopify/discount-codes.js';
-import crypto from 'node:crypto';
+import { deleteCampaignDiscountCode } from '../shopify/discount-codes.js';
+import { syncAllProductsToCache, listCachedProducts } from '../shopify/product-info.js';
+import {
+  cloneTemplateForCampaign,
+  findEmailTemplateById,
+  findCampaignTemplateRow,
+  findActiveTemplateForTriggerCampaignAware,
+  updateEmailTemplateById,
+} from '../db/queries.js';
 import {
   FEEDBACK_QUESTION_TYPES,
   FEEDBACK_QUESTION_TYPE_LABELS,
@@ -92,38 +100,319 @@ const adminCampaigns = new Hono();
 // --- Helpers ---
 
 // Slug validator. Must be URL-safe — lowercase letters/digits/hyphens, no
-// leading/trailing hyphens, length 1-64. Rejected at create time with a
-// human-readable error.
+// leading/trailing hyphens, length 1-64. Same regex is enforced client-side
+// via the input's `pattern` attribute (see the slug field below).
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SLUG_PATTERN_HTML = '[a-z0-9]+(?:-[a-z0-9]+)*';
 const isValidSlug = (s: string): boolean => s.length >= 1 && s.length <= 64 && SLUG_RE.test(s);
+
+// Boilerplate text seeded into the New Campaign form. The merchant edits
+// before launch; this is just a starting point so the form isn't empty.
+// "We'll refine the language before we launch" — per the design conversation.
+const DEFAULT_TERMS_SUMMARY = `\
+- Submitting this application is your consent to receive four emails about this campaign (this confirmation, a shipped notification, a review reminder, and a launch announcement). These emails are part of participating.
+- We'll use your shipping address only to mail your sample pack.
+- There's no payment for participating beyond the sample pack and any launch-day discount we choose to send.
+- Applications are reviewed manually — submitting doesn't guarantee selection.
+- You can withdraw before we ship by replying to the confirmation email.`;
+
+const DEFAULT_TERMS_BODY = `\
+By submitting this application, you agree to the following terms:
+
+1. Participation. Submission is an application, not a guarantee of selection. We review every application manually and select a subset of applicants to receive sample packs.
+
+2. Communications. You consent to receive up to four emails directly tied to this campaign: an application confirmation, a shipped notification, a review reminder, and a launch announcement. These emails are a non-revocable condition of participation; standard transactional / marketing unsubscribe preferences do not apply.
+
+3. Use of your information. We collect your name, email address, and shipping address solely to communicate with you about this campaign and to ship your sample pack. We do not sell or share this information with third parties for marketing purposes.
+
+4. No compensation. You are not compensated for participating beyond the sample pack itself and any launch-day discount code we choose to send. There is no obligation to write a review, but we hope you will.
+
+5. Reviews. If you choose to write a review using the links provided, your review will be published on our store under the "Verified Reviewer" badge. We may moderate reviews per our review policy but will not edit the substance of your opinion.
+
+6. Withdrawal. You may withdraw before we ship your sample pack by replying to the confirmation email. After shipment, we cannot recall the pack, but you can stop receiving further campaign emails by replying with "stop."
+
+7. Data retention. We retain your name and email for our records. Your shipping address is automatically purged shortly after the campaign ends.
+
+8. Updates. These terms apply as of the date you submit the application; later edits to the terms do not retroactively change the agreement you accepted.`;
+
+// Styles for the campaign forms. Distinguishes helper text from inputs so
+// the merchant can scan a long form without confusing labels for placeholder
+// values. Injected once per form-page render.
+const renderCampaignFormStyles = (): string => `
+  <style>
+    .campaign-helper {
+      font-size: 12px;
+      font-style: italic;
+      color: var(--muted);
+      margin: 4px 0 12px 4px;
+      line-height: 1.4;
+    }
+    .slug-preview {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 4px 0 0 4px;
+    }
+    .slug-preview code {
+      font-style: normal;
+      background: var(--surface-alt);
+      padding: 1px 6px;
+      border-radius: 3px;
+    }
+    .product-picker {
+      max-height: 320px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 12px;
+      background: var(--surface);
+    }
+    .product-picker label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+      font-weight: normal;
+      cursor: pointer;
+    }
+    .product-picker label img {
+      width: 32px; height: 32px; object-fit: cover; border-radius: 3px;
+      background: var(--surface-alt);
+    }
+    .product-picker .product-title { flex: 1; }
+    .product-picker .product-id {
+      font-size: 11px; color: var(--muted); font-family: monospace;
+    }
+    .discount-section {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 16px;
+      margin-top: 12px;
+    }
+    .discount-section.disabled { opacity: 0.55; }
+    .discount-section.disabled input { background: var(--surface-alt); }
+    .field-block { margin: 16px 0; }
+    .field-block label { margin-top: 0; }
+  </style>
+`;
+
+// Renders the percentage-→-absolute-count helper line beneath the threshold
+// input. Pure JS that recomputes on input; admin sees the live count.
+const renderThresholdHelperScript = (): string => `
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const limit = document.getElementById('participant_limit');
+      const pct   = document.getElementById('threshold_pct');
+      const preview = document.getElementById('threshold_preview');
+      const slugIn = document.getElementById('slug');
+      const slugOut = document.getElementById('slug_preview_out');
+      const codePrefix = document.getElementById('discount_code_prefix');
+      const codePreview = document.getElementById('discount_code_preview');
+      const discountToggle = document.getElementById('discount_enabled');
+      const discountSection = document.getElementById('discount-section');
+
+      const recalc = () => {
+        const lim = parseInt(limit && limit.value, 10);
+        const p = parseInt(pct && pct.value, 10);
+        if (!preview) return;
+        if (!lim || lim <= 0) { preview.textContent = 'Unlimited — capacity warning disabled.'; return; }
+        if (!p || isNaN(p)) { preview.textContent = ''; return; }
+        const at = Math.round((p / 100) * lim);
+        preview.textContent = 'Warning will fire at about ' + at + ' of ' + lim + ' applications.';
+      };
+      limit && limit.addEventListener('input', recalc);
+      pct && pct.addEventListener('input', recalc);
+      recalc();
+
+      const recalcSlug = () => {
+        if (!slugIn || !slugOut) return;
+        const v = (slugIn.value || '').trim();
+        slugOut.textContent = v ? v : '«your-slug»';
+      };
+      slugIn && slugIn.addEventListener('input', recalcSlug);
+      recalcSlug();
+
+      const recalcCode = () => {
+        if (!codePrefix || !codePreview) return;
+        const v = (codePrefix.value || '').trim();
+        codePreview.textContent = v + 'XXXXXXXX';
+      };
+      codePrefix && codePrefix.addEventListener('input', recalcCode);
+      recalcCode();
+
+      const recalcDiscount = () => {
+        if (!discountToggle || !discountSection) return;
+        const on = discountToggle.checked;
+        discountSection.classList.toggle('disabled', !on);
+        discountSection.querySelectorAll('input').forEach((el) => {
+          if (el === discountToggle) return;
+          el.disabled = !on;
+        });
+      };
+      discountToggle && discountToggle.addEventListener('change', recalcDiscount);
+      recalcDiscount();
+    });
+  </script>
+`;
+
+// The product-picker checklist. Renders all cached products as checkboxes;
+// selected ids are POSTed as repeated product_id values. A "Refresh from
+// Shopify" button at the top triggers a full-catalog sync into the cache.
+const renderProductPicker = (selectedIds: Set<string>, publicUrl: string): string => {
+  const products = listCachedProducts();
+  const refreshForm = `
+    <form method="POST" action="/admin/campaigns/refresh-product-cache" class="inline" style="float:right;">
+      <input type="hidden" name="return_to" value="${escapeHtml(publicUrl)}" />
+      <button type="submit">Refresh from Shopify</button>
+    </form>
+  `;
+  if (products.length === 0) {
+    return `
+      <p class="campaign-helper">No products cached yet. Click the button to load every product in your Shopify store into the picker.</p>
+      <div style="margin:8px 0;">${refreshForm.replace(/float:right;/, '')}</div>
+    `;
+  }
+  const items = products.map((p) => {
+    const checked = selectedIds.has(p.shopifyProductId) ? 'checked' : '';
+    const img = p.featuredImageUrl
+      ? `<img src="${escapeHtml(p.featuredImageUrl)}" alt="" />`
+      : `<span style="display:inline-block;width:32px;height:32px;background:var(--surface-alt);border-radius:3px;"></span>`;
+    return `<label>
+      <input type="checkbox" name="product_id" value="${escapeHtml(p.shopifyProductId)}" ${checked} />
+      ${img}
+      <span class="product-title">${escapeHtml(p.title)}</span>
+      <span class="product-id">${escapeHtml(p.shopifyProductId)}</span>
+    </label>`;
+  }).join('');
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span class="campaign-helper" style="margin:0;">${products.length} cached product${products.length === 1 ? '' : 's'}. Refresh after adding new products in Shopify.</span>
+      ${refreshForm}
+    </div>
+    <div class="product-picker" style="margin-top:8px;">${items}</div>
+  `;
+};
+
+// Existing-data shape passed into the shared form renderer. Both create
+// (with null) and edit (with the row) use this.
+interface CampaignFormData {
+  name: string;
+  slug: string;
+  slugLocked: boolean;          // true on edit — we don't let merchants change slugs
+  participantLimit: number;
+  thresholdPct: number | null;  // percentage (1-100); null = disabled
+  selectedProductIds: Set<string>;
+  discountEnabled: boolean;
+  discountPercent: number | null;
+  discountExpiresDays: number | null;
+  discountCodePrefix: string;
+  termsSummary: string;
+  termsBody: string;
+  termsLocked: boolean;         // true on edit — terms have their own editor
+}
+
+// Computes the suggested percentage from existing absolute count + limit, for
+// pre-filling the threshold input on edit. Falls back to 80 if no value.
+const inferThresholdPct = (threshold: number | null, limit: number): number | null => {
+  if (threshold === null || limit <= 0) return null;
+  return Math.round((threshold / limit) * 100);
+};
+
+const renderCampaignFormFields = (data: CampaignFormData): string => {
+  const slugInput = data.slugLocked
+    ? `<input type="text" name="slug" value="${escapeHtml(data.slug)}" disabled />
+       <p class="campaign-helper">Slug can't be changed after creation.</p>`
+    : `<input type="text" id="slug" name="slug" required maxlength="64"
+              pattern="${SLUG_PATTERN_HTML}"
+              value="${escapeHtml(data.slug)}"
+              placeholder="summer26" />
+       <p class="slug-preview">Public URL: <code><span id="slug_preview_out">${escapeHtml(data.slug || '«your-slug»')}</span></code> in your application Page; the form widget reads the slug from the embed div.</p>
+       <p class="campaign-helper">Lowercase letters, digits, and hyphens. No spaces or special characters. Used as the campaign identifier in URLs and admin lookups.</p>`;
+
+  return `
+    <div class="field-block">
+      <label>Campaign name</label>
+      <input type="text" name="name" required maxlength="120"
+             value="${escapeHtml(data.name)}"
+             placeholder="e.g., Summer 26 Sample Program" />
+      <p class="campaign-helper">Shown in the admin and used as the heading on the public application form. Customers will see this.</p>
+    </div>
+
+    <div class="field-block">
+      <label>URL slug</label>
+      ${slugInput}
+    </div>
+
+    <div class="field-block">
+      <label>Participant limit</label>
+      <input type="number" id="participant_limit" name="participant_limit"
+             required min="0" max="100000"
+             value="${data.participantLimit}" />
+      <p class="campaign-helper">Maximum number of approved participants. When the application count reaches this number, the form auto-closes. Enter <strong>0</strong> for no limit (also disables the capacity warning).</p>
+    </div>
+
+    <div class="field-block">
+      <label>Capacity-warning threshold</label>
+      <input type="number" id="threshold_pct" name="threshold_pct"
+             min="1" max="100"
+             value="${data.thresholdPct ?? ''}"
+             placeholder="80" />
+      <p class="campaign-helper">Send a warning email when the application count crosses this percentage of the participant limit. Leave blank to disable. <span id="threshold_preview"></span></p>
+    </div>
+
+    <h3 style="margin-top:32px;">Products in this campaign</h3>
+    ${renderProductPicker(data.selectedProductIds, '')}
+    <p class="campaign-helper">Approved applicants get a sample-invitation review link for each selected product. Variant selection is fixed per product for now — applicant choice of variants is a future feature.</p>
+
+    <h3 style="margin-top:32px;">Launch discount</h3>
+    <div class="field-block">
+      <label style="display:flex; align-items:center; gap:8px; font-weight:normal;">
+        <input type="checkbox" id="discount_enabled" name="discount_enabled"
+               ${data.discountEnabled ? 'checked' : ''} />
+        <span>Send a discount code with the launch-thanks email</span>
+      </label>
+    </div>
+    <div id="discount-section" class="discount-section${data.discountEnabled ? '' : ' disabled'}">
+      <div class="field-block">
+        <label>Percentage off</label>
+        <input type="number" name="discount_percent" min="1" max="100"
+               value="${data.discountPercent ?? ''}" placeholder="40" />
+        <p class="campaign-helper">Whole-number percentage off each order. Shopify's discount API doesn't support "percent off with a maximum cap" — combined with usage-limit-1 + per-customer scope + a short expiry, the worst case is one customer per code.</p>
+      </div>
+      <div class="field-block">
+        <label>Code expiry (days from when sent)</label>
+        <input type="number" name="discount_expires_days" min="1" max="3650"
+               value="${data.discountExpiresDays ?? ''}" placeholder="60" />
+        <p class="campaign-helper">Each code's expiry counts from the moment the launch email is sent, not from when the campaign is created.</p>
+      </div>
+      <div class="field-block">
+        <label>Code prefix (optional)</label>
+        <input type="text" id="discount_code_prefix" name="discount_code_prefix"
+               maxlength="16" value="${escapeHtml(data.discountCodePrefix)}"
+               placeholder="S26-" />
+        <p class="campaign-helper">Example code: <code><span id="discount_code_preview">${escapeHtml(data.discountCodePrefix)}XXXXXXXX</span></code> — the X's become an 8-character random suffix (no O/0/I/1 for legibility).</p>
+      </div>
+    </div>
+
+    ${data.termsLocked ? '' : `
+      <h3 style="margin-top:32px;">Initial terms</h3>
+      <div class="field-block">
+        <label>Plain-language summary</label>
+        <textarea name="terms_summary" rows="6" required>${escapeHtml(data.termsSummary)}</textarea>
+        <p class="campaign-helper">A short summary of what the applicant is agreeing to. Shown prominently above the full terms on the application form. Use plain language — most readers won't scroll to the full terms.</p>
+      </div>
+      <div class="field-block">
+        <label>Full terms</label>
+        <textarea name="terms_body" rows="14" required>${escapeHtml(data.termsBody)}</textarea>
+        <p class="campaign-helper">The legal terms the applicant agrees to. The boilerplate is a starting point — refine the language before launch. Editing later creates a new version snapshot; existing applicants stay tied to the version they accepted.</p>
+      </div>
+    `}
+  `;
+};
 
 const parseIntOrNull = (v: unknown): number | null => {
   if (typeof v !== 'string' || v.trim() === '') return null;
   const n = Number(v);
   return Number.isFinite(n) && Number.isInteger(n) ? n : null;
-};
-
-// Parse a textarea of product-id lines into [{shopifyProductId, shopifyVariantId}].
-// One product per non-empty line; `productId|variantId` to pin a specific
-// variant, plain `productId` for no variant. Trim every line.
-const parseProductLines = (raw: string): CampaignProduct[] => {
-  return raw.split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      const parts = line.split('|').map((p) => p.trim());
-      return {
-        shopifyProductId: parts[0] ?? '',
-        shopifyVariantId: parts[1] && parts[1].length > 0 ? parts[1] : null,
-      };
-    })
-    .filter((p) => p.shopifyProductId.length > 0);
-};
-
-const formatProductLines = (products: CampaignProduct[]): string => {
-  return products
-    .map((p) => p.shopifyVariantId ? `${p.shopifyProductId}|${p.shopifyVariantId}` : p.shopifyProductId)
-    .join('\n');
 };
 
 // Which status transitions are allowed from a given current state. Surfaced
@@ -224,78 +513,74 @@ const renderCampaignPillStyles = (): string => `
 // --- Create form ---
 
 adminCampaigns.get('/new', (c) => {
+  const data: CampaignFormData = {
+    name: '',
+    slug: '',
+    slugLocked: false,
+    participantLimit: 80,
+    thresholdPct: 80,
+    selectedProductIds: new Set<string>(),
+    discountEnabled: true,
+    discountPercent: 40,
+    discountExpiresDays: 60,
+    discountCodePrefix: '',
+    termsSummary: DEFAULT_TERMS_SUMMARY,
+    termsBody: DEFAULT_TERMS_BODY,
+    termsLocked: false,
+  };
   return c.html(adminShell('New campaign', `
+    ${renderCampaignFormStyles()}
     <p><a href="/admin/campaigns">← Campaigns</a></p>
     <h2>New campaign</h2>
     <form method="POST" action="/admin/campaigns" class="card">
-      <label>Campaign name</label>
-      <input type="text" name="name" required maxlength="120" placeholder="e.g., Summer 26 Sample Program" />
-      <p class="muted">Shown to the merchant in the admin. Customers never see this directly.</p>
-
-      <label>URL slug</label>
-      <input type="text" name="slug" required maxlength="64" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="e.g., summer26" />
-      <p class="muted">Lowercase letters, digits, and hyphens. Used in the public application URL.</p>
-
-      <label>Target size (number of participants)</label>
-      <input type="number" name="target_size" required min="1" max="100000" placeholder="80" />
-
-      <label>Capacity-warning threshold (optional)</label>
-      <input type="number" name="capacity_warning_threshold" min="0" placeholder="64" />
-      <p class="muted">When active-applications count crosses this number, you get an email. Leave blank to disable. (You can re-arm it later from the detail page.)</p>
-
-      <h3 style="margin-top:32px;">Product set</h3>
-      <p class="muted">One product per line. Use <code>shopify_product_id</code> for any-variant, or <code>shopify_product_id|shopify_variant_id</code> to pin a specific variant.</p>
-      <textarea name="product_set" rows="4" placeholder="123456789&#10;987654321|111222333"></textarea>
-
-      <h3 style="margin-top:32px;">Discount terms (used by the launch email)</h3>
-      <label>Percentage off (optional)</label>
-      <input type="number" name="discount_percent" min="1" max="100" placeholder="40" />
-
-      <label>Code expiry (days from issue)</label>
-      <input type="number" name="discount_expires_days" min="1" max="3650" placeholder="60" />
-
-      <label>Code prefix (optional)</label>
-      <input type="text" name="discount_code_prefix" maxlength="16" placeholder="S26-" />
-      <p class="muted">Each per-participant code is generated as <code>PREFIX</code> + a random suffix.</p>
-
-      <h3 style="margin-top:32px;">Initial terms</h3>
-      <p class="muted">The terms the applicant must accept. By submitting the application form, they consent to receive the four campaign emails (this is a condition of participation).</p>
-      <textarea name="terms_body" rows="10" required placeholder="By submitting this application you agree to..."></textarea>
-
+      ${renderCampaignFormFields(data)}
       <div style="margin-top:24px; display:flex; gap:12px;">
         <button type="submit" class="primary">Create campaign (draft)</button>
         <a href="/admin/campaigns" style="align-self:center;">Cancel</a>
       </div>
     </form>
+    ${renderThresholdHelperScript()}
   `, 'campaigns'));
 });
 
 // --- Create action ---
 
 adminCampaigns.post('/', async (c) => {
-  const form = await c.req.parseBody();
+  const form = await c.req.parseBody({ all: true });
   const name = String(form.name ?? '').trim();
   const slug = String(form.slug ?? '').trim().toLowerCase();
-  const targetSize = parseIntOrNull(form.target_size);
-  const threshold = parseIntOrNull(form.capacity_warning_threshold);
-  const productLines = String(form.product_set ?? '');
-  const discountPercent = parseIntOrNull(form.discount_percent);
-  const discountExpiresDays = parseIntOrNull(form.discount_expires_days);
+  const participantLimit = parseIntOrNull(form.participant_limit);
+  const thresholdPct = parseIntOrNull(form.threshold_pct);
+  const discountEnabled = form.discount_enabled === 'on';
+  const discountPercent = discountEnabled ? parseIntOrNull(form.discount_percent) : null;
+  const discountExpiresDays = discountEnabled ? parseIntOrNull(form.discount_expires_days) : null;
   const discountCodePrefix = String(form.discount_code_prefix ?? '').trim() || null;
+  const termsSummary = String(form.terms_summary ?? '').trim();
   const termsBody = String(form.terms_body ?? '').trim();
+
+  // Multi-valued product_id form fields → array of product ids.
+  const productIdsRaw = form.product_id;
+  const selectedIds: string[] = Array.isArray(productIdsRaw)
+    ? productIdsRaw.filter((v): v is string => typeof v === 'string')
+    : (typeof productIdsRaw === 'string' ? [productIdsRaw] : []);
 
   const errors: string[] = [];
   if (!name) errors.push('Name is required.');
   if (!slug || !isValidSlug(slug)) errors.push('Slug must be lowercase letters, digits, and hyphens.');
-  if (!targetSize || targetSize <= 0) errors.push('Target size must be a positive number.');
-  if (threshold !== null && (threshold < 0 || threshold > (targetSize ?? 0))) {
-    errors.push('Capacity-warning threshold must be between 0 and target size.');
+  if (participantLimit === null || participantLimit < 0) errors.push('Participant limit must be 0 or greater (0 = unlimited).');
+  // Absolute threshold derived from percentage × limit. Capped at limit;
+  // disabled entirely when limit is 0 (unlimited campaigns).
+  let capacityThreshold: number | null = null;
+  if (participantLimit !== null && participantLimit > 0 && thresholdPct !== null) {
+    if (thresholdPct < 1 || thresholdPct > 100) errors.push('Threshold percentage must be 1-100.');
+    else capacityThreshold = Math.round((thresholdPct / 100) * participantLimit);
   }
-  if (discountPercent !== null && (discountPercent < 1 || discountPercent > 100)) {
-    errors.push('Discount percentage must be 1-100.');
+  if (discountEnabled) {
+    if (discountPercent === null || discountPercent < 1 || discountPercent > 100) errors.push('Discount percentage must be 1-100.');
+    if (discountExpiresDays === null || discountExpiresDays < 1) errors.push('Discount expiry must be at least 1 day.');
   }
-  if (!termsBody) errors.push('Initial terms text is required.');
-
+  if (!termsSummary) errors.push('Plain-language summary is required.');
+  if (!termsBody) errors.push('Full terms text is required.');
   if (findCampaignBySlug(slug)) errors.push(`Slug "${slug}" is already in use.`);
 
   if (errors.length > 0) {
@@ -307,15 +592,21 @@ adminCampaigns.post('/', async (c) => {
     `, 'campaigns'), 400);
   }
 
+  const productSet: CampaignProduct[] = selectedIds.map((id) => ({
+    shopifyProductId: id,
+    shopifyVariantId: null,
+  }));
+
   const { campaignId } = createCampaign({
     name,
     slug,
-    targetSize: targetSize!,
-    capacityWarningThreshold: threshold,
-    productSet: parseProductLines(productLines),
+    targetSize: participantLimit!,
+    capacityWarningThreshold: capacityThreshold,
+    productSet,
     discountPercent,
     discountExpiresDays,
     discountCodePrefix,
+    termsSummaryText: termsSummary,
     termsBodyText: termsBody,
   });
 
@@ -421,9 +712,13 @@ adminCampaigns.get('/:id', (c) => {
       <h3 style="margin-top:0;">Terms</h3>
       <p class="muted">Current version: ${activeTerms ? `v${activeTerms.version_number}, saved ${formatTs(activeTerms.created_at)}` : 'none'}</p>
       <form method="POST" action="/admin/campaigns/${camp.id}/terms">
-        <textarea name="terms_body" rows="10" required>${escapeHtml(activeTerms?.body_text ?? '')}</textarea>
-        <p class="muted">Saving creates a new version. Existing applicants keep pointing at the version they accepted.</p>
-        <button type="submit" class="primary">Save new terms version</button>
+        <label>Plain-language summary</label>
+        <textarea name="terms_summary" rows="6" required>${escapeHtml(activeTerms?.summary_text ?? '')}</textarea>
+        <p class="muted" style="font-style:italic;">Short summary shown prominently above the full terms on the application form.</p>
+        <label style="margin-top:16px;">Full terms</label>
+        <textarea name="terms_body" rows="14" required>${escapeHtml(activeTerms?.body_text ?? '')}</textarea>
+        <p class="muted" style="font-style:italic;">Saving creates a new version snapshot. Existing applicants stay tied to the version they accepted.</p>
+        <button type="submit" class="primary" style="margin-top:8px;">Save new terms version</button>
       </form>
       <h4 style="margin-top:24px;">History</h4>
       ${termsHistoryHtml}
@@ -439,40 +734,35 @@ adminCampaigns.get('/:id/edit', (c) => {
   if (!camp) return c.notFound();
 
   const products = parseProductSet(camp);
-  const productLines = formatProductLines(products);
+  const data: CampaignFormData = {
+    name: camp.name,
+    slug: camp.slug,
+    slugLocked: true,
+    participantLimit: camp.target_size,
+    thresholdPct: inferThresholdPct(camp.capacity_warning_threshold, camp.target_size),
+    selectedProductIds: new Set(products.map((p) => p.shopifyProductId)),
+    discountEnabled: camp.discount_percent !== null,
+    discountPercent: camp.discount_percent,
+    discountExpiresDays: camp.discount_expires_days,
+    discountCodePrefix: camp.discount_code_prefix ?? '',
+    termsSummary: '',  // unused — termsLocked = true
+    termsBody: '',
+    termsLocked: true,
+  };
 
   return c.html(adminShell(`Edit ${camp.name}`, `
+    ${renderCampaignFormStyles()}
     <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
     <h2>Edit campaign</h2>
     <form method="POST" action="/admin/campaigns/${camp.id}/edit" class="card">
-      <label>Campaign name</label>
-      <input type="text" name="name" required maxlength="120" value="${escapeHtml(camp.name)}" />
-
-      <label>Target size</label>
-      <input type="number" name="target_size" required min="1" max="100000" value="${camp.target_size}" />
-
-      <label>Capacity-warning threshold (optional)</label>
-      <input type="number" name="capacity_warning_threshold" min="0" value="${camp.capacity_warning_threshold ?? ''}" />
-
-      <h3 style="margin-top:32px;">Product set</h3>
-      <p class="muted">One product per line. Use <code>shopify_product_id</code> or <code>shopify_product_id|shopify_variant_id</code>.</p>
-      <textarea name="product_set" rows="4">${escapeHtml(productLines)}</textarea>
-
-      <h3 style="margin-top:32px;">Discount terms</h3>
-      <label>Percentage off</label>
-      <input type="number" name="discount_percent" min="1" max="100" value="${camp.discount_percent ?? ''}" />
-
-      <label>Code expiry (days from issue)</label>
-      <input type="number" name="discount_expires_days" min="1" max="3650" value="${camp.discount_expires_days ?? ''}" />
-
-      <label>Code prefix</label>
-      <input type="text" name="discount_code_prefix" maxlength="16" value="${escapeHtml(camp.discount_code_prefix ?? '')}" />
-
+      ${renderCampaignFormFields(data)}
+      <p class="campaign-helper" style="margin-top:16px;">Terms are edited separately from the campaign detail page — they're versioned so historical applicants stay tied to the version they accepted.</p>
       <div style="margin-top:24px; display:flex; gap:12px;">
         <button type="submit" class="primary">Save changes</button>
         <a href="/admin/campaigns/${camp.id}" style="align-self:center;">Cancel</a>
       </div>
     </form>
+    ${renderThresholdHelperScript()}
   `, 'campaigns'));
 });
 
@@ -481,34 +771,55 @@ adminCampaigns.post('/:id/edit', async (c) => {
   const camp = findCampaignById(id);
   if (!camp) return c.notFound();
 
-  const form = await c.req.parseBody();
+  const form = await c.req.parseBody({ all: true });
   const name = String(form.name ?? '').trim();
-  const targetSize = parseIntOrNull(form.target_size);
-  const threshold = parseIntOrNull(form.capacity_warning_threshold);
-  const productLines = String(form.product_set ?? '');
-  const discountPercent = parseIntOrNull(form.discount_percent);
-  const discountExpiresDays = parseIntOrNull(form.discount_expires_days);
+  const participantLimit = parseIntOrNull(form.participant_limit);
+  const thresholdPct = parseIntOrNull(form.threshold_pct);
+  const discountEnabled = form.discount_enabled === 'on';
+  const discountPercent = discountEnabled ? parseIntOrNull(form.discount_percent) : null;
+  const discountExpiresDays = discountEnabled ? parseIntOrNull(form.discount_expires_days) : null;
   const discountCodePrefix = String(form.discount_code_prefix ?? '').trim() || null;
 
-  if (!name || !targetSize || targetSize <= 0) {
-    return c.html(adminShell('Edit campaign', `
-      <div class="err">Name and a positive target size are required.</div>
-      <p><a href="javascript:history.back()">Go back</a></p>
-    `, 'campaigns'), 400);
+  const productIdsRaw = form.product_id;
+  const selectedIds: string[] = Array.isArray(productIdsRaw)
+    ? productIdsRaw.filter((v): v is string => typeof v === 'string')
+    : (typeof productIdsRaw === 'string' ? [productIdsRaw] : []);
+
+  if (!name) {
+    return c.html(adminShell('Edit campaign', `<div class="err">Name is required.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
   }
-  if (threshold !== null && (threshold < 0 || threshold > targetSize)) {
-    return c.html(adminShell('Edit campaign', `
-      <div class="err">Capacity-warning threshold must be between 0 and target size.</div>
-      <p><a href="javascript:history.back()">Go back</a></p>
-    `, 'campaigns'), 400);
+  if (participantLimit === null || participantLimit < 0) {
+    return c.html(adminShell('Edit campaign', `<div class="err">Participant limit must be 0 or greater.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
   }
+
+  let capacityThreshold: number | null = null;
+  if (participantLimit > 0 && thresholdPct !== null) {
+    if (thresholdPct < 1 || thresholdPct > 100) {
+      return c.html(adminShell('Edit campaign', `<div class="err">Threshold percentage must be 1-100.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
+    }
+    capacityThreshold = Math.round((thresholdPct / 100) * participantLimit);
+  }
+
+  if (discountEnabled) {
+    if (discountPercent === null || discountPercent < 1 || discountPercent > 100) {
+      return c.html(adminShell('Edit campaign', `<div class="err">Discount percentage must be 1-100 when discount is enabled.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
+    }
+    if (discountExpiresDays === null || discountExpiresDays < 1) {
+      return c.html(adminShell('Edit campaign', `<div class="err">Discount expiry must be at least 1 day when discount is enabled.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
+    }
+  }
+
+  const productSet: CampaignProduct[] = selectedIds.map((pid) => ({
+    shopifyProductId: pid,
+    shopifyVariantId: null,
+  }));
 
   updateCampaignSettings({
     id: camp.id,
     name,
-    targetSize,
-    capacityWarningThreshold: threshold,
-    productSet: parseProductLines(productLines),
+    targetSize: participantLimit,
+    capacityWarningThreshold: capacityThreshold,
+    productSet,
     discountPercent,
     discountExpiresDays,
     discountCodePrefix,
@@ -516,6 +827,22 @@ adminCampaigns.post('/:id/edit', async (c) => {
 
   log('info', 'campaign settings updated', { campaignId: camp.id });
   return c.redirect(`/admin/campaigns/${camp.id}`);
+});
+
+// --- Full-catalog product cache refresh ---
+
+adminCampaigns.post('/refresh-product-cache', async (c) => {
+  const form = await c.req.parseBody();
+  const returnTo = String(form.return_to ?? '/admin/campaigns/new');
+  try {
+    const count = await syncAllProductsToCache();
+    log('info', 'admin synced full product catalog', { count });
+  } catch (err) {
+    log('error', 'product cache refresh failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return c.redirect(returnTo);
 });
 
 // --- Status transitions ---
@@ -552,24 +879,24 @@ adminCampaigns.post('/:id/terms', async (c) => {
   if (!camp) return c.notFound();
 
   const form = await c.req.parseBody();
+  const summaryText = String(form.terms_summary ?? '').trim();
   const bodyText = String(form.terms_body ?? '').trim();
-  if (!bodyText) {
+  if (!summaryText || !bodyText) {
     return c.html(adminShell('Save terms', `
-      <div class="err">Terms text cannot be empty.</div>
+      <div class="err">Both the plain-language summary and the full terms are required.</div>
       <p><a href="javascript:history.back()">Go back</a></p>
     `, 'campaigns'), 400);
   }
 
-  // Skip the save if the text is unchanged from the active version — no point
-  // versioning a no-op. Comparison is exact-string; whitespace edits do create
-  // a new version, which the merchant probably wants for audit purposes.
+  // Skip the save if both fields are unchanged from the active version. We
+  // count edits to either field as a real edit and version both together.
   const active = getActiveTermsVersion(camp.id);
-  if (active && active.body_text === bodyText) {
+  if (active && active.body_text === bodyText && (active.summary_text ?? '') === summaryText) {
     log('info', 'campaign terms unchanged, skipping version', { campaignId: camp.id });
     return c.redirect(`/admin/campaigns/${camp.id}`);
   }
 
-  const version = saveTermsVersion({ campaignId: camp.id, bodyText });
+  const version = saveTermsVersion({ campaignId: camp.id, summaryText, bodyText });
   log('info', 'campaign terms saved', { campaignId: camp.id, versionId: version.id, versionNumber: version.version_number });
   return c.redirect(`/admin/campaigns/${camp.id}`);
 });
@@ -816,16 +1143,157 @@ const renderBatchSendRow = (
 ): string => {
   const eligible = countEligibleForTrigger(camp.id, trigger);
   const disabled = eligible === 0 ? 'disabled' : '';
-  const confirmMsg = `Send "${label}" to ${eligible} eligible member${eligible === 1 ? '' : 's'}? This cannot be undone.`;
+  const confirmMsg = trigger === 'campaign_launch_thanks'
+    ? `Send "${label}" to ${eligible} eligible member${eligible === 1 ? '' : 's'}? This will generate discount codes for everyone who doesn't have one yet, then send. Cannot be undone.`
+    : `Send "${label}" to ${eligible} eligible member${eligible === 1 ? '' : 's'}? This cannot be undone.`;
+
+  // Look up whatever template the dispatcher would actually use for this
+  // trigger/campaign (campaign override beats default). Surface subject as
+  // a preview so the merchant sees what they're about to send.
+  const activeTemplate = findActiveTemplateForTriggerCampaignAware(trigger, camp.id);
+  const hasOverride = findCampaignTemplateRow(camp.id, trigger) !== null;
+  const subjectPreview = activeTemplate
+    ? `<div class="campaign-helper" style="margin:4px 0 0; max-width:540px;">
+         <strong>Subject:</strong> ${escapeHtml(activeTemplate.subject)} ${hasOverride ? '<em>(campaign-specific override)</em>' : '<em>(shop default)</em>'}
+       </div>`
+    : `<div class="campaign-helper" style="margin:4px 0 0;color:#b00;">No active template found for this trigger.</div>`;
+
+  const editLink = `<a href="/admin/campaigns/${camp.id}/templates/${trigger}/edit" style="font-size:13px; margin-left:8px;">Preview / edit template</a>`;
+
   return `
-    <form method="POST" action="/admin/campaigns/${camp.id}/send/${trigger}"
-          onsubmit="return confirm(${JSON.stringify(confirmMsg)});"
-          style="display:flex; gap:12px; align-items:center; margin:8px 0;">
-      <button type="submit" class="primary" ${disabled}>Send "${escapeHtml(label)}"</button>
-      <span class="muted">${eligible} eligible</span>
+    <div style="margin:12px 0; padding:8px 0; border-bottom:1px dashed var(--border);">
+      <form method="POST" action="/admin/campaigns/${camp.id}/send/${trigger}"
+            onsubmit="return confirm(${JSON.stringify(confirmMsg)});"
+            style="display:flex; gap:12px; align-items:center;">
+        <button type="submit" class="primary" ${disabled}>Send "${escapeHtml(label)}"</button>
+        <span class="muted">${eligible} eligible</span>
+        ${editLink}
+      </form>
+      ${subjectPreview}
+    </div>
+  `;
+};
+
+// --- Per-campaign template editor ---
+//
+// Edit-template links from the batch-send rows hit /templates/:trigger/edit.
+// If no campaign-specific override exists for that trigger yet, we clone the
+// shop default first, then render the editor on the clone. The Branding-page
+// editor (separate UI) still edits the default; this one edits the
+// campaign's own copy.
+
+const renderTemplateEditor = (camp: CampaignRow, template: ReturnType<typeof findEmailTemplateById>, trigger: string): string => {
+  if (!template) {
+    return `<div class="err">Template not found.</div>`;
+  }
+  return `
+    <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
+    <h2>Edit "${escapeHtml(template.display_name)}"</h2>
+    <p class="muted">Campaign override for trigger <code>${escapeHtml(trigger)}</code>. Editing here does not change the shop default. Sends for this campaign use this version; sends for other campaigns fall back to the default.</p>
+    <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}" class="card">
+      <label>Subject line</label>
+      <input type="text" name="subject" required maxlength="200" value="${escapeHtml(template.subject)}" />
+
+      <label style="margin-top:16px;">Body (HTML)</label>
+      <textarea name="body_html" rows="20" required style="font-family:monospace; font-size:13px;">${escapeHtml(template.body_html)}</textarea>
+      <p class="campaign-helper">Available variables: <code>{{ firstName }}</code>, <code>{{ brandName }}</code>, <code>{{ campaignName }}</code>, <code>{{ reviewLinksHtml }}</code>, <code>{{ discountCode }}</code>, <code>{{ feedbackUrlsHtml }}</code>. Each renders as plain string substitution.</p>
+
+      <label style="margin-top:16px; display:flex; align-items:center; gap:8px; font-weight:normal;">
+        <input type="checkbox" name="is_active" value="1" ${template.is_active === 1 ? 'checked' : ''} />
+        <span>Active (used by the dispatcher)</span>
+      </label>
+
+      <div style="margin-top:24px; display:flex; gap:12px;">
+        <button type="submit" class="primary">Save changes</button>
+        <a href="/admin/campaigns/${camp.id}" style="align-self:center;">Cancel</a>
+        <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}/revert"
+              onsubmit="return confirm('Revert to the shop default? This deletes the campaign-specific override; future sends use the default until you make a new override.');"
+              style="margin-left:auto;">
+          <button type="submit" class="danger">Revert to default</button>
+        </form>
+      </div>
     </form>
   `;
 };
+
+adminCampaigns.get('/:id/templates/:trigger/edit', (c) => {
+  const id = Number(c.req.param('id'));
+  const trigger = c.req.param('trigger');
+  const camp = findCampaignById(id);
+  if (!camp) return c.notFound();
+
+  // Clone-on-first-edit: if the merchant has never edited this template for
+  // this campaign, we copy the current default into a new campaign-scoped row
+  // and open the editor on the clone. Subsequent edits hit the same row.
+  let template = findCampaignTemplateRow(camp.id, trigger);
+  if (!template) {
+    template = cloneTemplateForCampaign({ campaignId: camp.id, trigger });
+    if (!template) {
+      return c.html(adminShell('Edit template', `<div class="err">No default template exists for this trigger. The seeded defaults should have landed at boot — check the logs.</div>`, 'campaigns'), 500);
+    }
+    log('info', 'campaign template cloned from default', {
+      campaignId: camp.id,
+      trigger,
+      templateId: template.id,
+    });
+  }
+
+  return c.html(adminShell(`Edit template — ${camp.name}`, renderTemplateEditor(camp, template, trigger), 'campaigns'));
+});
+
+adminCampaigns.post('/:id/templates/:templateId', async (c) => {
+  const id = Number(c.req.param('id'));
+  const templateId = Number(c.req.param('templateId'));
+  const camp = findCampaignById(id);
+  const template = findEmailTemplateById(templateId);
+  if (!camp || !template) return c.notFound();
+  if (template.campaign_id !== camp.id) {
+    // Defense: a merchant shouldn't be editing a template that belongs to a
+    // different campaign (or no campaign at all) via this route. 403 rather
+    // than a silent edit.
+    return c.json({ error: 'wrong_campaign' }, 403);
+  }
+
+  const form = await c.req.formData();
+  const subject = String(form.get('subject') ?? '').trim();
+  const bodyHtml = String(form.get('body_html') ?? '');
+  const isActive = form.get('is_active') === '1';
+
+  if (!subject) {
+    return c.html(adminShell('Edit template', `<div class="err">Subject can't be empty.</div>`, 'campaigns'), 400);
+  }
+  if (!bodyHtml.trim()) {
+    return c.html(adminShell('Edit template', `<div class="err">Body can't be empty.</div>`, 'campaigns'), 400);
+  }
+
+  updateEmailTemplateById({
+    id: template.id,
+    displayName: template.display_name,
+    subject,
+    bodyHtml,
+    ctaEnabled: template.cta_enabled === 1,
+    ctaLabel: template.cta_label,
+    isActive,
+  });
+  log('info', 'campaign template saved', { campaignId: camp.id, templateId: template.id });
+  return c.redirect(`/admin/campaigns/${camp.id}`);
+});
+
+adminCampaigns.post('/:id/templates/:templateId/revert', (c) => {
+  const id = Number(c.req.param('id'));
+  const templateId = Number(c.req.param('templateId'));
+  const camp = findCampaignById(id);
+  const template = findEmailTemplateById(templateId);
+  if (!camp || !template) return c.notFound();
+  if (template.campaign_id !== camp.id) {
+    return c.json({ error: 'wrong_campaign' }, 403);
+  }
+  // Hard delete the campaign-scoped row. The dispatcher's campaign-aware
+  // lookup will fall through to the shop default on the next send.
+  getDb().prepare('DELETE FROM email_templates WHERE id = ?').run(template.id);
+  log('info', 'campaign template reverted to default', { campaignId: camp.id, templateId });
+  return c.redirect(`/admin/campaigns/${camp.id}`);
+});
 
 adminCampaigns.post('/:id/send/:trigger', async (c) => {
   const id = Number(c.req.param('id'));
@@ -845,53 +1313,44 @@ adminCampaigns.post('/:id/send/:trigger', async (c) => {
 
   const result = await sendCampaignBatch({ campaignId: camp.id, trigger });
 
-  // Bare-bones result page. The admin can click back to the campaign to see
-  // status changes reflected in the queue.
+  const codeErrorsHtml = result.codeErrors && result.codeErrors.length > 0
+    ? `<div class="err" style="margin-top:16px;">
+         <strong>Discount-code generation failed:</strong>
+         <ul>${result.codeErrors.slice(0, 10).map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>
+         ${result.codeErrors.length > 10 ? `<p>… and ${result.codeErrors.length - 10} more (see logs).</p>` : ''}
+       </div>`
+    : '';
+
+  const abortedNotice = result.aborted
+    ? `<div class="err"><strong>Batch aborted — no emails were sent.</strong> Fix the discount-code errors below and try again.</div>`
+    : '';
+
   return c.html(adminShell(`Batch send — ${camp.name}`, `
     <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
-    <h2>Batch complete</h2>
+    <h2>Batch ${result.aborted ? 'aborted' : 'complete'}</h2>
+    ${abortedNotice}
     <div class="card">
       <p><strong>Trigger:</strong> ${escapeHtml(trigger)}</p>
       <p><strong>Eligible:</strong> ${result.total}</p>
       <p><strong>Sent:</strong> ${result.sent}</p>
       <p><strong>Failed:</strong> ${result.failed}</p>
       ${result.skipped > 0 ? `<p><strong>Skipped:</strong> ${result.skipped}</p>` : ''}
+      ${typeof result.codesCreated === 'number' ? `<p><strong>Discount codes generated:</strong> ${result.codesCreated}</p>` : ''}
+      ${codeErrorsHtml}
       <p style="margin-top:16px;"><a href="/admin/campaigns/${camp.id}">Back to campaign</a></p>
     </div>
   `, 'campaigns'));
 });
 
-// --- Discount-code generation + render ---
-
-// Generates a per-member code string. Combines the optional campaign prefix
-// with a short random suffix (8 uppercase alphanumerics, 36^8 = ~2.8 trillion
-// distinct values — collision probability over a campaign of 75 is effectively
-// zero). The full string is stored on the member row and sent to Shopify as
-// the code attribute, so the customer types it verbatim at checkout.
-const generateCodeString = (prefix: string | null): string => {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skip O/0/I/1 for legibility
-  const bytes = crypto.randomBytes(8);
-  let suffix = '';
-  for (let i = 0; i < 8; i += 1) {
-    suffix += alphabet[bytes[i]! % alphabet.length];
-  }
-  return `${prefix ?? ''}${suffix}`;
-};
-
-const countMembersNeedingCodes = (camp: CampaignRow): number => {
-  const members = listMembersByCampaign(camp.id);
-  let n = 0;
-  for (const m of members) {
-    if (m.discount_code) continue;
-    if (m.status !== 'shipped' && m.status !== 'reviewed' && m.status !== 'approved') continue;
-    n += 1;
-  }
-  return n;
-};
+// --- Discount-code render ---
+//
+// Generation is no longer a separate admin action — codes are created
+// automatically as part of the launch_thanks email send (see
+// dispatch-campaign.ts). The card here just shows the stats and the
+// post-launch cleanup buttons.
 
 const renderDiscountCard = (camp: CampaignRow): string => {
   const stats: CodeStats = codeStats(camp.id);
-  const missing = countMembersNeedingCodes(camp);
   const configured = camp.discount_percent !== null && camp.discount_expires_days !== null;
 
   const statsHtml = `
@@ -906,20 +1365,9 @@ const renderDiscountCard = (camp: CampaignRow): string => {
     ? `<p><strong>Tracked revenue from redeemed codes:</strong> $${stats.unredeemed_revenue.toFixed(2)}</p>`
     : '';
 
-  let actionHtml = '';
-  if (!configured) {
-    actionHtml = `<p class="muted">Discount terms aren't configured. <a href="/admin/campaigns/${camp.id}/edit">Edit the campaign</a> to set a percentage and expiry.</p>`;
-  } else if (missing === 0) {
-    actionHtml = `<p class="muted">All eligible members already have codes.</p>`;
-  } else {
-    const confirmMsg = `Generate Shopify discount codes for ${missing} member${missing === 1 ? '' : 's'}? Each code is ${camp.discount_percent}% off, single-use, expires in ${camp.discount_expires_days} days.`;
-    actionHtml = `
-      <form method="POST" action="/admin/campaigns/${camp.id}/generate-discount-codes"
-            onsubmit="return confirm(${JSON.stringify(confirmMsg)});">
-        <button type="submit" class="primary">Generate ${missing} discount code${missing === 1 ? '' : 's'}</button>
-      </form>
-    `;
-  }
+  const configMsg = !configured
+    ? `<p class="campaign-helper">Discount terms aren't configured. <a href="/admin/campaigns/${camp.id}/edit">Edit the campaign</a> to enable a launch discount.</p>`
+    : `<p class="campaign-helper">Codes are ${camp.discount_percent}% off, single-use, scoped to one customer record each, and expire ${camp.discount_expires_days} days after they're issued. They're generated automatically when you send the "Launch thanks" email — no separate step. Redemptions are tracked via the orders/paid webhook.</p>`;
 
   const cleanupHtml = renderCleanupButtons(camp, stats);
 
@@ -928,9 +1376,8 @@ const renderDiscountCard = (camp: CampaignRow): string => {
       <h3 style="margin-top:0;">Discount codes</h3>
       ${statsHtml}
       ${revenueHtml}
-      ${actionHtml}
+      ${configMsg}
       ${cleanupHtml}
-      <p class="muted" style="margin-top:12px;">Codes are single-use, per-member, expire ${camp.discount_expires_days ?? '—'} days after issue. They appear in Shopify admin → Discounts. Redemption is tracked automatically via the orders/paid webhook.</p>
     </div>
   `;
 };
@@ -1017,95 +1464,6 @@ adminCampaigns.post('/:id/cleanup-codes', async (c) => {
   `, 'campaigns'));
 });
 
-adminCampaigns.post('/:id/generate-discount-codes', async (c) => {
-  const id = Number(c.req.param('id'));
-  const camp = findCampaignById(id);
-  if (!camp) return c.notFound();
-
-  if (camp.discount_percent === null || camp.discount_expires_days === null) {
-    return c.html(adminShell('Generate discount codes', `
-      <div class="err">Discount percentage and expiry are required. Edit the campaign to set them.</div>
-      <p><a href="/admin/campaigns/${camp.id}">Back</a></p>
-    `, 'campaigns'), 400);
-  }
-
-  // Eligibility: members past approved status (so they've been physically
-  // shipped to or have already engaged), without an existing code. Approved-
-  // but-not-yet-shipped members are also accepted so a merchant can pre-
-  // generate codes if they want — the code's start time is "now" and the
-  // expiry counts from there.
-  const members = listMembersByCampaign(camp.id);
-  const eligible = members.filter((m) =>
-    !m.discount_code &&
-    (m.status === 'approved' || m.status === 'shipped' || m.status === 'reviewed')
-  );
-
-  if (eligible.length === 0) {
-    return c.redirect(`/admin/campaigns/${camp.id}`);
-  }
-
-  const startsAt = new Date();
-  const endsAt = new Date(startsAt.getTime() + camp.discount_expires_days * 86400 * 1000);
-  const startsAtIso = startsAt.toISOString();
-  const endsAtIso = endsAt.toISOString();
-
-  let created = 0;
-  let failed = 0;
-  const errors: string[] = [];
-
-  for (const m of eligible) {
-    const code = generateCodeString(camp.discount_code_prefix);
-    try {
-      const result = await createCampaignDiscountCode({
-        code,
-        title: `${camp.name} — Member ${m.id}`,
-        percentageOff: camp.discount_percent,
-        startsAtIso,
-        endsAtIso,
-      });
-      setMemberDiscountCode({ memberId: m.id, code, discountId: result.discountId });
-      created += 1;
-    } catch (err) {
-      failed += 1;
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`Member ${m.id}: ${msg}`);
-      log('error', 'campaign discount code create failed', {
-        campaignId: camp.id,
-        memberId: m.id,
-        error: msg,
-      });
-      // Stop the batch if too many fail in a row — Shopify rate limits or
-      // a missing scope would otherwise burn through every member. Three
-      // consecutive failures is a reasonable canary.
-      if (failed >= 3 && created === 0) break;
-    }
-  }
-
-  log('info', 'campaign discount codes generated', {
-    campaignId: camp.id,
-    created,
-    failed,
-  });
-
-  const errorList = errors.length > 0
-    ? `<div class="err" style="margin-top:16px;">
-        <strong>${errors.length} error${errors.length === 1 ? '' : 's'}:</strong>
-        <ul>${errors.slice(0, 10).map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>
-        ${errors.length > 10 ? `<p>… and ${errors.length - 10} more (see logs).</p>` : ''}
-      </div>`
-    : '';
-
-  return c.html(adminShell(`Discount codes — ${camp.name}`, `
-    <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
-    <h2>Discount code generation complete</h2>
-    <div class="card">
-      <p><strong>Created:</strong> ${created}</p>
-      <p><strong>Failed:</strong> ${failed}</p>
-      ${errorList}
-      <p style="margin-top:16px;"><a href="/admin/campaigns/${camp.id}">Back to campaign</a></p>
-    </div>
-  `, 'campaigns'));
-});
 
 // --- Capacity-warning UI helpers ---
 
@@ -1135,35 +1493,57 @@ adminCampaigns.post('/:id/reset-capacity-warning', (c) => {
 
 const renderFeedbackCard = (camp: CampaignRow): string => {
   const forms = listFeedbackFormsForCampaign(camp.id);
+  const products = parseProductSet(camp);
+  // Build a lookup so a form tied to a product can show that product's name
+  // (or fall back to the bare id if the product isn't in the cache).
+  const productNamesById = new Map<string, string>();
+  for (const cached of listCachedProducts()) {
+    productNamesById.set(cached.shopifyProductId, cached.title);
+  }
+
   const list = forms.length === 0
-    ? '<p class="muted">No feedback forms yet.</p>'
+    ? '<p class="campaign-helper" style="margin:0;">No feedback forms yet. Create one below — each form gets its own anonymous URL you can include in the shipped or reminder emails.</p>'
     : `<ul style="margin:0; padding-left:20px;">${forms.map((f) => {
         const responses = countResponsesForForm(f.id);
         const scope = f.shopify_product_id
-          ? `product ${escapeHtml(f.shopify_product_id)}`
+          ? (productNamesById.get(f.shopify_product_id) ?? `product ${f.shopify_product_id}`)
           : 'campaign-wide';
-        return `<li>
+        return `<li style="margin:4px 0;">
           <a href="/admin/campaigns/${camp.id}/feedback/${f.id}">${escapeHtml(f.title)}</a>
-          <span class="muted">— ${scope}, ${responses} response${responses === 1 ? '' : 's'}</span>
+          <span class="muted">— ${escapeHtml(scope)}, ${responses} response${responses === 1 ? '' : 's'}</span>
         </li>`;
       }).join('')}</ul>`;
+
+  // Product dropdown for the new-form action, populated from the campaign's
+  // product set so the merchant picks from products already in this campaign
+  // rather than typing raw ids.
+  const productOptions = products.length === 0
+    ? '<option value="">(no products in this campaign yet — add some in Edit settings)</option>'
+    : products.map((p) => {
+        const name = productNamesById.get(p.shopifyProductId) ?? `Product ${p.shopifyProductId}`;
+        return `<option value="${escapeHtml(p.shopifyProductId)}">${escapeHtml(name)}</option>`;
+      }).join('');
 
   return `
     <div class="card">
       <h3 style="margin-top:0;">Feedback forms</h3>
       ${list}
       <form method="POST" action="/admin/campaigns/${camp.id}/feedback" style="margin-top:16px;">
-        <label>New form title</label>
+        <label>Form title</label>
         <input type="text" name="title" required maxlength="160" placeholder="e.g., How did you like Product A?" />
-        <label>Tied to a specific product? (optional Shopify product id)</label>
-        <input type="text" name="shopify_product_id" maxlength="64" placeholder="leave blank for campaign-wide feedback" />
+        <label style="margin-top:12px;">Scope</label>
+        <select name="shopify_product_id">
+          <option value="">Campaign-wide (not tied to a specific product)</option>
+          ${productOptions}
+        </select>
+        <p class="campaign-helper">Pick a product to make a per-product feedback form, or leave on "Campaign-wide" for general feedback. Create one form per product for product-specific reporting.</p>
         <label>Intro text (optional)</label>
         <textarea name="intro_text" rows="2" placeholder="Tell respondents what this feedback will be used for."></textarea>
         <div style="margin-top:12px;">
           <button type="submit">Create feedback form</button>
         </div>
       </form>
-      <p class="muted" style="margin-top:12px;">Forms get a shared URL — anonymous by design. Embed in a Shopify Page with <code>&lt;div data-campaign-feedback-form="&lt;key&gt;"&gt;&lt;/div&gt;</code>.</p>
+      <p class="campaign-helper" style="margin-top:12px;">Each form gets a hosted URL on our app — no Shopify Page setup required. The shipped-notification and review-reminder emails include links to every form automatically.</p>
     </div>
   `;
 };
@@ -1220,12 +1600,16 @@ adminCampaigns.get('/:id/feedback/:formId', (c) => {
       }).join('')}</ol>`;
 
   const embedSnippet = `<div data-campaign-feedback-form="${form.access_key}"></div>`;
+  const hostedPreviewUrl = `/feedback/${encodeURIComponent(form.access_key)}`;
 
   return c.html(adminShell(`Feedback — ${form.title}`, `
     <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
     <h2>${escapeHtml(form.title)}</h2>
     <p class="muted">${responseCount} response${responseCount === 1 ? '' : 's'}${form.shopify_product_id ? ` · tied to product ${escapeHtml(form.shopify_product_id)}` : ' · campaign-wide'}</p>
-    ${responseCount > 0 ? `<p><a href="/admin/campaigns/${camp.id}/feedback/${form.id}/report">View report →</a></p>` : ''}
+    <p>
+      <a href="${hostedPreviewUrl}" target="_blank" rel="noopener" style="margin-right:12px;">Preview public form ↗</a>
+      ${responseCount > 0 ? `<a href="/admin/campaigns/${camp.id}/feedback/${form.id}/report">View report →</a>` : ''}
+    </p>
 
     <div class="card">
       <h3 style="margin-top:0;">Questions</h3>
@@ -1258,10 +1642,15 @@ adminCampaigns.get('/:id/feedback/:formId', (c) => {
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0;">Public form</h3>
-      <p>To collect responses, create a Page in Shopify admin and paste:</p>
-      <pre style="background:var(--surface-alt); padding:12px; border-radius:4px; overflow-x:auto;">${escapeHtml(embedSnippet)}</pre>
-      <p class="muted">Send the URL of the resulting Shopify Page to your campaign participants — typically as part of the shipped-notification or review-reminder emails.</p>
+      <h3 style="margin-top:0;">Public form URL</h3>
+      <p>Share this URL with participants (it's already embedded in the shipped-notification and review-reminder emails for this campaign):</p>
+      <pre style="background:var(--surface-alt); padding:12px; border-radius:4px; overflow-x:auto;">${escapeHtml(`${config.publicUrl.replace(/\/+$/, '')}${hostedPreviewUrl}`)}</pre>
+      <p class="campaign-helper">Hosted on our app — works out of the box, no Shopify setup needed.</p>
+      <details style="margin-top:12px;">
+        <summary>Optional: embed in a Shopify Page instead</summary>
+        <p>For merchants who want the feedback form inside their store, create a Page in Shopify admin and paste this snippet (requires the reviews widget script to be loaded site-wide):</p>
+        <pre style="background:var(--surface-alt); padding:12px; border-radius:4px; overflow-x:auto;">${escapeHtml(embedSnippet)}</pre>
+      </details>
     </div>
 
     <div class="card" style="background:var(--surface-alt);">
@@ -1335,7 +1724,7 @@ const renderAggregateBlock = (q: FeedbackQuestionRow, agg: QuestionAggregate): s
     const bars = agg.distribution.map((count, i) => {
       const width = Math.round((count / max) * 100);
       return `<div style="display:flex; align-items:center; gap:8px; margin:4px 0;">
-        <span style="width:32px; text-align:right;">${i + 1}★</span>
+        <span style="width:32px; text-align:right;">${i + 1}</span>
         <div style="flex:1; background:#eee; border-radius:3px; height:14px; position:relative;">
           <div style="background:var(--accent); width:${width}%; height:100%; border-radius:3px;"></div>
         </div>
