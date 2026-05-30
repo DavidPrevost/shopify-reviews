@@ -772,6 +772,8 @@ These were either added during the build as user-priority items or evolved from 
 
 ### What's left to ship before live-store launch
 
+**Run the pre-deployment checklist in §17 before each of these steps that touches state.** Once the live store is collecting real reviews, "wipe and re-seed" stops being a valid recovery — the checklist is what prevents the same kind of avoidable failures we hit during dev.
+
 1. Step 13 — Yotpo cleanup on the live brand store (theme code edits + metafield removal). Risky; walked through with owner, not autonomous.
 2. Step 14 — widget integration on the live (Trademark 1.7.3) theme. Different file paths than the dev-store Dawn-derivative theme.
 3. Install Reviews app on the live store (the dev.shopify.com Collaboration wrinkle — the live store is not currently in the Teraclay org).
@@ -878,3 +880,84 @@ These were considered and turned down. Don't re-propose unless the user brings t
 - **Global Claude preferences**: `~/.claude/CLAUDE.md` — communication-style rules (no AskUserQuestion, plain language, lead with decisions).
 
 When this document and any of those references conflict, **this document wins** — it's the actively-maintained plan. Update it as the project evolves; do not let it drift from reality.
+
+---
+
+## 17. Pre-deployment Checklist
+
+Once the live store is collecting real reviews, the recovery options narrow sharply — `rm data/reviews.db` stops being a valid answer. This checklist is what protects against the avoidable failures we've already seen on dev (FK-orphan migration crash, 2026-05-30) and a few we haven't, but obviously could.
+
+Use it in three contexts: **A** before any deploy that includes a migration, **B** specifically before the live-store launch (one time, additionally), and **C** after every deploy to confirm the system actually came up the way we expected.
+
+### A. Before any deploy that includes a migration
+
+Applies to dev *and* prod. Cheap on dev (the data is disposable) but builds the muscle for prod, where it's load-bearing.
+
+1. **Snapshot the DB before the deploy.** On Mercury:
+   ```bash
+   cd /opt/stacks/shopify-reviews-{dev,prod}
+   sudo sqlite3 data/reviews.db ".backup data/reviews.db.pre-$(date +%Y%m%d-%H%M).bak"
+   ```
+   This is a point-in-time copy you can restore in seconds if the migration goes sideways. Do this *every* time, regardless of confidence — it's 30 seconds of insurance.
+
+2. **Run `PRAGMA foreign_key_check`** against the *current* DB before the migration:
+   ```bash
+   sudo sqlite3 data/reviews.db "PRAGMA foreign_key_check;"
+   ```
+   Empty output = clean. Any output is `(table, rowid, parent_table, fkid)` per orphan — a child row whose FK target is missing. The dev DB had orphans accumulated from months of testing that the rebuild surfaced on COMMIT; the live DB could too, depending on how Shopify webhooks and our own moderation flows have interacted over time.
+
+3. **For each orphan, decide repair-or-delete.** Usually delete — an orphan child whose parent is gone has no recoverable referent. Run the delete *before* the migration deploys:
+   ```sql
+   -- Example: delete email_events whose customer is gone
+   DELETE FROM email_events WHERE customer_id NOT IN (SELECT id FROM customers);
+   ```
+   Pre-clean every reported violation. If anything's unclear (e.g., an orphan that's evidence of a bug we should investigate), pause the deploy.
+
+4. **Dry-run the migration on a copy** (prod especially):
+   ```bash
+   sudo cp data/reviews.db /tmp/dryrun.db
+   sudo sqlite3 /tmp/dryrun.db < src/db/migrations/0XX_whatever.sql
+   sudo sqlite3 /tmp/dryrun.db "PRAGMA foreign_key_check;"
+   ```
+   The migration should apply without error and the post-check should be empty. If either fails, the migration isn't ready.
+
+5. **Local pre-flight before pushing**: `npm run typecheck && npm run build` — non-negotiable. The migration file is copied to `dist/` by `scripts/copy-assets.mjs`, so a successful build is also a successful migration-file copy.
+
+### B. Before the live-store launch (additional, one-time)
+
+All of §A, plus:
+
+6. **Set the go-live cadence guard** (Settings → Cadence → "Set cutoff to now") *immediately after* the migration deploys on prod. This is what stops the dispatcher from emailing every historical customer the first time it runs. See §10 "Go-live guard."
+
+7. **Have a written outreach plan for the pre-existing customers** (the ~half-dozen who bought before launch). Manual emails, not the dispatcher. The cutoff guard suppresses the auto-path; this is the replacement.
+
+8. **Verify the prod `.env`** has every required value: `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_WEBHOOK_SECRET`, `EMAIL_TOKEN_SECRET`, `SMTP_*`, `BRAND_NAME`, `PUBLIC_URL`, `STOREFRONT_ORIGIN`, `DEV_NOTIFICATION_EMAIL`. **Generate fresh secrets** (`EMAIL_TOKEN_SECRET` especially) — do not reuse dev values.
+
+9. **Verify the OAuth install completed** for the live shop: `sudo sqlite3 data/reviews.db "SELECT shop_domain, length(access_token), access_scopes FROM shops;"` — expect a non-null token length and the right scope set.
+
+10. **Test-fire each subscribed webhook** from the Shopify admin's webhook test tool. Confirm each one appears in the logs with `"webhook received"` and that the relevant DB row updates.
+
+11. **Confirm DNS + Caddy routing** for the live host: `curl -I https://reviews.<brand>/health` returns 200 from outside the tailnet.
+
+12. **Confirm the backup pipeline** runs successfully against the new prod stack: `sudo docker compose exec backup /scripts/backup.sh` and check the snapshot lands on Pebbles. Don't wait for the first scheduled run to discover backups are broken.
+
+### C. After every deploy (dev or prod)
+
+Cheap to run, catches the obvious failures while the deploy is fresh in mind.
+
+13. **`curl <public-url>/health` returns `{"status":"ok"}`** — full chain works (relay → Tailscale → container).
+14. **Migrations applied cleanly**: `sudo docker compose logs --tail=100 reviews-app | grep -i 'migration\|error'` — every expected migration shows as applied, no errors after.
+15. **Scheduler registered**: same log search, look for `"dispatcher scheduler registered"`.
+16. **Click-through smoke test**: load `/admin` and at least one sub-tab (Dashboard, Reviews, Branding); load a storefront product page and confirm the widget renders.
+17. **For prod after the first webhook**: confirm the corresponding DB row appears (e.g., a test order produces a `purchases` row).
+18. **`PRAGMA foreign_key_check` again after the migration**, just to confirm the new schema is clean.
+
+### Rollback
+
+The "if it goes wrong" answer changes with the kind of failure:
+
+- **Migration crashed mid-run**: SQLite rolled back the transaction — the DB is in its pre-migration state. Investigate, fix, redeploy.
+- **Migration succeeded but code is broken**: restore the snapshot from §A.1, `docker compose down`, redeploy the prior code. The snapshot guarantees this works in seconds.
+- **Migration succeeded, code works, but something subtle is wrong**: don't rush a rollback — the prior snapshot is missing post-deploy writes. Stop the dispatcher (panic button), diagnose, hotfix forward.
+
+The first two cases are why §A.1 (snapshot before deploy) is non-negotiable.
