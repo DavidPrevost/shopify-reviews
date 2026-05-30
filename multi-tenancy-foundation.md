@@ -117,6 +117,17 @@ Resolve `X-Shopify-Shop-Domain` → `shop_id` on incoming webhooks (returns the 
 
 Dev data is disposable, so the safety net is trivial now: snapshot `reviews.db`, apply, run `PRAGMA foreign_key_check` + row-count checks, click through admin + a storefront submit. If anything's off, wipe and re-seed. This is the entire reason to do it now rather than later.
 
+**Real finding from the dev deploy (2026-05-30):** the rebuild aborted with `SQLITE_CONSTRAINT_FOREIGNKEY` at COMMIT because the dev DB had accumulated **orphan rows from earlier testing** — child rows (`purchases`/`reviews`/`email_events`) referencing customer ids that no longer existed. Normal `foreign_keys = ON` enforces on new writes but doesn't retroactively audit pre-existing rows, so these had been silently tolerated for months; the deferred FK check at COMMIT was the first audit and surfaced them. On dev the fix was `mv data/reviews.db data/reviews.db.preupgrade-broken` + restart — disposable data, ~30 seconds, working theory confirmed.
+
+**Prod prerequisite (when this migration ever runs against the live store):** an orphan-cleanup pass is mandatory *before* the migration deploys. The checklist:
+
+1. On a *copy* of the prod DB (never the live one): `sqlite3 reviews.db "PRAGMA foreign_key_check;"`. Output is `(table, rowid, parent_table, fkid)` per violation.
+2. For each violation: decide repair-or-delete (likely delete — orphan child rows whose parent is gone aren't recoverable).
+3. Apply the cleanup to the live DB during the deploy window (small `DELETE` per orphan, transactional, backed-up first).
+4. Then run migration 016. The deferred FK check will now pass.
+
+Without this pre-pass, the migration aborts on prod the same way it did on dev — except the recovery isn't "rm the DB."
+
 ---
 
 ## Next sprint — embedded admin via App Bridge (on dev only)
