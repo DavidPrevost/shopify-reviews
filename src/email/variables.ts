@@ -29,6 +29,20 @@ export const EMAIL_VARIABLES: EmailVariable[] = [
   { key: 'unsubscribeUrl', label: 'Unsubscribe link', description: 'One-click link to stop review-request emails.' },
   { key: 'retractionReason', label: 'Reason a review was removed', description: 'Customer-friendly reason text, used in the “Review removed” email.' },
   { key: 'logoUrl', label: 'Logo image URL', description: 'URL of your uploaded/synced logo — use it as the src of an <img> if you want the logo inside the body (it already appears in the header).' },
+  { key: 'campaignName', label: 'Campaign name', description: 'The campaign\'s display name. Available in campaign-triggered emails.' },
+  {
+    key: 'reviewLinksHtml',
+    label: 'Campaign review links',
+    description: 'Inserts the participant\'s personalized review-link buttons (one per product in the campaign\'s sample pack). Used in the shipped-notification and review-reminder emails.',
+    expands: true,
+  },
+  { key: 'discountCode', label: 'Discount code', description: 'The per-participant discount code issued for the campaign. Used in the launch-thanks email.' },
+  {
+    key: 'feedbackUrlsHtml',
+    label: 'Campaign feedback links',
+    description: 'Inserts the participant\'s links to the campaign\'s feedback forms. Used in the shipped-notification and review-reminder emails when feedback forms are configured.',
+    expands: true,
+  },
 ];
 
 export const EMAIL_VARIABLE_KEYS = new Set(EMAIL_VARIABLES.map((v) => v.key));

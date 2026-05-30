@@ -9,6 +9,7 @@
 // they don't need authentication and we don't need to pay the Shopify-edge
 // round trip for them.
 
+import crypto from 'node:crypto';
 import { Hono } from 'hono';
 import {
   findCustomerByShopifyId,
@@ -22,11 +23,33 @@ import {
   setSetting,
   type ReviewRow,
 } from '../db/queries.js';
+import {
+  findCampaignBySlug,
+  getActiveTermsVersion,
+  findTermsVersion,
+  findCampaignMemberByEmail,
+  insertCampaignMember,
+  parseProductSet,
+  checkCapacityAndAutoClose,
+} from '../db/campaigns.js';
+import {
+  findFeedbackFormByAccessKey,
+  listFeedbackQuestionsForForm,
+  parseQuestionOptions,
+  submitFeedbackResponse,
+  isFeedbackQuestionType,
+  type FeedbackQuestionRow,
+} from '../db/feedback.js';
+import { notifyOnCampaignCapacity } from '../email/notify-campaign-capacity.js';
 import { verifyAppProxySignature } from '../shopify/app-proxy-verify.js';
 import { fetchShopifyCustomer } from '../shopify/customer-info.js';
 import { sanitizeReviewText } from '../lib/profanity.js';
 import { isReviewsPaused } from '../lib/panic.js';
 import { notifyOnNewReview } from '../email/notify-new-review.js';
+import { sendTemplateEmailByTrigger } from '../email/send-template.js';
+import { escapeHtml } from '../email/render.js';
+import { take as rateLimitTake } from '../lib/rate-limit.js';
+import { config } from '../config.js';
 import { log } from '../lib/logger.js';
 import { nowSec } from '../lib/time.js';
 
@@ -320,6 +343,369 @@ proxy.post('/customer/review/:id', async (c) => {
   });
 
   return c.json({ ok: true, reviewId });
+});
+
+// =========================================================================
+// Campaigns — public application form
+//
+// The storefront-side widget hits these via /apps/reviews/campaigns/:slug/* ;
+// Shopify forwards as /proxy/campaigns/:slug/* with HMAC params (verified by
+// the proxy.use('*', ...) middleware above). No customer login required —
+// applications are open to any storefront visitor.
+// =========================================================================
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const APPLY_RATE_LIMIT = 10;      // requests per IP
+const APPLY_RATE_WINDOW_SEC = 60; // per minute
+
+const hashIp = (ip: string): string =>
+  crypto.createHash('sha256').update(ip).digest('hex').slice(0, 32);
+
+const getClientIp = (c: import('hono').Context): string => {
+  // The relay chain (Shopify edge → GCP Caddy → Mercury) may set any of these.
+  // We prefer the most-specific. If everything fails, fall back to a literal
+  // so rate-limit buckets still apply globally.
+  return (
+    c.req.header('cf-connecting-ip') ??
+    c.req.header('x-real-ip') ??
+    (c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? '') ??
+    'unknown'
+  ) || 'unknown';
+};
+
+// GET /proxy/campaigns/:slug/config — returns the data the widget needs to
+// render the application form. 404 unless the campaign is currently
+// recruiting; that way a paused/completed campaign's form url just shows
+// "applications closed" instead of leaking the campaign config.
+proxy.get('/campaigns/:slug/config', (c) => {
+  const slug = c.req.param('slug');
+  const camp = findCampaignBySlug(slug);
+  if (!camp) return c.json({ error: 'not_found' }, 404);
+
+  if (camp.status !== 'recruiting') {
+    return c.json({
+      state: 'closed',
+      campaignName: camp.name,
+    });
+  }
+
+  const terms = getActiveTermsVersion(camp.id);
+  if (!terms) return c.json({ error: 'no_terms' }, 500);
+
+  return c.json({
+    state: 'open',
+    campaignName: camp.name,
+    slug: camp.slug,
+    productCount: parseProductSet(camp).length,
+    terms: {
+      versionId: terms.id,
+      versionNumber: terms.version_number,
+      body: terms.body_text,
+    },
+  });
+});
+
+// POST /proxy/campaigns/:slug/apply — submit application. Idempotent at the
+// email level: a duplicate email returns a friendly 200 with `already_applied`
+// rather than creating a second row.
+proxy.post('/campaigns/:slug/apply', async (c) => {
+  const slug = c.req.param('slug');
+
+  const ip = getClientIp(c);
+  if (!rateLimitTake(`campaign-apply:${ip}`, APPLY_RATE_LIMIT, APPLY_RATE_WINDOW_SEC)) {
+    log('warn', 'campaign apply rate-limited', { slug, ip });
+    return c.json({ error: 'rate_limited' }, 429);
+  }
+
+  const camp = findCampaignBySlug(slug);
+  if (!camp) return c.json({ error: 'not_found' }, 404);
+  if (camp.status !== 'recruiting') {
+    return c.json({ error: 'applications_closed' }, 409);
+  }
+
+  const body = await c.req.json().catch(() => null) as {
+    firstName?: string;
+    lastName?: string;
+    email?: string;
+    shipping?: {
+      name?: string;
+      street1?: string;
+      street2?: string;
+      city?: string;
+      state?: string;
+      postalCode?: string;
+      country?: string;
+    };
+    message?: string;
+    termsVersionId?: number;
+  } | null;
+  if (!body || typeof body !== 'object') {
+    return c.json({ error: 'invalid_body' }, 400);
+  }
+
+  const firstName = String(body.firstName ?? '').trim().slice(0, 80);
+  const lastName = String(body.lastName ?? '').trim().slice(0, 80);
+  const email = String(body.email ?? '').trim().toLowerCase().slice(0, 254);
+  const message = String(body.message ?? '').trim().slice(0, 2000);
+  const termsVersionId = Number(body.termsVersionId);
+
+  if (!firstName) return c.json({ error: 'missing_first_name' }, 400);
+  if (!lastName) return c.json({ error: 'missing_last_name' }, 400);
+  if (!email || !EMAIL_RE.test(email)) return c.json({ error: 'invalid_email' }, 400);
+
+  // Terms-version check: the form must submit a version that matches the
+  // currently-active one. If the merchant publishes a new version while the
+  // form is open in someone's browser, the submission is rejected and the
+  // applicant has to reload. Tradeoff: tiny inconvenience for occasional
+  // edits in exchange for a clean accepted-version audit trail.
+  const activeTerms = getActiveTermsVersion(camp.id);
+  if (!activeTerms || !Number.isInteger(termsVersionId)) {
+    return c.json({ error: 'missing_terms_version' }, 400);
+  }
+  if (activeTerms.id !== termsVersionId) {
+    return c.json({ error: 'terms_changed', detail: 'Please reload the form — the terms have been updated.' }, 409);
+  }
+  const termsVersion = findTermsVersion(termsVersionId);
+  if (!termsVersion || termsVersion.campaign_id !== camp.id) {
+    return c.json({ error: 'invalid_terms_version' }, 400);
+  }
+
+  // Shipping address — required (these are physical sample packs). We capture
+  // every field that's present; only address1, city, postal_code, country are
+  // hard-required at this layer.
+  const shipping = body.shipping ?? {};
+  const shippingName = String(shipping.name ?? '').trim().slice(0, 160) || `${firstName} ${lastName}`.trim();
+  const street1 = String(shipping.street1 ?? '').trim().slice(0, 200);
+  const street2 = String(shipping.street2 ?? '').trim().slice(0, 200);
+  const city = String(shipping.city ?? '').trim().slice(0, 100);
+  const state = String(shipping.state ?? '').trim().slice(0, 100);
+  const postalCode = String(shipping.postalCode ?? '').trim().slice(0, 24);
+  const country = String(shipping.country ?? '').trim().slice(0, 100);
+
+  if (!street1 || !city || !postalCode || !country) {
+    return c.json({ error: 'incomplete_shipping_address' }, 400);
+  }
+
+  // Dedupe by email within the campaign. Friendly 200 — the applicant doesn't
+  // get a clear signal whether they already applied (which would be a small
+  // enumeration surface), but the second submission is a no-op.
+  if (findCampaignMemberByEmail(camp.id, email)) {
+    log('info', 'campaign duplicate application ignored', { campaignId: camp.id, email });
+    return c.json({ ok: true, already_applied: true });
+  }
+
+  const applicationData = {
+    firstName,
+    lastName,
+    email,
+    message: message || null,
+  };
+  const shippingAddress = {
+    name: shippingName,
+    street1,
+    street2: street2 || null,
+    city,
+    state: state || null,
+    postalCode,
+    country,
+  };
+
+  const memberId = insertCampaignMember({
+    campaignId: camp.id,
+    applicationDataJson: JSON.stringify(applicationData),
+    shippingAddressJson: JSON.stringify(shippingAddress),
+    termsVersionId: activeTerms.id,
+    ipHash: hashIp(ip),
+    userAgent: (c.req.header('user-agent') ?? '').slice(0, 500) || null,
+  });
+
+  log('info', 'campaign application accepted', { campaignId: camp.id, memberId, email });
+
+  // Fire-and-forget confirmation email. Failures are logged inside the send
+  // path; we don't surface them to the applicant since the application IS
+  // accepted regardless of whether the email arrives.
+  void sendTemplateEmailByTrigger({
+    trigger: 'campaign_application_confirmation',
+    to: email,
+    context: {
+      firstName: escapeHtml(firstName),
+      campaignName: escapeHtml(camp.name),
+      brandName: config.email.brandName,
+    },
+  }).catch((err) => {
+    log('warn', 'campaign confirmation email send failed', {
+      campaignId: camp.id,
+      memberId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
+  // Capacity check: atomically auto-closes the campaign if target_size has
+  // been reached, and arms a one-shot capacity warning when the threshold is
+  // crossed. The warning email is sent fire-and-forget; the auto-close is
+  // already persisted by this point.
+  const capacity = checkCapacityAndAutoClose(camp.id);
+  if (capacity.autoClosed) {
+    log('info', 'campaign auto-closed on target reached', {
+      campaignId: camp.id,
+      activeCount: capacity.activeCount,
+      targetSize: camp.target_size,
+    });
+  }
+  if (capacity.thresholdCrossed && camp.capacity_warning_threshold !== null) {
+    void notifyOnCampaignCapacity({
+      campaignId: camp.id,
+      campaignName: camp.name,
+      activeCount: capacity.activeCount,
+      targetSize: camp.target_size,
+      threshold: camp.capacity_warning_threshold,
+    }).catch((err) => {
+      log('warn', 'campaign capacity notification failed', {
+        campaignId: camp.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  return c.json({ ok: true });
+});
+
+// =========================================================================
+// Campaign feedback forms — public read + submit
+//
+// Access via shared key in the URL. No customer login required (anonymous by
+// design); optional name/email on submission.
+// =========================================================================
+
+const FEEDBACK_RATE_LIMIT = 20;       // per IP
+const FEEDBACK_RATE_WINDOW_SEC = 60;
+
+interface PublicFeedbackQuestion {
+  id: number;
+  type: FeedbackQuestionRow['type'];
+  prompt: string;
+  required: boolean;
+  options: string[];
+}
+
+const publicQuestion = (q: FeedbackQuestionRow): PublicFeedbackQuestion => ({
+  id: q.id,
+  type: q.type,
+  prompt: q.prompt,
+  required: q.required === 1,
+  options: parseQuestionOptions(q),
+});
+
+proxy.get('/campaigns/feedback/:key/config', (c) => {
+  const key = c.req.param('key');
+  const form = findFeedbackFormByAccessKey(key);
+  if (!form) return c.json({ error: 'not_found' }, 404);
+
+  const questions = listFeedbackQuestionsForForm(form.id);
+  return c.json({
+    title: form.title,
+    introText: form.intro_text,
+    questions: questions.map(publicQuestion),
+  });
+});
+
+proxy.post('/campaigns/feedback/:key/submit', async (c) => {
+  const key = c.req.param('key');
+  const ip = getClientIp(c);
+  if (!rateLimitTake(`feedback-submit:${ip}`, FEEDBACK_RATE_LIMIT, FEEDBACK_RATE_WINDOW_SEC)) {
+    return c.json({ error: 'rate_limited' }, 429);
+  }
+
+  const form = findFeedbackFormByAccessKey(key);
+  if (!form) return c.json({ error: 'not_found' }, 404);
+
+  const body = await c.req.json().catch(() => null) as {
+    optionalName?: string;
+    optionalEmail?: string;
+    answers?: Array<{ questionId?: number; value?: unknown }>;
+  } | null;
+  if (!body || typeof body !== 'object' || !Array.isArray(body.answers)) {
+    return c.json({ error: 'invalid_body' }, 400);
+  }
+
+  // Load questions once and key by id so we can validate per-answer.
+  const questions = listFeedbackQuestionsForForm(form.id);
+  const byId = new Map<number, FeedbackQuestionRow>();
+  for (const q of questions) byId.set(q.id, q);
+
+  const answers: Array<{
+    questionId: number;
+    valueText?: string | null;
+    valueNumber?: number | null;
+    valueJson?: string | null;
+  }> = [];
+  const answered = new Set<number>();
+
+  for (const a of body.answers) {
+    if (!a || typeof a !== 'object') continue;
+    const qid = Number(a.questionId);
+    const question = byId.get(qid);
+    if (!question || !isFeedbackQuestionType(question.type)) continue;
+
+    if (question.type === 'rating_1_5') {
+      const n = Number(a.value);
+      if (!Number.isFinite(n) || n < 1 || n > 5) {
+        if (question.required === 1) return c.json({ error: 'invalid_rating', questionId: qid }, 400);
+        continue;
+      }
+      answers.push({ questionId: qid, valueNumber: Math.round(n) });
+      answered.add(qid);
+    } else if (question.type === 'single_choice') {
+      const v = typeof a.value === 'string' ? a.value : '';
+      const valid = parseQuestionOptions(question).includes(v);
+      if (!valid) {
+        if (question.required === 1) return c.json({ error: 'invalid_choice', questionId: qid }, 400);
+        continue;
+      }
+      answers.push({ questionId: qid, valueText: v });
+      answered.add(qid);
+    } else if (question.type === 'multi_choice') {
+      const arr = Array.isArray(a.value) ? a.value.filter((x): x is string => typeof x === 'string') : [];
+      const opts = new Set(parseQuestionOptions(question));
+      const filtered = arr.filter((v) => opts.has(v));
+      if (filtered.length === 0) {
+        if (question.required === 1) return c.json({ error: 'missing_required', questionId: qid }, 400);
+        continue;
+      }
+      answers.push({ questionId: qid, valueJson: JSON.stringify(filtered) });
+      answered.add(qid);
+    } else {
+      // text types
+      const s = typeof a.value === 'string' ? a.value.trim().slice(0, 5000) : '';
+      if (!s) {
+        if (question.required === 1) return c.json({ error: 'missing_required', questionId: qid }, 400);
+        continue;
+      }
+      answers.push({ questionId: qid, valueText: s });
+      answered.add(qid);
+    }
+  }
+
+  // Final required-field check covers questions the body never mentioned at all.
+  for (const q of questions) {
+    if (q.required === 1 && !answered.has(q.id)) {
+      return c.json({ error: 'missing_required', questionId: q.id }, 400);
+    }
+  }
+
+  const optionalName = typeof body.optionalName === 'string' ? body.optionalName.trim().slice(0, 160) || null : null;
+  const optionalEmail = typeof body.optionalEmail === 'string' ? body.optionalEmail.trim().toLowerCase().slice(0, 254) || null : null;
+
+  const responseId = submitFeedbackResponse({
+    formId: form.id,
+    optionalName,
+    optionalEmail,
+    ipHash: hashIp(ip),
+    answers,
+  });
+
+  log('info', 'feedback response submitted', { formId: form.id, responseId, answerCount: answers.length });
+  return c.json({ ok: true });
 });
 
 export default proxy;

@@ -10,6 +10,10 @@ import {
   getSetting,
   getSettingNumber,
 } from '../db/queries.js';
+import {
+  findMemberByDiscountCode,
+  markMemberCodeRedeemed,
+} from '../db/campaigns.js';
 import { getDb } from '../db/client.js';
 import { log } from '../lib/logger.js';
 import { nowSec, daysToSec } from '../lib/time.js';
@@ -30,11 +34,18 @@ interface OrderPayloadLineItem {
   variant_id?: number | null;
   quantity?: number;
 }
+interface OrderDiscountCode {
+  code?: string;
+  amount?: string;
+  type?: string;
+}
 interface OrderPaidPayload {
   id: number;
   email?: string | null;
   customer?: OrderPayloadCustomer | null;
   line_items?: OrderPayloadLineItem[];
+  discount_codes?: OrderDiscountCode[];
+  total_price?: string;
 }
 interface OrderFulfilledPayload {
   id: number;
@@ -111,6 +122,34 @@ webhooks.post('/orders/paid', async (c) => {
       dueAt: null,
     });
     inserted += 1;
+  }
+
+  // Campaign discount-code redemption detection. Most orders won't carry a
+  // campaign code; the lookup is a cheap indexed read per code on the order.
+  // Idempotent: a re-delivered webhook with an already-redeemed code is a
+  // no-op (we check the member's current code_status before updating).
+  const discountCodes = body.discount_codes ?? [];
+  if (discountCodes.length > 0) {
+    const totalPrice = Number(body.total_price ?? '0') || 0;
+    for (const dc of discountCodes) {
+      const code = (dc.code ?? '').trim();
+      if (!code) continue;
+      const member = findMemberByDiscountCode(code);
+      if (!member) continue;
+      if (member.code_status === 'redeemed') continue;
+      markMemberCodeRedeemed({
+        memberId: member.id,
+        orderId,
+        orderTotal: totalPrice,
+      });
+      log('info', 'campaign discount code redeemed', {
+        memberId: member.id,
+        campaignId: member.campaign_id,
+        code,
+        orderId,
+        orderTotal: totalPrice,
+      });
+    }
   }
 
   log('info', 'orders/paid processed', { orderId, customerEmail: email, lines: inserted });

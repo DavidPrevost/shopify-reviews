@@ -52,6 +52,30 @@ export const EMAIL_TRIGGERS: EmailTrigger[] = [
     description: 'A thank-you sent when a customer submits a review. Not sent automatically yet — author it now and it activates when this trigger ships.',
     wired: false,
   },
+  {
+    event: 'campaign_application_confirmation',
+    label: 'Campaign — application received',
+    description: 'Sent automatically when someone applies to a campaign. Confirms receipt and reiterates the terms they accepted.',
+    wired: true,
+  },
+  {
+    event: 'campaign_shipped_notification',
+    label: 'Campaign — samples shipped',
+    description: 'Admin-triggered batch sent after sample packs are mailed. Per-recipient: includes their review links for each product in the sample pack.',
+    wired: true,
+  },
+  {
+    event: 'campaign_review_reminder',
+    label: 'Campaign — review reminder',
+    description: 'Admin-triggered batch sent 2-3 weeks after shipping. Generic copy plus review links — if a recipient has already reviewed, the email thanks them.',
+    wired: true,
+  },
+  {
+    event: 'campaign_launch_thanks',
+    label: 'Campaign — launch thanks',
+    description: 'Admin-triggered batch with the brand-launch announcement and the per-participant discount code.',
+    wired: true,
+  },
 ];
 
 export const isEmailTrigger = (s: unknown): s is string =>

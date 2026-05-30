@@ -103,6 +103,7 @@ import { getActiveAdminTheme, renderAdminThemeVars, ADMIN_THEMES, DEFAULT_ADMIN_
 import { saveLogo } from '../lib/uploads.js';
 import { EMAIL_TRIGGERS, isEmailTrigger, triggerLabel } from '../email/triggers.js';
 import { EMAIL_VARIABLES } from '../email/variables.js';
+import adminCampaigns from './admin-campaigns.js';
 
 const admin = new Hono();
 
@@ -189,7 +190,7 @@ const renderPauseBannerHtml = (): string => {
   `;
 };
 
-const adminShell = (title: string, body: string, navActive?: string): string => {
+export const adminShell = (title: string, body: string, navActive?: string): string => {
   // Open-reports count drives the "Reports" tab badge. Cheap query — single
   // COUNT(*) on an indexed column — so we run it on every admin page.
   const openReportsCount = countOpenReports();
@@ -201,6 +202,7 @@ const adminShell = (title: string, body: string, navActive?: string): string => 
     { href: '/admin/dashboard',           label: 'Dashboard',   key: 'dashboard' },
     { href: '/admin/reviews',             label: 'Reviews',     key: 'reviews' },
     { href: '/admin/reports',             label: `Reports${reportsBadge}`, key: 'reports' },
+    { href: '/admin/campaigns',           label: 'Campaigns',   key: 'campaigns' },
     { href: '/admin/sample-invitations',  label: 'Invitations', key: 'invitations' },
     { href: '/admin/branding',            label: 'Branding',    key: 'branding' },
     { href: '/admin/settings',            label: 'Settings',    key: 'settings' },
@@ -498,7 +500,7 @@ admin.get('/activity', async (c) => {
 });
 
 const stars = (n: number) => '★'.repeat(n) + '☆'.repeat(5 - n);
-const formatTs = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' ');
+export const formatTs = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' ');
 const statusPill = (status: string) =>
   `<span class="pill pill-${status}">${status}</span>`;
 
@@ -3681,5 +3683,10 @@ admin.post('/dispatch', async (c) => {
     return c.html(adminShell('Dispatcher failed', `<div class="err">${escapeHtml(msg)}</div><p><a href="/admin/dashboard">Back to dashboard</a></p>`), 500);
   }
 });
+
+// --- Campaigns sub-router (Campaigns tab) ---
+// The top-level admin guard above handles auth, so adminCampaigns can mount
+// directly without its own auth middleware.
+admin.route('/campaigns', adminCampaigns);
 
 export default admin;

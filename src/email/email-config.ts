@@ -185,6 +185,83 @@ const DEFAULT_TEMPLATES: SeedTemplate[] = [
     ctaEnabled: false,
     ctaLabel: 'View your review',
   },
+  {
+    templateKey: 'campaign_application_confirmation',
+    displayName: 'Campaign — Application Received',
+    triggerEvent: 'campaign_application_confirmation',
+    subject: 'We received your application — {{ campaignName }}',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Thanks for applying, {{ firstName }}!</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  We've received your application for <strong>{{ campaignName }}</strong>. We'll review every application and let you know whether you've been selected to receive a sample pack.
+</p>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  By submitting your application you agreed to receive a small number of campaign-related emails from {{ brandName }} (an application confirmation, a shipped notification, a review reminder, and a launch announcement). These emails are part of the campaign — your application stands as your consent to receive them.
+</p>
+<p style="margin:24px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks for your interest in {{ brandName }}.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: '',
+  },
+  {
+    templateKey: 'campaign_shipped_notification',
+    displayName: 'Campaign — Samples Shipped',
+    triggerEvent: 'campaign_shipped_notification',
+    subject: 'Your {{ campaignName }} samples are on the way',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  Your sample pack for <strong>{{ campaignName }}</strong> is on its way. Watch your mailbox over the next several days.
+</p>
+<p style="margin:0 0 24px; font-size:16px; line-height:1.55;">
+  Once you've had some time to try each item, we'd love your honest review. Use the buttons below to leave a review for each product — your feedback is what makes this program work.
+</p>
+{{ reviewLinksHtml }}
+<p style="margin:16px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks for being part of {{ brandName }}.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: '',
+  },
+  {
+    templateKey: 'campaign_review_reminder',
+    displayName: 'Campaign — Review Reminder',
+    triggerEvent: 'campaign_review_reminder',
+    subject: 'A reminder from {{ brandName }} — {{ campaignName }}',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  We hope you've had a chance to try the samples from <strong>{{ campaignName }}</strong>. If you've already reviewed some or all of them — thank you, your feedback means a lot.
+</p>
+<p style="margin:0 0 24px; font-size:16px; line-height:1.55;">
+  If you haven't yet, here are your review links again. Each takes about a minute. If you're a Shopify customer, you can also sign in to leave a review directly on the product page if that's easier.
+</p>
+{{ reviewLinksHtml }}
+<p style="margin:16px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks for being part of {{ brandName }}.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: '',
+  },
+  {
+    templateKey: 'campaign_launch_thanks',
+    displayName: 'Campaign — Launch Thanks',
+    triggerEvent: 'campaign_launch_thanks',
+    subject: 'We just launched — thank you for being part of it',
+    bodyHtml: `<h1 style="margin:0 0 16px; font-size:22px; font-weight:600; line-height:1.3;">Hi {{ firstName }},</h1>
+<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">
+  We're officially live — and we wanted to say thank you. As one of our early supporters through <strong>{{ campaignName }}</strong>, you helped shape what we're sharing with the world today.
+</p>
+<p style="margin:0 0 24px; font-size:16px; line-height:1.55;">
+  As a small thank-you, here's a personal discount code for your first order with {{ brandName }}:
+</p>
+<p style="margin:0 0 24px; font-size:20px; font-weight:600; text-align:center; padding:12px; background:#f6f6f6; border-radius:4px; letter-spacing:1px;">
+  {{ discountCode }}
+</p>
+<p style="margin:16px 0 0; font-size:14px; color:#666; line-height:1.55;">
+  Thanks again — none of this would have happened without you.
+</p>`,
+    ctaEnabled: false,
+    ctaLabel: '',
+  },
 ];
 
 // Seeds default templates once each. We track which default keys have been

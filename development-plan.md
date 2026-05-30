@@ -796,6 +796,7 @@ Features deferred to after MVP launch. Update this list as priorities shift; the
 - ✅ Sample-invitation tooling (single + batch CSV + export with mail-merge URLs)
 - ✅ Branding admin page (widget visual customization + email template + shared email branding)
 - ✅ Multi-product email batching (one email per order with all products inline)
+- ✅ **Campaigns feature** (application-based sample distribution) — see [campaigns-feature-plan.md](campaigns-feature-plan.md). Covers public application form (App Proxy + Shopify Page embed), versioned terms, approval queue + customer upsert, batch invitation generation, capacity warning + auto-close, four campaign email triggers with admin batch-send, per-participant Shopify discount codes (`write_discounts` scope) with redemption tracking via `orders/paid` webhook and two-option code cleanup, two-stage retention pipe (quarantine → admin-confirmed purge of shipping addresses), and per-(campaign, product) anonymous feedback forms with question-type aggregates. Migrations 018 + 019. Ongoing/rolling-campaign mode (per-member auto-fire email scheduling) is logged as a bounded future addition.
 
 ### Chunk A: Moderation, reporting, notifications — ✅ complete
 

@@ -1031,6 +1031,420 @@ const relayBrand = (el: HTMLElement): void => {
   }).catch(() => { /* best-effort */ });
 };
 
+// --- Campaign application form ---
+//
+// Activated by a `<div data-campaign-form="<slug>"></div>` element in a
+// Shopify Page (or any storefront template). The widget fetches the campaign
+// config from /apps/reviews/campaigns/:slug/config, renders the form, and
+// submits to /apps/reviews/campaigns/:slug/apply on submit. Both calls go
+// through Shopify App Proxy (HMAC-verified server-side).
+
+const CAMPAIGN_STYLES = `
+.rv-campaign {
+  font-family: inherit;
+  color: var(--reviews-text, inherit);
+  background: var(--reviews-bg, transparent);
+  max-width: 640px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+.rv-campaign h2 { margin: 0 0 12px; font-size: 1.4em; font-weight: 600; }
+.rv-campaign-intro { margin: 0 0 24px; opacity: 0.85; }
+.rv-campaign-field { display: block; margin: 12px 0; }
+.rv-campaign-field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.rv-campaign-field input, .rv-campaign-field textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid #bbb; border-radius: 4px;
+  font-size: 14px; font-family: inherit; box-sizing: border-box;
+  background: transparent; color: inherit;
+}
+.rv-campaign-row { display: flex; gap: 12px; }
+.rv-campaign-row .rv-campaign-field { flex: 1; }
+.rv-campaign-terms {
+  margin: 24px 0 12px; padding: 12px; border: 1px solid #ddd; border-radius: 4px;
+  max-height: 180px; overflow-y: auto; font-size: 13px; white-space: pre-wrap;
+  background: rgba(0,0,0,0.02);
+}
+.rv-campaign-accept { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 24px; font-size: 14px; }
+.rv-campaign-accept input { margin-top: 3px; }
+.rv-campaign-submit {
+  background: var(--reviews-cta-bg, #111); color: var(--reviews-cta-fg, #fff);
+  border: none; padding: 10px 20px; font-size: 15px; font-weight: 600;
+  border-radius: 4px; cursor: pointer; font-family: inherit;
+}
+.rv-campaign-submit:disabled { opacity: 0.6; cursor: wait; }
+.rv-campaign-error { color: #b00; margin: 12px 0; font-size: 14px; }
+.rv-campaign-success { padding: 16px; background: rgba(40, 120, 40, 0.08); border-radius: 4px; }
+.rv-campaign-closed { padding: 16px; background: rgba(0,0,0,0.04); border-radius: 4px; text-align: center; }
+`;
+
+let campaignStylesInjected = false;
+const injectCampaignStyles = (): void => {
+  if (campaignStylesInjected) return;
+  campaignStylesInjected = true;
+  const style = document.createElement('style');
+  style.textContent = CAMPAIGN_STYLES;
+  document.head.appendChild(style);
+};
+
+interface CampaignConfig {
+  state: 'open' | 'closed';
+  campaignName: string;
+  slug?: string;
+  productCount?: number;
+  terms?: { versionId: number; versionNumber: number; body: string };
+}
+
+const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> => {
+  injectCampaignStyles();
+  el.classList.add('rv-campaign');
+  el.innerHTML = `<p class="rv-loading">Loading…</p>`;
+
+  let cfg: CampaignConfig;
+  try {
+    const res = await fetch(proxyUrl(`/campaigns/${encodeURIComponent(slug)}/config`), {
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      el.innerHTML = `<p class="rv-campaign-closed">This application form is not available.</p>`;
+      return;
+    }
+    cfg = await res.json() as CampaignConfig;
+  } catch {
+    el.innerHTML = `<p class="rv-campaign-error">We couldn't load the form. Please reload the page.</p>`;
+    return;
+  }
+
+  if (cfg.state !== 'open' || !cfg.terms) {
+    el.innerHTML = `
+      <h2>${escapeHtmlText(cfg.campaignName)}</h2>
+      <p class="rv-campaign-closed">Applications are closed.</p>
+    `;
+    return;
+  }
+
+  const terms = cfg.terms;
+  el.innerHTML = `
+    <h2>${escapeHtmlText(cfg.campaignName)}</h2>
+    <p class="rv-campaign-intro">Apply below to be considered for this sample program.</p>
+    <form class="rv-campaign-form" novalidate>
+      <div class="rv-campaign-row">
+        <div class="rv-campaign-field">
+          <label>First name</label>
+          <input type="text" name="firstName" required maxlength="80" />
+        </div>
+        <div class="rv-campaign-field">
+          <label>Last name</label>
+          <input type="text" name="lastName" required maxlength="80" />
+        </div>
+      </div>
+      <div class="rv-campaign-field">
+        <label>Email</label>
+        <input type="email" name="email" required maxlength="254" />
+      </div>
+      <h3 style="margin-top:24px; font-size:1em;">Shipping address</h3>
+      <div class="rv-campaign-field">
+        <label>Street address</label>
+        <input type="text" name="street1" required maxlength="200" />
+      </div>
+      <div class="rv-campaign-field">
+        <label>Apartment, suite, etc. (optional)</label>
+        <input type="text" name="street2" maxlength="200" />
+      </div>
+      <div class="rv-campaign-row">
+        <div class="rv-campaign-field">
+          <label>City</label>
+          <input type="text" name="city" required maxlength="100" />
+        </div>
+        <div class="rv-campaign-field">
+          <label>State / Region</label>
+          <input type="text" name="state" maxlength="100" />
+        </div>
+      </div>
+      <div class="rv-campaign-row">
+        <div class="rv-campaign-field">
+          <label>Postal code</label>
+          <input type="text" name="postalCode" required maxlength="24" />
+        </div>
+        <div class="rv-campaign-field">
+          <label>Country</label>
+          <input type="text" name="country" required maxlength="100" />
+        </div>
+      </div>
+      <div class="rv-campaign-field">
+        <label>Anything you'd like us to know? (optional)</label>
+        <textarea name="message" rows="3" maxlength="2000"></textarea>
+      </div>
+      <div class="rv-campaign-terms" aria-label="Program terms">${escapeHtmlText(terms.body)}</div>
+      <label class="rv-campaign-accept">
+        <input type="checkbox" name="termsAccepted" required />
+        <span>I have read and agree to the terms above.</span>
+      </label>
+      <div class="rv-campaign-error" data-error hidden></div>
+      <button type="submit" class="rv-campaign-submit">Submit application</button>
+    </form>
+  `;
+
+  const formEl = el.querySelector<HTMLFormElement>('.rv-campaign-form');
+  const errorEl = el.querySelector<HTMLElement>('[data-error]');
+  const submitEl = el.querySelector<HTMLButtonElement>('.rv-campaign-submit');
+  if (!formEl || !errorEl || !submitEl) return;
+
+  formEl.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    errorEl.hidden = true;
+    errorEl.textContent = '';
+
+    const fd = new FormData(formEl);
+    const accepted = (fd.get('termsAccepted') as string) === 'on';
+    if (!accepted) {
+      errorEl.hidden = false;
+      errorEl.textContent = 'You must accept the terms to continue.';
+      return;
+    }
+
+    submitEl.disabled = true;
+    submitEl.textContent = 'Submitting…';
+
+    const payload = {
+      firstName: fd.get('firstName'),
+      lastName: fd.get('lastName'),
+      email: fd.get('email'),
+      message: fd.get('message'),
+      shipping: {
+        street1: fd.get('street1'),
+        street2: fd.get('street2'),
+        city: fd.get('city'),
+        state: fd.get('state'),
+        postalCode: fd.get('postalCode'),
+        country: fd.get('country'),
+      },
+      termsVersionId: terms.versionId,
+    };
+
+    try {
+      const res = await fetch(proxyUrl(`/campaigns/${encodeURIComponent(slug)}/apply`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string; detail?: string };
+        const msg = data.detail
+          || campaignErrorMessage(data.error)
+          || 'Something went wrong. Please try again.';
+        errorEl.hidden = false;
+        errorEl.textContent = msg;
+        submitEl.disabled = false;
+        submitEl.textContent = 'Submit application';
+        return;
+      }
+      el.innerHTML = `
+        <h2>${escapeHtmlText(cfg.campaignName)}</h2>
+        <div class="rv-campaign-success">
+          <strong>Thanks! We received your application.</strong>
+          <p>We'll review every application and let you know whether you've been selected. Watch your email for a confirmation in the next few minutes.</p>
+        </div>
+      `;
+    } catch {
+      errorEl.hidden = false;
+      errorEl.textContent = 'Network error — please try again.';
+      submitEl.disabled = false;
+      submitEl.textContent = 'Submit application';
+    }
+  });
+};
+
+const campaignErrorMessage = (code: string | undefined): string | null => {
+  switch (code) {
+    case 'invalid_email':              return 'Please enter a valid email address.';
+    case 'missing_first_name':         return 'First name is required.';
+    case 'missing_last_name':          return 'Last name is required.';
+    case 'incomplete_shipping_address':return 'Please complete the shipping address.';
+    case 'applications_closed':        return 'Applications for this program are closed.';
+    case 'terms_changed':              return 'The program terms were updated while you were filling out the form. Please reload.';
+    case 'rate_limited':               return 'Too many submissions from your network. Please try again in a minute.';
+    default:                           return null;
+  }
+};
+
+const escapeHtmlText = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// --- Campaign feedback form ---
+//
+// Activated by `<div data-campaign-feedback-form="<access_key>"></div>`.
+// Fetches the form schema from /apps/reviews/campaigns/feedback/:key/config,
+// renders the questions, and submits to /apps/reviews/campaigns/feedback/:key/submit.
+
+interface FeedbackQuestion {
+  id: number;
+  type: 'rating_1_5' | 'single_choice' | 'multi_choice' | 'short_text' | 'long_text';
+  prompt: string;
+  required: boolean;
+  options: string[];
+}
+
+interface FeedbackFormConfig {
+  title: string;
+  introText: string | null;
+  questions: FeedbackQuestion[];
+}
+
+const renderFeedbackForm = async (el: HTMLElement, accessKey: string): Promise<void> => {
+  injectCampaignStyles();
+  el.classList.add('rv-campaign');
+  el.innerHTML = `<p class="rv-loading">Loading…</p>`;
+
+  let cfg: FeedbackFormConfig;
+  try {
+    const res = await fetch(proxyUrl(`/campaigns/feedback/${encodeURIComponent(accessKey)}/config`), {
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      el.innerHTML = `<p class="rv-campaign-closed">This feedback form is not available.</p>`;
+      return;
+    }
+    cfg = await res.json() as FeedbackFormConfig;
+  } catch {
+    el.innerHTML = `<p class="rv-campaign-error">We couldn't load the form. Please reload the page.</p>`;
+    return;
+  }
+
+  const questionsHtml = cfg.questions.map((q) => renderFeedbackQuestion(q)).join('');
+  el.innerHTML = `
+    <h2>${escapeHtmlText(cfg.title)}</h2>
+    ${cfg.introText ? `<p class="rv-campaign-intro">${escapeHtmlText(cfg.introText)}</p>` : ''}
+    <form class="rv-feedback-form" novalidate>
+      ${questionsHtml}
+      <div class="rv-campaign-row">
+        <div class="rv-campaign-field">
+          <label>Name (optional)</label>
+          <input type="text" name="optionalName" maxlength="160" />
+        </div>
+        <div class="rv-campaign-field">
+          <label>Email (optional)</label>
+          <input type="email" name="optionalEmail" maxlength="254" />
+        </div>
+      </div>
+      <p class="rv-campaign-intro" style="font-size:12px;">Responses are anonymous unless you provide name and email above.</p>
+      <div class="rv-campaign-error" data-error hidden></div>
+      <button type="submit" class="rv-campaign-submit">Submit feedback</button>
+    </form>
+  `;
+
+  const formEl = el.querySelector<HTMLFormElement>('.rv-feedback-form');
+  const errorEl = el.querySelector<HTMLElement>('[data-error]');
+  const submitEl = el.querySelector<HTMLButtonElement>('.rv-campaign-submit');
+  if (!formEl || !errorEl || !submitEl) return;
+
+  formEl.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    errorEl.hidden = true;
+    errorEl.textContent = '';
+
+    const fd = new FormData(formEl);
+    const answers: Array<{ questionId: number; value: unknown }> = [];
+    for (const q of cfg.questions) {
+      if (q.type === 'rating_1_5') {
+        const v = fd.get(`q_${q.id}`);
+        if (typeof v === 'string' && v !== '') answers.push({ questionId: q.id, value: Number(v) });
+      } else if (q.type === 'single_choice') {
+        const v = fd.get(`q_${q.id}`);
+        if (typeof v === 'string' && v !== '') answers.push({ questionId: q.id, value: v });
+      } else if (q.type === 'multi_choice') {
+        const all = fd.getAll(`q_${q.id}`);
+        const arr = all.filter((v): v is string => typeof v === 'string');
+        if (arr.length > 0) answers.push({ questionId: q.id, value: arr });
+      } else {
+        const v = fd.get(`q_${q.id}`);
+        if (typeof v === 'string' && v.trim() !== '') answers.push({ questionId: q.id, value: v });
+      }
+    }
+
+    const payload = {
+      optionalName: fd.get('optionalName'),
+      optionalEmail: fd.get('optionalEmail'),
+      answers,
+    };
+
+    submitEl.disabled = true;
+    submitEl.textContent = 'Submitting…';
+
+    try {
+      const res = await fetch(proxyUrl(`/campaigns/feedback/${encodeURIComponent(accessKey)}/submit`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        errorEl.hidden = false;
+        errorEl.textContent = data.error === 'missing_required'
+          ? 'Please answer all required questions.'
+          : 'Something went wrong. Please try again.';
+        submitEl.disabled = false;
+        submitEl.textContent = 'Submit feedback';
+        return;
+      }
+      el.innerHTML = `
+        <h2>${escapeHtmlText(cfg.title)}</h2>
+        <div class="rv-campaign-success">
+          <strong>Thanks for your feedback!</strong>
+          <p>Your response has been recorded.</p>
+        </div>
+      `;
+    } catch {
+      errorEl.hidden = false;
+      errorEl.textContent = 'Network error — please try again.';
+      submitEl.disabled = false;
+      submitEl.textContent = 'Submit feedback';
+    }
+  });
+};
+
+const renderFeedbackQuestion = (q: FeedbackQuestion): string => {
+  const required = q.required ? ' <span style="color:#b00;">*</span>' : '';
+  const name = `q_${q.id}`;
+  switch (q.type) {
+    case 'rating_1_5': {
+      // Five radio buttons, big and tappable.
+      const radios = [1, 2, 3, 4, 5].map((n) => `
+        <label style="display:inline-flex; align-items:center; gap:4px; margin-right:12px;">
+          <input type="radio" name="${name}" value="${n}" ${q.required ? 'required' : ''} />
+          <span>${n}★</span>
+        </label>
+      `).join('');
+      return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label><div>${radios}</div></div>`;
+    }
+    case 'single_choice': {
+      const radios = q.options.map((opt) => `
+        <label style="display:block; margin:4px 0;">
+          <input type="radio" name="${name}" value="${escapeHtmlText(opt)}" ${q.required ? 'required' : ''} />
+          ${escapeHtmlText(opt)}
+        </label>
+      `).join('');
+      return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label>${radios}</div>`;
+    }
+    case 'multi_choice': {
+      const boxes = q.options.map((opt) => `
+        <label style="display:block; margin:4px 0;">
+          <input type="checkbox" name="${name}" value="${escapeHtmlText(opt)}" />
+          ${escapeHtmlText(opt)}
+        </label>
+      `).join('');
+      return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label>${boxes}</div>`;
+    }
+    case 'short_text':
+      return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label><input type="text" name="${name}" maxlength="500" ${q.required ? 'required' : ''} /></div>`;
+    case 'long_text':
+      return `<div class="rv-campaign-field"><label>${escapeHtmlText(q.prompt)}${required}</label><textarea name="${name}" rows="4" maxlength="5000" ${q.required ? 'required' : ''}></textarea></div>`;
+  }
+};
+
 // Initialize a single widget element. Idempotent: a `data-rv-initialized`
 // flag stops us from rendering twice if the element gets re-visited (e.g.
 // the MutationObserver fires for a node we already handled in the initial
@@ -1042,6 +1456,21 @@ const initializeElement = (el: HTMLElement): void => {
   // Brand relay reads attributes off the widget div; attempt it before the
   // product-id guard so an aggregate/collection card can carry brand data too.
   relayBrand(el);
+
+  // Campaign-form mode: separate from review widgets, gated by a different
+  // attribute. Slug-only — no product id required.
+  const campaignSlug = el.getAttribute('data-campaign-form');
+  if (campaignSlug) {
+    void renderCampaignForm(el, campaignSlug);
+    return;
+  }
+
+  // Campaign feedback form: gated by data-campaign-feedback-form="<accessKey>".
+  const feedbackKey = el.getAttribute('data-campaign-feedback-form');
+  if (feedbackKey) {
+    void renderFeedbackForm(el, feedbackKey);
+    return;
+  }
 
   const mode = el.getAttribute('data-reviews-widget');
   const productId = el.getAttribute('data-product-id');
@@ -1069,8 +1498,11 @@ const init = async (): Promise<void> => {
   await applyWidgetConfig();
 
   // Initial scan — picks up widget elements that are in the DOM at
-  // DOMContentLoaded.
-  document.querySelectorAll<HTMLElement>('[data-reviews-widget]').forEach(initializeElement);
+  // DOMContentLoaded. Review widgets, campaign-form divs, and campaign-
+  // feedback-form divs all flow through initializeElement; the routing
+  // inside picks the right renderer.
+  const SELECTOR = '[data-reviews-widget], [data-campaign-form], [data-campaign-feedback-form]';
+  document.querySelectorAll<HTMLElement>(SELECTOR).forEach(initializeElement);
 
   // Late-arriving widgets (Shopify's async product-recommendations,
   // variant-change section re-renders, infinite-scroll collection pages,
@@ -1082,10 +1514,14 @@ const init = async (): Promise<void> => {
     for (const m of mutations) {
       m.addedNodes.forEach((node) => {
         if (!(node instanceof HTMLElement)) return;
-        if (node.hasAttribute('data-reviews-widget')) {
+        if (
+          node.hasAttribute('data-reviews-widget') ||
+          node.hasAttribute('data-campaign-form') ||
+          node.hasAttribute('data-campaign-feedback-form')
+        ) {
           initializeElement(node);
         }
-        node.querySelectorAll<HTMLElement>('[data-reviews-widget]').forEach(initializeElement);
+        node.querySelectorAll<HTMLElement>(SELECTOR).forEach(initializeElement);
       });
     }
   });
