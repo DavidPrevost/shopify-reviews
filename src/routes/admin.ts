@@ -2213,12 +2213,16 @@ admin.get('/branding', (c) => {
   // chooses which field is active. `def` is the true reset target — the synced
   // Shopify brand color when present, else the hardcoded fallback. `inherit`
   // fields have no brand equivalent and reset to "inherit the theme" instead.
+  // Source-of-default for each field, surfaced in the description so the
+  // merchant knows where to change the underlying value vs. setting an
+  // override here. The default chain is: this override → Shopify brand color
+  // (Branding → Brand colors) → hardcoded fallback in HARDCODED_DEFAULTS.
   const colorFieldMeta: Record<string, { label: string; desc: string; kind: 'default' | 'inherit'; def?: string; display?: string }> = {
-    starColor:     { label: 'Star color', kind: 'default', def: shopify.starColor ?? HARDCODED_DEFAULTS.starColor, desc: 'Used for review-rating stars throughout the storefront.' },
-    ctaBackground: { label: 'CTA button background', kind: 'default', def: shopify.ctaBackground ?? HARDCODED_DEFAULTS.ctaBackground, desc: 'Background of the "Write a review" and "Submit" buttons.' },
-    ctaForeground: { label: 'CTA button text', kind: 'default', def: shopify.ctaForeground ?? HARDCODED_DEFAULTS.ctaForeground, desc: 'Text color on the "Write a review" and "Submit" buttons. Pick a color with strong contrast against the button background.' },
-    background:    { label: 'Widget background', kind: 'inherit', display: '#ffffff', desc: 'Background of the reviews widget container. Inherits your storefront theme by default — the preview shows a neutral card because the live storefront background cannot be seen here. Set a color to override.' },
-    text:          { label: 'Widget text', kind: 'inherit', display: '#222222', desc: 'Text color inside the widget. Inherits your storefront theme by default.' },
+    starColor:     { label: 'Star color', kind: 'default', def: shopify.starColor ?? HARDCODED_DEFAULTS.starColor, desc: 'Used for review-rating stars throughout the storefront. Default matches your Brand Secondary background (set in Branding → Brand colors). Falls back to a neutral gold if no brand color is set.' },
+    ctaBackground: { label: 'CTA button background', kind: 'default', def: shopify.ctaBackground ?? HARDCODED_DEFAULTS.ctaBackground, desc: 'Background of the "Write a review" and "Submit" buttons. Default matches your Brand Primary background (set in Branding → Brand colors).' },
+    ctaForeground: { label: 'CTA button text', kind: 'default', def: shopify.ctaForeground ?? HARDCODED_DEFAULTS.ctaForeground, desc: 'Text color on the "Write a review" and "Submit" buttons. Default matches your Brand Primary text color (set in Branding → Brand colors). Pick a color with strong contrast against the button background.' },
+    background:    { label: 'Widget background', kind: 'inherit', display: '#ffffff', desc: 'Background of the reviews widget container. By default the widget inherits from your storefront theme — there is no Brand Colors equivalent for this. The preview above shows a neutral card because the live storefront background cannot be simulated here; reload a product page to see the real result. Set a hex color to override.' },
+    text:          { label: 'Widget text', kind: 'inherit', display: '#222222', desc: 'Text color inside the widget. By default it inherits from your storefront theme. The preview above shows neutral text for the same reason as Widget background. Set a hex color to override.' },
   };
   const colorFieldOrder = ['starColor', 'ctaBackground', 'ctaForeground', 'background', 'text'];
   const colorValues: Record<string, string | null> = {
@@ -2536,7 +2540,7 @@ admin.get('/branding', (c) => {
         id: 'eb-replyTo',
         name: 'replyTo',
         label: 'Reply-to address (optional)',
-        description: 'When set, customer replies to review emails go here instead of the From address. Useful if review-request emails are sent from a no-reply alias but you want replies to land in support.',
+        description: 'When set, customer replies to review emails go here instead of the From address. Useful if review-request emails are sent from a no-reply alias but you want replies to land somewhere else, such as your support or customer service inbox.',
         overrideValue: emailOverrides.replyTo,
         defaultValue: null,
         placeholder: 'support@brandname.com',
@@ -2632,7 +2636,10 @@ admin.get('/branding', (c) => {
           editorDesc.textContent = m.desc;
           editorColor.value = fieldEffective(id);
           editorText.value = v || '';
-          editorText.placeholder = m.kind === 'inherit' ? 'inherit (theme)' : '#RRGGBB';
+          // Show the actual default hex (or "inherited") so the merchant can
+          // see what value is in effect when they haven't set an override —
+          // a generic "#RRGGBB" placeholder hid that information before.
+          editorText.placeholder = m.kind === 'inherit' ? 'inherited' : m.def;
           editorReset.textContent = m.kind === 'inherit' ? 'Reset to inherit' : 'Reset to default';
           editorReset.disabled = !v;
           editorStatus.innerHTML = v
@@ -3606,7 +3613,7 @@ admin.post('/settings/new-review-notify', async (c) => {
     hasEmail: email.length > 0,
     ratings,
   });
-  return c.redirect('/admin/settings?saved=1');
+  return c.redirect('/admin/settings?saved=1#notifications');
 });
 
 admin.post('/settings/profanity', async (c) => {
@@ -3630,7 +3637,7 @@ admin.post('/settings/theme', async (c) => {
   if (theme in ADMIN_THEMES || theme === BRAND_THEME_KEY) {
     setSetting('admin_theme', theme);
   }
-  return c.redirect('/admin/settings?saved=1');
+  return c.redirect('/admin/settings?saved=1#appearance');
 });
 
 // Manual brand-colors entry — writes the same shop_brand_json blob that the
@@ -3668,7 +3675,7 @@ admin.post('/settings/sync-brand', async (c) => {
       hasSecondary: !!brandInfo.colors?.secondary?.background,
       hasLogo: !!brandInfo.logoUrl,
     });
-    return c.redirect('/admin/settings?saved=1');
+    return c.redirect('/admin/branding?saved=1#brand');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log('error', 'brand sync failed', { error: msg });
@@ -3696,7 +3703,7 @@ admin.post('/sync', async (c) => {
 admin.post('/refresh-product-cache', (c) => {
   const removed = clearProductCache();
   log('info', 'admin cleared product cache', { rowsRemoved: removed });
-  return c.redirect('/admin/settings?cache_refreshed=' + removed);
+  return c.redirect('/admin/settings?cache_refreshed=' + removed + '#setup');
 });
 
 admin.use('/refresh-product-cache', async (c, next) => {

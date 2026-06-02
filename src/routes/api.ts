@@ -113,11 +113,13 @@ api.get('/products/:productId/aggregate', (c) => {
 });
 
 // Visual config the widget applies on init. Fully resolved: each field is a
-// concrete value (override → Shopify default → hardcoded fallback). Cached
-// for 5 minutes — config changes propagate within that window. No customer
-// data so safe to cache shared.
+// concrete value (override → Shopify default → hardcoded fallback). No
+// customer data, safe to cache shared. Cache is intentionally short (30s
+// hard, 5min stale-while-revalidate) so merchant iterations on Branding →
+// Widget show up on the storefront quickly. The endpoint is cheap — a few
+// getSetting calls — so the tighter cache isn't a load concern.
 api.get('/widget/config', (c) => {
-  c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
+  c.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
   return c.json(resolveWidgetConfig());
 });
 

@@ -286,6 +286,8 @@ const dispatchGroup = async (
         'List-Unsubscribe': `<${unsubGlobalUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       },
+      senderName: branding.senderName,
+      replyTo: branding.replyTo ?? undefined,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

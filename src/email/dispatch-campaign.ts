@@ -420,7 +420,14 @@ export const sendCampaignBatch = async (input: {
       .trim();
 
     try {
-      await sendMail({ to: row.data.email, subject: renderedSubject, html, text });
+      await sendMail({
+        to: row.data.email,
+        subject: renderedSubject,
+        html,
+        text,
+        senderName: branding.senderName,
+        replyTo: branding.replyTo ?? undefined,
+      });
       sent += 1;
       if (nextStatus) {
         updateMemberStatus({ id: row.member.id, status: nextStatus, decidedBy: 'campaign-batch' });

@@ -129,6 +129,8 @@ const sendFromTemplate = async (
     subject: renderedSubject,
     html,
     text,
+    senderName: branding.senderName,
+    replyTo: branding.replyTo ?? undefined,
   });
 
   return { sent: true };
