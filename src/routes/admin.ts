@@ -84,7 +84,7 @@ import {
 } from '../email/email-config.js';
 import { renderString } from '../email/render.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
-import { fetchShopifyBrand } from '../shopify/brand-info.js';
+import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { restartScheduler } from '../scheduler/cron.js';
 import {
@@ -263,7 +263,8 @@ export const adminShell = (title: string, body: string, navActive?: string): str
     .filter-row a { padding:6px 12px; border-radius:4px; text-decoration:none; color:var(--text); border:1px solid var(--border); background:var(--surface); font-size:13px; }
     .filter-row a.active { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
     .err { background:#fee; border:1px solid #fcc; color:#933; padding:12px; border-radius:4px; margin-bottom:16px; }
-    .ok  { background:#efe; border:1px solid #cdc; color:#363; padding:12px; border-radius:4px; margin-bottom:16px; }
+    .ok  { background:#efe; border:1px solid #cdc; color:#363; padding:12px; border-radius:4px; margin-bottom:16px; transition: opacity .5s ease, max-height .5s ease, margin .5s ease, padding .5s ease; max-height:200px; overflow:hidden; }
+    .ok.rv-dismissed { opacity:0; max-height:0; margin:0; padding:0 12px; border:none; }
     .muted { color:var(--muted); font-size: 13px; }
     a { color: var(--accent); }
     .tabs { display:flex; border-bottom: 2px solid var(--border); margin-bottom: 24px; gap: 0; flex-wrap: wrap; }
@@ -288,6 +289,19 @@ export const adminShell = (title: string, body: string, navActive?: string): str
     <nav>${navHtml}</nav>
   </header>
   <main>${body}</main>
+  <script>
+    // Auto-dismiss success flash banners after 4 seconds so a stale "Saved"
+    // notice doesn't suggest later (unsaved) changes also persisted.
+    (function () {
+      setTimeout(function () {
+        document.querySelectorAll('.ok').forEach(function (el) {
+          el.classList.add('rv-dismissed');
+          // Remove after the transition so any subsequent flash isn't blocked.
+          setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 600);
+        });
+      }, 4000);
+    })();
+  </script>
 </body>
 </html>`;
 };
@@ -2421,6 +2435,14 @@ admin.get('/branding', (c) => {
           <button type="button" data-cmd="formatBlock" data-arg="H2" title="Heading">H</button>
           <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">• List</button>
           <button type="button" data-cmd="createLink" title="Insert link">Link</button>
+          <label class="tmpl-color-btn" title="Text color">
+            <span style="border-bottom:3px solid #222;padding:0 2px;font-weight:600;">A</span>
+            <input type="color" data-text-color value="#222222" tabindex="-1">
+          </label>
+          <label class="tmpl-color-btn" title="Highlight / background color">
+            <span style="background:#fff59d;padding:0 4px;border-radius:2px;">A</span>
+            <input type="color" data-bg-color value="#fff59d" tabindex="-1">
+          </label>
           <button type="button" data-insert-logo title="Insert logo image">Logo</button>
           <select data-insert-var aria-label="Insert variable"><option value="">Insert variable…</option>${variableInsertOptions}</select>
           <button type="button" data-toggle-source title="Edit raw HTML">&lt;/&gt; HTML</button>
@@ -2434,15 +2456,17 @@ admin.get('/branding', (c) => {
         </label>
         <label>Button label</label>
         <input type="text" name="cta_label" value="${escapeHtml(t.cta_label)}" maxlength="60" data-dirty-watch>
+        <p class="muted" style="font-size:12px;margin-top:4px;">The button COLORS are pulled from your Brand Primary colors (Branding → Brand colors). The button VISIBILITY is the checkbox above. The button LABEL is this field. Inside the <code>{{ productsHtml }}</code> block, each product card renders with these settings.</p>
 
         <label style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" name="is_active" value="1" ${t.is_active ? 'checked' : ''} style="width:auto;" data-dirty-watch>
           <span>Active — the system sends this when its trigger fires</span>
         </label>
 
-        <div style="margin-top:16px; display:flex; gap:8px; align-items:center;">
+        <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <button type="submit" class="primary">Save template</button>
-          <a href="/admin/branding/email-template/${encodeURIComponent(t.template_key)}/preview" target="_blank" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;text-decoration:none;color:var(--text);font-size:13px;background:var(--surface);">Preview in new tab</a>
+          <button type="button" data-preview-unsaved title="Preview the email with your CURRENT edits, no save required" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text);font-size:13px;background:var(--surface);cursor:pointer;">Preview (no save)</button>
+          <span data-dirty-indicator style="font-size:12px;color:#a86b00;display:none;">● Unsaved changes</span>
           <code style="font-size:11px;color:var(--muted);margin-left:auto;">${escapeHtml(t.template_key)}</code>
         </div>
       </form>
@@ -2510,7 +2534,7 @@ admin.get('/branding', (c) => {
         id: 'eb-logoUrl',
         name: 'logoUrl',
         label: 'Logo URL',
-        description: 'Image displayed at the top of every email. Use the synced Shopify logo, or paste a different image URL. Recommended: ~280px wide, transparent background.',
+        description: 'Image displayed at the top of every email. Use the synced Shopify logo, or paste a different image URL. Recommended: ~280px wide, transparent background. <strong>Leave this field empty to send emails with no logo at the top</strong> — nothing forces a logo if you don\'t want one. (You can also reference the logo inside a specific template\'s body via the editor toolbar\'s "Logo" button, or via the <code>{{ logoUrl }}</code> variable.)',
         overrideValue: emailOverrides.logoUrl,
         defaultValue: emailDefaults.shopifyLogoUrl,
         placeholder: emailDefaults.shopifyLogoUrl ?? 'https://...',
@@ -2519,8 +2543,8 @@ admin.get('/branding', (c) => {
       ${textField({
         id: 'eb-footerText',
         name: 'footerText',
-        label: 'Footer text',
-        description: 'Short line at the bottom of every email, just above the unsubscribe link. Variables: {{ brandName }}.',
+        label: 'Footer text (shown before the unsubscribe link)',
+        description: 'Short line at the bottom of every email that appears immediately before the unsubscribe link. The unsubscribe link itself is always present and cannot be removed — it\'s required by anti-spam laws (CAN-SPAM in the US, Gmail / Yahoo bulk-sender requirements globally), and gives the customer a one-click way out of future emails. This field is the message that accompanies it ("You\'re receiving this because…"). Variables: <code>{{ brandName }}</code>.',
         overrideValue: emailOverrides.footerText,
         defaultValue: emailDefaults.defaultFooterText,
         placeholder: emailDefaults.defaultFooterText,
@@ -2743,6 +2767,10 @@ admin.get('/branding', (c) => {
       .tmpl-toolbar { display:flex; gap:4px; flex-wrap:wrap; align-items:center; border:1px solid var(--border-strong); border-bottom:none; border-radius:4px 4px 0 0; padding:6px; background:var(--surface-alt); }
       .tmpl-toolbar button { padding:4px 9px; font-size:13px; }
       .tmpl-toolbar select { width:auto; padding:4px 6px; font-size:13px; }
+      .tmpl-color-btn { position:relative; display:inline-flex; align-items:center; padding:4px 8px; border:1px solid var(--border-strong); border-radius:4px; background:var(--surface); cursor:pointer; font-size:13px; }
+      .tmpl-color-btn:hover { background:var(--surface-alt); }
+      .tmpl-color-btn input[type=color] { position:absolute; inset:0; opacity:0; cursor:pointer; }
+      .tmpl-color-btn:focus-within { outline:2px solid var(--accent); outline-offset:1px; }
       .tmpl-editor { border:1px solid var(--border-strong); border-radius:0 0 4px 4px; padding:12px; min-height:220px; background:var(--surface); color:var(--text); font-size:14px; line-height:1.5; overflow:auto; }
       .tmpl-editor:focus { outline:2px solid var(--accent); outline-offset:-2px; }
       .tmpl-source { border-radius:0 0 4px 4px; font-family:monospace; font-size:13px; min-height:220px; }
@@ -2763,8 +2791,31 @@ admin.get('/branding', (c) => {
           ta.selectionStart = ta.selectionEnd = start + text.length;
           ta.focus();
         }
+        // Global "any template form dirty" check, used by the beforeunload guard.
+        function anyDirty() {
+          var forms = document.querySelectorAll('.tmpl-form');
+          for (var i = 0; i < forms.length; i++) {
+            if (forms[i].getAttribute('data-dirty') === '1') return true;
+          }
+          return false;
+        }
+        // Browser-native unsaved-changes guard for full page navigation. The
+        // template-selector dropdown still has its own confirm() because it's a
+        // non-navigation change (template switch within the page).
+        window.addEventListener('beforeunload', function (e) {
+          if (anyDirty()) { e.preventDefault(); e.returnValue = ''; return ''; }
+        });
+
         document.querySelectorAll('.tmpl-form').forEach(function (form) {
-          function markDirty() { form.setAttribute('data-dirty', '1'); }
+          var indicator = form.querySelector('[data-dirty-indicator]');
+          function markDirty() {
+            form.setAttribute('data-dirty', '1');
+            if (indicator) indicator.style.display = 'inline';
+          }
+          function markClean() {
+            form.setAttribute('data-dirty', '0');
+            if (indicator) indicator.style.display = 'none';
+          }
           form.querySelectorAll('[data-dirty-watch]').forEach(function (el) {
             el.addEventListener('input', markDirty);
             el.addEventListener('change', markDirty);
@@ -2774,7 +2825,7 @@ admin.get('/branding', (c) => {
           // Keep the named body_html textarea in sync from the visual editor on submit.
           form.addEventListener('submit', function () {
             if (editor && source && editor.style.display !== 'none') source.value = editor.innerHTML;
-            form.setAttribute('data-dirty', '0');
+            markClean();
           });
           form.querySelectorAll('[data-cmd]').forEach(function (btn) {
             btn.addEventListener('click', function () {
@@ -2785,6 +2836,31 @@ admin.get('/branding', (c) => {
               document.execCommand(cmd, false, arg);
               markDirty();
             });
+          });
+          // Text color + background (highlight) color pickers. The hidden
+          // <input type=color> sits inside the toolbar label; clicking the
+          // visible "A" opens the native color picker. On change, apply via
+          // execCommand. The button's visible color swatch is updated too so
+          // re-clicking applies the most recent color without re-opening the
+          // picker.
+          var textColor = form.querySelector('[data-text-color]');
+          if (textColor) textColor.addEventListener('input', function () {
+            if (editor) editor.focus();
+            document.execCommand('foreColor', false, textColor.value);
+            var swatch = textColor.parentElement.querySelector('span');
+            if (swatch) swatch.style.borderBottomColor = textColor.value;
+            markDirty();
+          });
+          var bgColor = form.querySelector('[data-bg-color]');
+          if (bgColor) bgColor.addEventListener('input', function () {
+            if (editor) editor.focus();
+            // hiliteColor works in most browsers; backColor as fallback for some.
+            if (!document.execCommand('hiliteColor', false, bgColor.value)) {
+              document.execCommand('backColor', false, bgColor.value);
+            }
+            var swatch = bgColor.parentElement.querySelector('span');
+            if (swatch) swatch.style.background = bgColor.value;
+            markDirty();
           });
           var logoBtn = form.querySelector('[data-insert-logo]');
           if (logoBtn) logoBtn.addEventListener('click', function () {
@@ -2807,6 +2883,33 @@ admin.get('/branding', (c) => {
             if (!editor || !source) return;
             if (editor.style.display === 'none') { editor.innerHTML = source.value; editor.style.display = ''; source.style.display = 'none'; }
             else { source.value = editor.innerHTML; source.style.display = ''; editor.style.display = 'none'; }
+          });
+          // "Preview (no save)" — submit the current form values to the
+          // preview-unsaved endpoint in a new tab. Builds a one-shot form so we
+          // don't clobber the main form's action; sync the editor first so the
+          // hidden body_html textarea reflects current visual-editor content.
+          var previewBtn = form.querySelector('[data-preview-unsaved]');
+          if (previewBtn) previewBtn.addEventListener('click', function () {
+            if (editor && source && editor.style.display !== 'none') source.value = editor.innerHTML;
+            var subject = form.querySelector('[name="subject"]').value;
+            var bodyHtml = form.querySelector('[name="body_html"]').value;
+            var ctaEnabled = form.querySelector('[name="cta_enabled"]').checked ? '1' : '0';
+            var ctaLabel = form.querySelector('[name="cta_label"]').value;
+            var tmp = document.createElement('form');
+            tmp.method = 'POST';
+            tmp.action = '/admin/branding/email-template/preview';
+            tmp.target = '_blank';
+            function addField(name, value) {
+              var i = document.createElement('input');
+              i.type = 'hidden'; i.name = name; i.value = value; tmp.appendChild(i);
+            }
+            addField('subject', subject);
+            addField('body_html', bodyHtml);
+            addField('cta_enabled', ctaEnabled);
+            addField('cta_label', ctaLabel);
+            document.body.appendChild(tmp);
+            tmp.submit();
+            document.body.removeChild(tmp);
           });
         });
         select.addEventListener('change', function () {
@@ -2858,6 +2961,47 @@ admin.post('/branding/email-branding', async (c) => {
   return c.redirect('/admin/branding?saved=1#email');
 });
 
+// IMPORTANT: register the literal /new route BEFORE the parameterized /:key
+// route. Hono matches in registration order — if /:key were first, a POST to
+// /branding/email-template/new would be routed to the edit handler with
+// key="new", which then 404s with "No template with key `new`". (Real bug
+// hit during click-through testing on 2026-06-02.)
+admin.post('/branding/email-template/new', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const displayName = String(form.get('display_name') ?? '').trim();
+  const triggerRaw = String(form.get('trigger_event') ?? '');
+  const subject = String(form.get('subject') ?? '').trim() || 'New email subject';
+  if (!displayName) {
+    return c.html(adminShell('Invalid input', `<div class="err">Template name can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
+  }
+  const created = createEmailTemplate({
+    displayName,
+    triggerEvent: isEmailTrigger(triggerRaw) ? triggerRaw : null,
+    subject,
+    bodyHtml: `<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Hi {{ firstName }},</p>\n<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Write your email here.</p>`,
+    ctaEnabled: false,
+    ctaLabel: 'Write a review',
+    isActive: false,
+  });
+  log('info', 'admin created email template', { templateKey: created.template_key });
+  return c.redirect('/admin/branding?saved=1#email');
+});
+
+// Preview an UNSAVED template: render the same preview HTML as the saved-template
+// preview route, but using form fields posted from the editor instead of the
+// stored row. Lets the merchant iterate visually without persisting drafts.
+admin.post('/branding/email-template/preview', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const subject = String(form.get('subject') ?? '').trim() || '(no subject)';
+  const bodyHtml = String(form.get('body_html') ?? '');
+  const ctaEnabled = form.get('cta_enabled') === '1';
+  const ctaLabel = String(form.get('cta_label') ?? '').trim() || 'Write a review';
+  c.header('Content-Type', 'text/html; charset=utf-8');
+  return c.body(renderEmailPreviewHtml({ subject, bodyHtml, ctaEnabled, ctaLabel }));
+});
+
 admin.post('/branding/email-template/:key', async (c) => {
   const key = c.req.param('key');
   const existing = findEmailTemplate(key);
@@ -2895,28 +3039,6 @@ admin.post('/branding/email-template/:key', async (c) => {
   return c.redirect('/admin/branding?saved=1#email');
 });
 
-admin.post('/branding/email-template/new', async (c) => {
-  if (!(await requireAuth(c))) return c.redirect('/admin');
-  const form = await c.req.formData();
-  const displayName = String(form.get('display_name') ?? '').trim();
-  const triggerRaw = String(form.get('trigger_event') ?? '');
-  const subject = String(form.get('subject') ?? '').trim() || 'New email subject';
-  if (!displayName) {
-    return c.html(adminShell('Invalid input', `<div class="err">Template name can't be empty.</div><p><a href="/admin/branding#email">Back</a></p>`, 'branding'), 400);
-  }
-  const created = createEmailTemplate({
-    displayName,
-    triggerEvent: isEmailTrigger(triggerRaw) ? triggerRaw : null,
-    subject,
-    bodyHtml: `<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Hi {{ firstName }},</p>\n<p style="margin:0 0 16px; font-size:16px; line-height:1.55;">Write your email here.</p>`,
-    ctaEnabled: false,
-    ctaLabel: 'Write a review',
-    isActive: false,
-  });
-  log('info', 'admin created email template', { templateKey: created.template_key });
-  return c.redirect('/admin/branding?saved=1#email');
-});
-
 admin.post('/branding/email-template/:key/delete', async (c) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
   const key = c.req.param('key');
@@ -2925,58 +3047,61 @@ admin.post('/branding/email-template/:key/delete', async (c) => {
   return c.redirect('/admin/branding?saved=1#email');
 });
 
-admin.get('/branding/email-template/:key/preview', (c) => {
-  const key = c.req.param('key');
-  const template = findEmailTemplate(key);
-  if (!template) {
-    return c.text('Template not found', 404);
-  }
-
-  // Sample data — what a "typical" email would look like with this template.
-  // No actual products or customers are touched; just renders the template
-  // against placeholder content so the merchant can see the visual result.
+// Shared preview HTML renderer. Used by both the saved-template preview route
+// (GET /:key/preview) and the unsaved-preview route (POST /preview, lets the
+// merchant see edits without saving first). Uses the SAME brand-color
+// resolution as the real dispatcher (resolveBrandColors → CTA button colors)
+// so the preview button matches what the real email button will render with.
+// Previously the preview hard-coded #222/#fff and looked nothing like the
+// actual email when brand colors were customized.
+const renderEmailPreviewHtml = (input: {
+  subject: string;
+  bodyHtml: string;
+  ctaEnabled: boolean;
+  ctaLabel: string;
+}): string => {
   const branding = resolveEmailBranding();
+  const colors = resolveBrandColors(getSetting('shop_brand_json'));
+
+  const productCard = (productTitle: string): string => {
+    const ctaHtml = input.ctaEnabled
+      ? `<a href="#" style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(input.ctaLabel)}</a>
+         <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`
+      : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`;
+    return `
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
+        <tr>
+          <td width="96" style="padding-right:16px;vertical-align:top;">
+            <div style="width:80px;height:80px;background:#eee;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#999;font-size:11px;">[image]</div>
+          </td>
+          <td style="vertical-align:top;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px;">${escapeHtml(productTitle)}</div>
+            ${ctaHtml}
+          </td>
+        </tr>
+      </table>`;
+  };
+
   const sampleCtx = {
     firstName: 'Maria',
     brandName: config.email.brandName,
     productName: 'Sample Product',
     productCount: 2,
-    productsHtml: `
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
-        <tr>
-          <td width="96" style="padding-right:16px;vertical-align:top;">
-            <div style="width:80px;height:80px;background:#eee;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#999;font-size:11px;">[image]</div>
-          </td>
-          <td style="vertical-align:top;">
-            <div style="font-size:16px;font-weight:600;margin-bottom:6px;">Sample Product</div>
-            ${template.cta_enabled ? `<a href="#" style="display:inline-block;background:#222;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(template.cta_label)}</a>
-              <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>` : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`}
-          </td>
-        </tr>
-      </table>
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin: 0 0 20px;">
-        <tr>
-          <td width="96" style="padding-right:16px;vertical-align:top;">
-            <div style="width:80px;height:80px;background:#eee;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#999;font-size:11px;">[image]</div>
-          </td>
-          <td style="vertical-align:top;">
-            <div style="font-size:16px;font-weight:600;margin-bottom:6px;">Another Sample Product</div>
-            ${template.cta_enabled ? `<a href="#" style="display:inline-block;background:#222;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(template.cta_label)}</a>
-              <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>` : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`}
-          </td>
-        </tr>
-      </table>
-    `,
+    productsHtml: productCard('Sample Product') + productCard('Another Sample Product'),
     unsubGlobalUrl: '#preview',
-    // Flat global variables — sample values so any template (request, removed,
-    // etc.) previews with content rather than blanks.
     unsubscribeUrl: '#preview',
     reviewUrl: '#preview',
     retractionReason: 'contained content that violates our review guidelines',
     logoUrl: branding.logoUrl ?? '',
+    // Campaign sample variables so campaign-trigger templates also render with content.
+    campaignName: 'Sample Campaign',
+    discountCode: 'SAMPLEXXXX',
+    reviewLinksHtml: productCard('Sample Product') + productCard('Another Sample Product'),
+    feedbackUrlsHtml: `<p style="margin:0 0 16px;"><a href="#preview" style="color:${colors.ctaBackground};">Sample feedback link</a></p>`,
   };
-  const renderedBody = renderString(template.body_html, sampleCtx);
-  const renderedSubject = renderString(template.subject, sampleCtx);
+
+  const renderedBody = renderString(input.bodyHtml, sampleCtx);
+  const renderedSubject = renderString(input.subject, sampleCtx);
   const renderedFooter = renderString(branding.footerText, sampleCtx);
 
   const logoHeader = branding.logoUrl
@@ -2991,7 +3116,7 @@ admin.get('/branding/email-template/:key/preview', (c) => {
     </p>
   `;
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -3000,7 +3125,7 @@ admin.get('/branding/email-template/:key/preview', (c) => {
 </head>
 <body style="margin:0; padding:0; background:#f6f6f6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#222;">
   <div style="padding:8px 16px; background:#fff8e1; border-bottom:1px solid #ffd54f; font-size:12px; color:#7a4f01;">
-    <strong>Preview</strong> — this email is rendered with sample data (placeholder customer name, fake products). Subject: <code>${escapeHtml(renderedSubject)}</code>
+    <strong>Preview</strong> — sample data (placeholder customer name, fake products). Subject: <code>${escapeHtml(renderedSubject)}</code>
   </div>
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
     <tr><td align="center" style="padding:32px 16px;">
@@ -3017,9 +3142,21 @@ admin.get('/branding/email-template/:key/preview', (c) => {
   </table>
 </body>
 </html>`;
+};
 
+admin.get('/branding/email-template/:key/preview', (c) => {
+  const key = c.req.param('key');
+  const template = findEmailTemplate(key);
+  if (!template) {
+    return c.text('Template not found', 404);
+  }
   c.header('Content-Type', 'text/html; charset=utf-8');
-  return c.body(html);
+  return c.body(renderEmailPreviewHtml({
+    subject: template.subject,
+    bodyHtml: template.body_html,
+    ctaEnabled: template.cta_enabled === 1,
+    ctaLabel: template.cta_label,
+  }));
 });
 
 admin.post('/branding', async (c) => {
