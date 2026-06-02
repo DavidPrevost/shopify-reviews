@@ -215,6 +215,15 @@ export interface EligibleRow {
 // Adding new suppression rules: add another AND, do not filter in TypeScript.
 // Returns at most `batchSize` rows; orders by oldest due_at first so the
 // longest-waited purchases get attention first.
+//
+// Two cadence rules are bypassable for testing via the dev toggles in
+// admin → Settings → Cadence: bypass_cadence_max_requests and
+// bypass_cadence_min_days. When a bypass setting is '1', that rule is
+// effectively short-circuited. Defaults to off; missing setting rows behave
+// identically because the OR's first arm evaluates to NULL/false and the
+// original check runs. The opt-outs, cutoff, and already-reviewed clauses
+// are deliberately NOT bypassable — those are correctness/respect rules,
+// not cadence policy.
 export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
   return getDb().prepare(`
     SELECT
@@ -236,10 +245,16 @@ export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
       AND p.fulfilled_at >= CAST((SELECT value FROM settings WHERE key='request_cutoff_at') AS INTEGER)
       AND p.product_opt_out = 0
       AND c.global_opt_out = 0
-      AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
-      AND (c.last_request_sent_at IS NULL
-           OR c.last_request_sent_at < unixepoch()
-              - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400)
+      AND (
+        (SELECT value FROM settings WHERE key='bypass_cadence_max_requests') = '1'
+        OR p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
+      )
+      AND (
+        (SELECT value FROM settings WHERE key='bypass_cadence_min_days') = '1'
+        OR c.last_request_sent_at IS NULL
+        OR c.last_request_sent_at < unixepoch()
+           - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400
+      )
       AND NOT EXISTS (
         SELECT 1 FROM reviews r
          WHERE r.customer_id = c.id
@@ -249,6 +264,22 @@ export const findEligiblePurchases = (batchSize: number): EligibleRow[] => {
     LIMIT ?
   `).all(batchSize) as EligibleRow[];
 };
+
+// Cadence-bypass flags. Read at dispatcher run start so the result/log can
+// surface which (if any) suppression rules are currently bypassed — without
+// this signal, an operator reading audit numbers alongside considered/sent
+// counts could get confused (e.g. "cadenceTooSoon: 1, sent: 1" looks like a
+// double count, but with bypassMinDays=true it's expected). The audit query
+// itself is unchanged: it always reports what would normally suppress.
+export interface CadenceBypassFlags {
+  minDays: boolean;
+  maxRequests: boolean;
+}
+
+export const getCadenceBypassFlags = (): CadenceBypassFlags => ({
+  minDays: getSetting('bypass_cadence_min_days') === '1',
+  maxRequests: getSetting('bypass_cadence_max_requests') === '1',
+});
 
 export interface SuppressionAudit {
   globalOptOut: number;

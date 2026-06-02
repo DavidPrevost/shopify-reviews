@@ -3099,6 +3099,8 @@ admin.get('/settings', (c) => {
   const dispatcherHour = getSettingNumber('dispatcher_hour', 20);
   const dispatcherMinute = getSettingNumber('dispatcher_minute', 17);
   const immediateOnFulfillment = getSetting('dispatch_immediately_on_fulfillment') === '1';
+  const bypassCadenceMinDays = getSetting('bypass_cadence_min_days') === '1';
+  const bypassCadenceMaxRequests = getSetting('bypass_cadence_max_requests') === '1';
   const requestCutoffAt = getSettingNumber('request_cutoff_at', 0);
   const notifyConfig = getNewReviewNotifyConfig();
 
@@ -3162,12 +3164,35 @@ admin.get('/settings', (c) => {
         <p class="muted" style="margin: 8px 0;">Shopify brand colors and the widget appearance live on the <a href="/admin/branding">Branding</a> page.</p>
 
         <div style="margin-top:24px; padding:16px; background:#fff8e1; border:1px solid #ffd54f; border-radius:6px;">
+          <p style="margin:0 0 12px; font-weight:600; color:#7a4f01; font-size:14px;">
+            Testing-only dev toggles — leave OFF in production
+          </p>
+          <p class="muted" style="margin:0 0 16px; color:#7a4f01; font-size:13px;">
+            Each toggle loosens one cadence rule for end-to-end testing without waiting days. The opt-outs, the go-live cutoff, and the already-reviewed check are never bypassable — they're correctness rules, not policy.
+          </p>
+
           <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">
             <input type="checkbox" name="dispatch_immediately_on_fulfillment" value="1" ${immediateOnFulfillment ? 'checked' : ''} style="width:auto;">
-            <span>Send review-request email immediately on fulfillment <em style="color:#a86b00;">— testing only</em></span>
+            <span>Send review-request email immediately on fulfillment</span>
           </label>
-          <p class="muted" style="margin:8px 0 0; color:#7a4f01;">
-            <strong>Leave OFF in production.</strong> When ON, every order's review email goes out within seconds of being marked fulfilled — bypassing the normal <code>request_delay_days</code> waiting period that prevents the system from feeling spammy. Useful for end-to-end testing where waiting 14 days isn't practical.
+          <p class="muted" style="margin:4px 0 16px 24px; color:#7a4f01; font-size:13px;">
+            Bypasses the <code>request_delay_days</code> waiting period. When ON, every order's review email goes out within seconds of being marked fulfilled. Useful for end-to-end testing where waiting 14 days isn't practical.
+          </p>
+
+          <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="bypass_cadence_min_days" value="1" ${bypassCadenceMinDays ? 'checked' : ''} style="width:auto;">
+            <span>Bypass min-days-between cadence</span>
+          </label>
+          <p class="muted" style="margin:4px 0 16px 24px; color:#7a4f01; font-size:13px;">
+            Treats <code>cadence_min_days_between</code> as 0. The same customer can be emailed back-to-back. Useful for testing follow-up and repeat-customer templates without waiting between sends. The audit log still reports what would normally suppress; the dispatcher's log line includes <code>bypassed.minDays: true</code> so the operator can correlate.
+          </p>
+
+          <label style="font-weight:600; color:#7a4f01; display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="bypass_cadence_max_requests" value="1" ${bypassCadenceMaxRequests ? 'checked' : ''} style="width:auto;">
+            <span>Bypass max-requests-per-purchase</span>
+          </label>
+          <p class="muted" style="margin:4px 0 0 24px; color:#7a4f01; font-size:13px;">
+            Treats <code>cadence_max_requests</code> as effectively unlimited. Useful for testing multi-touch send sequences past the normal cap. Note that <code>recordRequestSentBatch</code> still NULLs <code>due_at</code> when the cap is reached, so each manual SQL re-arm of <code>due_at</code> is needed between sends past the cap. The audit log still counts what would normally suppress.
           </p>
         </div>
 
@@ -3431,15 +3456,24 @@ admin.post('/settings', async (c) => {
     }
   }
 
-  // Checkbox: form.get returns '1' when checked, null when unchecked.
+  // Dev toggles: form.get returns '1' when checked, null when unchecked.
   const immediateChecked = form.get('dispatch_immediately_on_fulfillment') === '1';
   setSetting('dispatch_immediately_on_fulfillment', immediateChecked ? '1' : '0');
+  const bypassMinDaysChecked = form.get('bypass_cadence_min_days') === '1';
+  setSetting('bypass_cadence_min_days', bypassMinDaysChecked ? '1' : '0');
+  const bypassMaxRequestsChecked = form.get('bypass_cadence_max_requests') === '1';
+  setSetting('bypass_cadence_max_requests', bypassMaxRequestsChecked ? '1' : '0');
 
   if (scheduleChanged) {
     restartScheduler();
   }
 
-  log('info', 'admin settings updated', { scheduleChanged, immediateOnFulfillment: immediateChecked });
+  log('info', 'admin settings updated', {
+    scheduleChanged,
+    immediateOnFulfillment: immediateChecked,
+    bypassCadenceMinDays: bypassMinDaysChecked,
+    bypassCadenceMaxRequests: bypassMaxRequestsChecked,
+  });
   return c.redirect('/admin/settings?saved=1');
 });
 

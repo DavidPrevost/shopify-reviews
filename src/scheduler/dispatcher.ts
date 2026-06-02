@@ -7,9 +7,11 @@ import {
   findActiveTemplateForTrigger,
   getSetting,
   getSettingNumber,
+  getCadenceBypassFlags,
   auditSuppressions,
   type EligibleRow,
   type SuppressionAudit,
+  type CadenceBypassFlags,
 } from '../db/queries.js';
 import { renderTemplate, renderString, escapeHtml } from '../email/render.js';
 import { sendMail } from '../email/smtp-client.js';
@@ -27,6 +29,11 @@ export interface DispatchResult {
   failed: number;              // emails that errored during send
   skipped: number;             // groups skipped (e.g. all products missing)
   suppressed: SuppressionAudit; // purchases excluded by each suppression rule
+  // Which cadence bypass flags were in effect for this run. The audit numbers
+  // above ALWAYS reflect what the rules would normally suppress — so an
+  // operator can see "cadenceTooSoon: 1, sent: 1" alongside "bypassed.minDays: true"
+  // and understand the rule fired but the bypass let the send through.
+  bypassed: CadenceBypassFlags;
 }
 
 interface GroupItem {
@@ -322,6 +329,8 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
     ['PUBLIC_URL',          config.publicUrl],
   );
 
+  const bypassed = getCadenceBypassFlags();
+
   // Panic-button gate: skip sending entirely while paused. Eligible purchases
   // simply wait until the pause lifts — their due_at is preserved, so they'll
   // be picked up on the next normal run.
@@ -334,6 +343,7 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
       failed: 0,
       skipped: 0,
       suppressed: { globalOptOut: 0, productOptOut: 0, maxRequestsHit: 0, cadenceTooSoon: 0, alreadyReviewed: 0 },
+      bypassed,
     };
   }
 
@@ -347,6 +357,7 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
     considered: rows.length,
     groupsConsidered: groups.length,
     suppressed,
+    bypassed,
   });
 
   const result: DispatchResult = {
@@ -356,6 +367,7 @@ export const runDispatcher = async (): Promise<DispatchResult> => {
     failed: 0,
     skipped: 0,
     suppressed,
+    bypassed,
   };
 
   for (const group of groups) {
