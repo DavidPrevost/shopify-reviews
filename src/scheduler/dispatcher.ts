@@ -5,7 +5,6 @@ import {
   recordRequestSentBatch,
   logEmailFailure,
   findActiveTemplateForTrigger,
-  getSetting,
   getSettingNumber,
   getCadenceBypassFlags,
   auditSuppressions,
@@ -18,7 +17,7 @@ import { sendMail } from '../email/smtp-client.js';
 import { signReviewToken, signUnsubscribeToken } from '../email/tokens.js';
 import { resolveEmailBranding } from '../email/email-config.js';
 import { log } from '../lib/logger.js';
-import { resolveBrandColors, type ResolvedBrandColors } from '../shopify/brand-info.js';
+import { resolveWidgetConfig, type ResolvedWidgetConfig } from '../shopify/widget-config.js';
 import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
 import { isReviewsPaused } from '../lib/panic.js';
 
@@ -56,17 +55,18 @@ const buildUnsubProductUrl = (token: string): string =>
   `${trimUrl(config.publicUrl)}/unsubscribe/product?token=${encodeURIComponent(token)}`;
 
 interface CtaConfig {
-  enabled: boolean;
-  label: string;
+  enabled: boolean;        // per-template visibility — still controlled per template
 }
 
-// HTML for a single product card inside the multi-product email body. CTA
-// label and visibility come from the active template; per-card unsubscribe
-// link is always present so customers can opt out of a specific product
-// without unsubscribing globally.
+// HTML for a single product card inside the multi-product email body.
+// Button color, border-radius, and label all come from the widget config
+// (Branding → Widget) so the email button matches the storefront widget
+// button exactly — one place to configure, two surfaces in sync. Per-card
+// unsubscribe link is always present so customers can opt out of a specific
+// product without unsubscribing globally.
 const renderProductCard = (
   item: GroupItem,
-  colors: ResolvedBrandColors,
+  widget: ResolvedWidgetConfig,
   cta: CtaConfig,
 ): string => {
   const reviewUrl = buildReviewUrl(item.reviewToken);
@@ -77,8 +77,8 @@ const renderProductCard = (
 
   const ctaHtml = cta.enabled
     ? `<a href="${reviewUrl}"
-         style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
-        ${escapeHtml(cta.label)}
+         style="display:inline-block;background:${widget.ctaBackground};color:${widget.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:${widget.borderRadius}px;font-size:14px;font-weight:600;">
+        ${escapeHtml(widget.ctaLabel)}
       </a>
       <div style="margin-top:6px;font-size:12px;">
         <a href="${unsubProductUrl}" style="color:#888;text-decoration:underline;">Don't ask about this one</a>
@@ -201,7 +201,7 @@ const dispatchGroup = async (
   const unsubGlobalToken = signUnsubscribeToken({ customerId, kind: 'global' });
   const unsubGlobalUrl = buildUnsubGlobalUrl(unsubGlobalToken);
 
-  const colors = resolveBrandColors(getSetting('shop_brand_json'));
+  const widget = resolveWidgetConfig();
   const branding = resolveEmailBranding();
 
   // Select the template by trigger. A purchase that's already been asked at
@@ -226,9 +226,8 @@ const dispatchGroup = async (
 
   const ctaConfig: CtaConfig = {
     enabled: template.cta_enabled === 1,
-    label: template.cta_label,
   };
-  const productsHtml = items.map((item) => renderProductCard(item, colors, ctaConfig)).join('');
+  const productsHtml = items.map((item) => renderProductCard(item, widget, ctaConfig)).join('');
 
   // Pre-render context: the body, subject, footer text all use this. Variables
   // are inserted as-is (no nested re-substitution) since the rendered output

@@ -26,13 +26,13 @@ import {
   type CampaignInvitationRow,
 } from '../db/campaigns.js';
 import { listFeedbackFormsForCampaign, type FeedbackFormRow } from '../db/feedback.js';
-import { findActiveTemplateForTriggerCampaignAware, getSetting } from '../db/queries.js';
+import { findActiveTemplateForTriggerCampaignAware } from '../db/queries.js';
 import { createCampaignDiscountCode } from '../shopify/discount-codes.js';
 import { renderString, renderTemplate, escapeHtml } from './render.js';
 import { resolveEmailBranding } from './email-config.js';
 import { sendMail } from './smtp-client.js';
 import { signSampleInviteToken } from './tokens.js';
-import { resolveBrandColors, type ResolvedBrandColors } from '../shopify/brand-info.js';
+import { resolveWidgetConfig, type ResolvedWidgetConfig } from '../shopify/widget-config.js';
 import { getOrFetchProduct, type ProductInfo } from '../shopify/product-info.js';
 import { log } from '../lib/logger.js';
 
@@ -169,8 +169,7 @@ const postSendStatus = (trigger: CampaignBatchTrigger): CampaignMemberStatus | n
 const buildReviewLinksHtml = (
   invitations: CampaignInvitationRow[],
   productInfoById: Map<string, ProductInfo | null>,
-  colors: ResolvedBrandColors,
-  ctaLabel: string,
+  widget: ResolvedWidgetConfig,
 ): string => {
   const base = config.publicUrl.replace(/\/+$/, '');
   const cards = invitations.map((inv) => {
@@ -193,8 +192,8 @@ const buildReviewLinksHtml = (
           <td style="vertical-align:top;">
             <div style="font-size:16px;font-weight:600;margin-bottom:6px;">${escapeHtml(title)}</div>
             <a href="${reviewUrl}"
-               style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">
-              ${escapeHtml(ctaLabel)}
+               style="display:inline-block;background:${widget.ctaBackground};color:${widget.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:${widget.borderRadius}px;font-size:14px;font-weight:600;">
+              ${escapeHtml(widget.ctaLabel)}
             </a>
           </td>
         </tr>
@@ -212,7 +211,7 @@ const buildReviewLinksHtml = (
 // uses the hosted landing as the always-works default.
 const buildFeedbackUrlsHtml = (
   forms: FeedbackFormRow[],
-  colors: ResolvedBrandColors,
+  widget: ResolvedWidgetConfig,
 ): string => {
   if (forms.length === 0) return '';
   const publicBase = config.publicUrl.replace(/\/+$/, '');
@@ -221,7 +220,7 @@ const buildFeedbackUrlsHtml = (
     return `
       <div style="margin: 0 0 12px;">
         <a href="${url}"
-           style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:8px 14px;border-radius:6px;font-size:14px;font-weight:600;">
+           style="display:inline-block;background:${widget.ctaBackground};color:${widget.ctaForeground};text-decoration:none;padding:8px 14px;border-radius:${widget.borderRadius}px;font-size:14px;font-weight:600;">
           ${escapeHtml(`Give feedback — ${f.title}`)}
         </a>
       </div>
@@ -325,11 +324,13 @@ export const sendCampaignBatch = async (input: {
   const productInfoById = await fetchProductsForInvitations(allInvitations);
   const feedbackForms = listFeedbackFormsForCampaign(camp.id);
 
-  const colors = resolveBrandColors(getSetting('shop_brand_json'));
+  const widget = resolveWidgetConfig();
   const branding = resolveEmailBranding();
 
-  const ctaLabel = template.cta_label || 'Write a review';
-  const feedbackUrlsHtml = buildFeedbackUrlsHtml(feedbackForms, colors);
+  // Note: button colors / border-radius / label all come from widget config now
+  // (Branding → Widget), so the email button matches the storefront widget
+  // button exactly. The per-template cta_label is no longer consulted.
+  const feedbackUrlsHtml = buildFeedbackUrlsHtml(feedbackForms, widget);
 
   const eligible: Array<{ member: CampaignMemberRow; data: { firstName: string; email: string }; invitations: CampaignInvitationRow[] }> = [];
   for (const m of allMembers) {
@@ -383,7 +384,7 @@ export const sendCampaignBatch = async (input: {
   const nextStatus = postSendStatus(input.trigger);
 
   for (const row of eligible) {
-    const reviewLinksHtml = buildReviewLinksHtml(row.invitations, productInfoById, colors, ctaLabel);
+    const reviewLinksHtml = buildReviewLinksHtml(row.invitations, productInfoById, widget);
 
     const ctx = {
       firstName: escapeHtml(row.data.firstName) || 'there',

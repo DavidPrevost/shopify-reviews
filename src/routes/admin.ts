@@ -2457,9 +2457,9 @@ admin.get('/branding', (c) => {
           <input type="checkbox" name="cta_enabled" value="1" ${t.cta_enabled ? 'checked' : ''} style="width:auto;" data-dirty-watch>
           <span>Show the review button on each product card</span>
         </label>
-        <label>Button label</label>
-        <input type="text" name="cta_label" value="${escapeHtml(t.cta_label)}" maxlength="60" data-dirty-watch>
-        <p class="muted" style="font-size:12px;margin-top:4px;">The button COLORS are pulled from your Brand Primary colors (Branding → Brand colors). The button VISIBILITY is the checkbox above. The button LABEL is this field. Inside the <code>{{ productsHtml }}</code> block, each product card renders with these settings.</p>
+        <p class="muted" style="font-size:12px;margin-top:4px;">The button's <strong>colors, border radius, and label</strong> are all pulled from <a href="/admin/branding#widget">Branding → Widget</a> — change them there and they update on both the email button and the storefront widget button. This checkbox controls per-template <em>visibility</em> only: for a review-request email you'd leave it checked; for a "your review was removed" email you might uncheck it.</p>
+        <!-- per-template cta_label is no longer surfaced in the UI; the column remains in the DB but is ignored. The widget's ctaLabel (Branding → Widget) is the single source of truth. We still submit the existing value as a hidden field so re-saving doesn't blank the column. -->
+        <input type="hidden" name="cta_label" value="${escapeHtml(t.cta_label)}">
 
         <label style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" name="is_active" value="1" ${t.is_active ? 'checked' : ''} style="width:auto;" data-dirty-watch>
@@ -2897,7 +2897,6 @@ admin.get('/branding', (c) => {
             var subject = form.querySelector('[name="subject"]').value;
             var bodyHtml = form.querySelector('[name="body_html"]').value;
             var ctaEnabled = form.querySelector('[name="cta_enabled"]').checked ? '1' : '0';
-            var ctaLabel = form.querySelector('[name="cta_label"]').value;
             var tmp = document.createElement('form');
             tmp.method = 'POST';
             tmp.action = '/admin/branding/email-template/preview';
@@ -2909,7 +2908,6 @@ admin.get('/branding', (c) => {
             addField('subject', subject);
             addField('body_html', bodyHtml);
             addField('cta_enabled', ctaEnabled);
-            addField('cta_label', ctaLabel);
             document.body.appendChild(tmp);
             tmp.submit();
             document.body.removeChild(tmp);
@@ -3000,9 +2998,8 @@ admin.post('/branding/email-template/preview', async (c) => {
   const subject = String(form.get('subject') ?? '').trim() || '(no subject)';
   const bodyHtml = String(form.get('body_html') ?? '');
   const ctaEnabled = form.get('cta_enabled') === '1';
-  const ctaLabel = String(form.get('cta_label') ?? '').trim() || 'Write a review';
   c.header('Content-Type', 'text/html; charset=utf-8');
-  return c.body(renderEmailPreviewHtml({ subject, bodyHtml, ctaEnabled, ctaLabel }));
+  return c.body(renderEmailPreviewHtml({ subject, bodyHtml, ctaEnabled }));
 });
 
 admin.post('/branding/email-template/:key', async (c) => {
@@ -3052,23 +3049,21 @@ admin.post('/branding/email-template/:key/delete', async (c) => {
 
 // Shared preview HTML renderer. Used by both the saved-template preview route
 // (GET /:key/preview) and the unsaved-preview route (POST /preview, lets the
-// merchant see edits without saving first). Uses the SAME brand-color
-// resolution as the real dispatcher (resolveBrandColors → CTA button colors)
-// so the preview button matches what the real email button will render with.
-// Previously the preview hard-coded #222/#fff and looked nothing like the
-// actual email when brand colors were customized.
+// merchant see edits without saving first). Uses the SAME widget config as
+// the real dispatcher (resolveWidgetConfig → CTA bg, fg, border-radius, label)
+// so the preview button matches the real email button AND the storefront
+// widget button. Single knob, all three surfaces in sync.
 const renderEmailPreviewHtml = (input: {
   subject: string;
   bodyHtml: string;
   ctaEnabled: boolean;
-  ctaLabel: string;
 }): string => {
   const branding = resolveEmailBranding();
-  const colors = resolveBrandColors(getSetting('shop_brand_json'));
+  const widget = resolveWidgetConfig();
 
   const productCard = (productTitle: string): string => {
     const ctaHtml = input.ctaEnabled
-      ? `<a href="#" style="display:inline-block;background:${colors.ctaBackground};color:${colors.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px;font-weight:600;">${escapeHtml(input.ctaLabel)}</a>
+      ? `<a href="#" style="display:inline-block;background:${widget.ctaBackground};color:${widget.ctaForeground};text-decoration:none;padding:10px 18px;border-radius:${widget.borderRadius}px;font-size:14px;font-weight:600;">${escapeHtml(widget.ctaLabel)}</a>
          <div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`
       : `<div style="margin-top:6px;font-size:12px;"><a href="#" style="color:#888;text-decoration:underline;">Don't ask about this one</a></div>`;
     return `
@@ -3100,7 +3095,7 @@ const renderEmailPreviewHtml = (input: {
     campaignName: 'Sample Campaign',
     discountCode: 'SAMPLEXXXX',
     reviewLinksHtml: productCard('Sample Product') + productCard('Another Sample Product'),
-    feedbackUrlsHtml: `<p style="margin:0 0 16px;"><a href="#preview" style="color:${colors.ctaBackground};">Sample feedback link</a></p>`,
+    feedbackUrlsHtml: `<p style="margin:0 0 16px;"><a href="#preview" style="color:${widget.ctaBackground};">Sample feedback link</a></p>`,
   };
 
   const renderedBody = renderString(input.bodyHtml, sampleCtx);
@@ -3153,7 +3148,6 @@ admin.get('/branding/email-template/:key/preview', (c) => {
     subject: template.subject,
     bodyHtml: template.body_html,
     ctaEnabled: template.cta_enabled === 1,
-    ctaLabel: template.cta_label,
   }));
 });
 
