@@ -28,7 +28,7 @@ export const EMAIL_VARIABLES: EmailVariable[] = [
   { key: 'reviewUrl', label: 'Review link', description: 'A direct link for the recipient to write their review (used in single-product / transactional emails).' },
   { key: 'unsubscribeUrl', label: 'Unsubscribe link', description: 'One-click link to stop review-request emails.' },
   { key: 'retractionReason', label: 'Reason a review was removed', description: 'Customer-friendly reason text, used in the “Review removed” email.' },
-  { key: 'logoUrl', label: 'Logo image URL', description: 'URL of your uploaded/synced logo — use it as the src of an <img> if you want the logo inside the body (it already appears in the header).' },
+  { key: 'logoUrl', label: 'Logo image URL', description: 'URL of your uploaded/synced logo. Use it as the src of an <img> if you want your logo to appear inside the email body. The system does NOT auto-prepend a logo header — if you want one, insert it via the Logo button in the toolbar (or this variable).' },
   { key: 'campaignName', label: 'Campaign name', description: 'The campaign\'s display name. Available in campaign-triggered emails.' },
   {
     key: 'reviewLinksHtml',

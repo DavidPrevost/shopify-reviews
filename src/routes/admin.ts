@@ -2435,6 +2435,9 @@ admin.get('/branding', (c) => {
           <button type="button" data-cmd="formatBlock" data-arg="H2" title="Heading">H</button>
           <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">• List</button>
           <button type="button" data-cmd="createLink" title="Insert link">Link</button>
+          <button type="button" data-cmd="justifyLeft" title="Align left" aria-label="Align left">⫷</button>
+          <button type="button" data-cmd="justifyCenter" title="Center" aria-label="Center">≡</button>
+          <button type="button" data-cmd="justifyRight" title="Align right" aria-label="Align right">⫸</button>
           <label class="tmpl-color-btn" title="Text color">
             <span style="border-bottom:3px solid #222;padding:0 2px;font-weight:600;">A</span>
             <input type="color" data-text-color value="#222222" tabindex="-1">
@@ -3104,11 +3107,6 @@ const renderEmailPreviewHtml = (input: {
   const renderedSubject = renderString(input.subject, sampleCtx);
   const renderedFooter = renderString(branding.footerText, sampleCtx);
 
-  const logoHeader = branding.logoUrl
-    ? `<tr><td align="center" style="padding:24px 32px 0;">
-         <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
-       </td></tr>`
-    : '';
   const footerHtml = `
     <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
       ${renderedFooter}
@@ -3116,6 +3114,7 @@ const renderEmailPreviewHtml = (input: {
     </p>
   `;
 
+  // Preview shell mirrors the real shell — no auto-prepended logo header.
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3130,7 +3129,6 @@ const renderEmailPreviewHtml = (input: {
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px; background:#ffffff; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
-        ${logoHeader}
         <tr><td style="padding:32px 32px 16px;">
           ${renderedBody}
         </td></tr>

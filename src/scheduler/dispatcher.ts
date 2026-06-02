@@ -247,12 +247,6 @@ const dispatchGroup = async (
   const renderedSubject = renderString(template.subject, ctx);
   const renderedFooterText = renderString(branding.footerText, ctx);
 
-  const logoHeader = branding.logoUrl
-    ? `<tr><td align="center" style="padding:24px 32px 0;">
-         <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
-       </td></tr>`
-    : '';
-
   const footerHtml = `
     <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
       ${renderedFooterText}
@@ -260,10 +254,13 @@ const dispatchGroup = async (
     </p>
   `;
 
+  // No auto-prepended logo header — by design, the merchant places the logo
+  // inside the template body via the Insert Logo button (or via the
+  // {{ logoUrl }} variable) if they want one. The shell wraps body + footer
+  // only; nothing is forced.
   const html = renderTemplate('_shell.html', {
     subject: renderedSubject,
     body: renderedBody,
-    logoHeader,
     footerHtml,
   });
 

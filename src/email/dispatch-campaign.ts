@@ -398,17 +398,12 @@ export const sendCampaignBatch = async (input: {
     const renderedBody = renderString(template.body_html, ctx);
     const renderedFooterText = renderString(branding.footerText, ctx);
 
-    const logoHeader = branding.logoUrl
-      ? `<tr><td align="center" style="padding:24px 32px 0;">
-           <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
-         </td></tr>`
-      : '';
     const footerHtml = `<p style="margin:0; font-size:12px; color:#888; line-height:1.5;">${renderedFooterText}</p>`;
 
+    // No auto-prepended logo header — see dispatcher.ts for rationale.
     const html = renderTemplate('_shell.html', {
       subject: renderedSubject,
       body: renderedBody,
-      logoHeader,
       footerHtml,
     });
 

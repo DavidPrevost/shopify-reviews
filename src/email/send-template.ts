@@ -18,7 +18,7 @@ import {
   findActiveTemplateForTriggerCampaignAware,
   type EmailTemplateRow,
 } from '../db/queries.js';
-import { renderString, renderTemplate, escapeHtml } from './render.js';
+import { renderString, renderTemplate } from './render.js';
 import { sendMail } from './smtp-client.js';
 import { resolveEmailBranding } from './email-config.js';
 import { log } from '../lib/logger.js';
@@ -95,22 +95,16 @@ const sendFromTemplate = async (
   const renderedBody = renderString(template.body_html, input.context);
   const renderedFooterText = renderString(branding.footerText, input.context);
 
-  const logoHeader = branding.logoUrl
-    ? `<tr><td align="center" style="padding:24px 32px 0;">
-         <img src="${branding.logoUrl}" alt="${escapeHtml(branding.senderName)}" style="max-width:140px; height:auto;" />
-       </td></tr>`
-    : '';
-
   const footerHtml = `
     <p style="margin:0; font-size:12px; color:#888; line-height:1.5;">
       ${renderedFooterText}
     </p>
   `;
 
+  // No auto-prepended logo header — see dispatcher.ts for rationale.
   const html = renderTemplate('_shell.html', {
     subject: renderedSubject,
     body: renderedBody,
-    logoHeader,
     footerHtml,
   });
 
