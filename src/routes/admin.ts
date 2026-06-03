@@ -567,10 +567,10 @@ const renderPanicCard = (
         <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:16px; align-items:flex-end;">
           <form method="POST" action="/admin/panic/extend" style="display:flex; gap:8px; align-items:flex-end;">
             <div>
-              <label for="extend-hours">Extend by</label>
+              <label for="extend-hours">Reset to</label>
               <input id="extend-hours" name="hours" type="number" min="${PAUSE_MIN_HOURS}" max="${PAUSE_MAX_HOURS}" value="${PAUSE_DEFAULT_HOURS}" style="width:90px;"> hours
             </div>
-            <button type="submit">Extend pause</button>
+            <button type="submit">Reset pause timing</button>
           </form>
 
           <form method="POST" action="/admin/panic/resume">
@@ -846,10 +846,33 @@ admin.get('/reviews', (c) => {
         });
         var rev = document.getElementById('profanity-reveal');
         var ta = document.getElementById('profanity_wordlist');
-        if (rev && ta) rev.addEventListener('click', function () {
-          var on = ta.classList.toggle('revealed');
-          rev.textContent = on ? 'Hide list' : 'Reveal list';
-        });
+        function syncRevealBtn() {
+          if (rev) rev.textContent = ta.classList.contains('revealed') ? 'Hide list' : 'Reveal list';
+        }
+        if (rev && ta) {
+          rev.addEventListener('click', function () {
+            ta.classList.toggle('revealed');
+            syncRevealBtn();
+          });
+        }
+        // Auto-reveal when the textarea is focused or clicked. The CSS blur
+        // filter desyncs visual hit coords from the underlying text cursor:
+        // clicks land in the wrong spot and the caret snaps back to home as
+        // soon as the user types. Clicking the textarea is an explicit "I
+        // want to edit" signal, so revealing is the right reaction; the
+        // merchant can re-hide via the button afterward. Two listeners
+        // because focus alone misses click-only selection attempts on some
+        // browsers; click alone misses tab-into-field.
+        if (ta) {
+          ['focus', 'click'].forEach(function (ev) {
+            ta.addEventListener(ev, function () {
+              if (!ta.classList.contains('revealed')) {
+                ta.classList.add('revealed');
+                syncRevealBtn();
+              }
+            });
+          });
+        }
       })();
     </script>
   `, 'reviews'));
@@ -3480,25 +3503,6 @@ admin.get('/settings', (c) => {
     </section>
 
     <section id="tab-notifications" class="tab-panel" data-tab="notifications">
-    <div class="card" style="background:#fdecea; border:2px solid #d9534f;">
-      <h3 style="margin-top:0; color:#7a1f1c;">Email kill switch</h3>
-      <p style="margin:0 0 12px; color:#7a1f1c; font-size:14px;">
-        <strong>When ON, NO emails go out from anywhere</strong> — review requests, follow-ups, moderation notifications, campaign batches, AND your own operator notifications (new-review pings, capacity warnings). Use this when you're launching on the live store but haven't finalized email templates / triggers yet: customers can still submit reviews via the storefront widget, but no automated email is sent. Reviews and the rest of the system keep working normally.
-      </p>
-      <form method="POST" action="/admin/settings/email-kill-switch">
-        <label style="display:flex; align-items:center; gap:8px; font-weight:600; color:#7a1f1c;">
-          <input type="checkbox" name="emails_disabled" value="1" ${getSetting('emails_disabled') === '1' ? 'checked' : ''} style="width:auto;">
-          <span>Disable all outgoing emails</span>
-        </label>
-        <p class="muted" style="margin:8px 0 0; font-size:12px; color:#7a1f1c;">
-          The dispatcher still runs and the audit log still reports what would have been sent, but <code>sendMail</code> returns immediately with a "BLOCKED_BY_KILL_SWITCH" marker. Verify in <code>docker logs reviews-app</code>: look for <code>sendMail blocked: emails_disabled kill switch is ON</code> lines.
-        </p>
-        <div style="margin-top:12px;">
-          <button type="submit" class="primary" style="background:#7a1f1c; border-color:#7a1f1c;">Save kill switch</button>
-        </div>
-      </form>
-    </div>
-
     <div class="card">
       <h3 style="margin-top:0;">New review notifications</h3>
       <p class="muted">Get an email when a customer submits a review. Useful for catching low-star reviews early. Sent from the same Gmail SMTP as customer emails — no separate config.</p>
@@ -3530,6 +3534,25 @@ admin.get('/settings', (c) => {
     </section>
 
     <section id="tab-setup" class="tab-panel" data-tab="setup">
+    <div class="card" style="background:#fdecea; border:2px solid #d9534f;">
+      <h3 style="margin-top:0; color:#7a1f1c;">Email kill switch</h3>
+      <p style="margin:0 0 12px; color:#7a1f1c; font-size:14px;">
+        <strong>When ON, NO emails go out from anywhere</strong> — review requests, follow-ups, moderation notifications, campaign batches, AND your own operator notifications (new-review pings, capacity warnings). Use this when you're launching on the live store but haven't finalized email templates / triggers yet: customers can still submit reviews via the storefront widget, but no automated email is sent. Reviews and the rest of the system keep working normally.
+      </p>
+      <form method="POST" action="/admin/settings/email-kill-switch">
+        <label style="display:flex; align-items:center; gap:8px; font-weight:600; color:#7a1f1c;">
+          <input type="checkbox" name="emails_disabled" value="1" ${getSetting('emails_disabled') === '1' ? 'checked' : ''} style="width:auto;">
+          <span>Disable all outgoing emails</span>
+        </label>
+        <p class="muted" style="margin:8px 0 0; font-size:12px; color:#7a1f1c;">
+          The dispatcher still runs and the audit log still reports what would have been sent, but <code>sendMail</code> returns immediately with a "BLOCKED_BY_KILL_SWITCH" marker. Verify in <code>docker logs reviews-app</code>: look for <code>sendMail blocked: emails_disabled kill switch is ON</code> lines.
+        </p>
+        <div style="margin-top:12px;">
+          <button type="submit" class="primary" style="background:#7a1f1c; border-color:#7a1f1c;">Save kill switch</button>
+        </div>
+      </form>
+    </div>
+
     <div class="card">
       <h3 style="margin-top:0;">Per-variant reviews (optional setup)</h3>
       <p class="muted">By default, all reviews on a product apply to every variant of that product (sizes, colors, etc. share one review pool). For products where variants are genuinely different — e.g., flavors or scents — you can opt that specific product into per-variant review pools so each variant has its own reviews, with a "Customers also reviewed these variants" section surfacing sibling-variant reviews below the main list.</p>
@@ -3881,7 +3904,7 @@ admin.post('/settings/email-kill-switch', async (c) => {
   const enabled = form.get('emails_disabled') === '1';
   setSetting('emails_disabled', enabled ? '1' : '0');
   log('warn', 'admin toggled emails_disabled kill switch', { enabled });
-  return c.redirect('/admin/settings?saved=1#notifications');
+  return c.redirect('/admin/settings?saved=1#setup');
 });
 
 admin.post('/settings/new-review-notify', async (c) => {
