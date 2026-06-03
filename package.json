@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@shopify/shopify-api": "^13.0.0",
     "better-sqlite3": "^11.7.0",
     "csv-parse": "^6.2.1",
     "hono": "^4.6.14",
