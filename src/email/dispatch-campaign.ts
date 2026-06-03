@@ -406,6 +406,7 @@ export const sendCampaignBatch = async (input: {
       subject: renderedSubject,
       body: renderedBody,
       footerHtml,
+      cardBackground: branding.cardBackground,
     });
 
     const text = renderedBody

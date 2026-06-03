@@ -106,6 +106,7 @@ const sendFromTemplate = async (
     subject: renderedSubject,
     body: renderedBody,
     footerHtml,
+    cardBackground: branding.cardBackground,
   });
 
   // Crude text fallback: strip HTML tags from the body. Good enough for

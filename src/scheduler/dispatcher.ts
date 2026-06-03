@@ -261,6 +261,7 @@ const dispatchGroup = async (
     subject: renderedSubject,
     body: renderedBody,
     footerHtml,
+    cardBackground: branding.cardBackground,
   });
 
   const text = renderPlainText({

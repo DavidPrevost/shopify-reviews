@@ -13,6 +13,10 @@ export interface ResolvedEmailBranding {
   footerText: string;
   senderName: string;
   replyTo: string | null;
+  // Background color of the email's main content card (the white box that
+  // holds the body + footer). #ffffff by default; merchant can override to
+  // e.g. an off-white or branded tone.
+  cardBackground: string;
 }
 
 export interface EmailBrandingOverrides {
@@ -20,6 +24,7 @@ export interface EmailBrandingOverrides {
   footerText: string | null;
   senderName: string | null;
   replyTo: string | null;
+  cardBackground: string | null;
 }
 
 const parseJson = <T>(raw: string | null): Partial<T> | null => {
@@ -43,6 +48,7 @@ export const getEmailBrandingOverrides = (): EmailBrandingOverrides => {
     footerText: raw?.footerText ?? null,
     senderName: raw?.senderName ?? null,
     replyTo: raw?.replyTo ?? null,
+    cardBackground: raw?.cardBackground ?? null,
   };
 };
 
@@ -61,6 +67,8 @@ export const getEmailBrandingDefaults = (brandName: string): EmailBrandingDefaul
   };
 };
 
+export const DEFAULT_CARD_BACKGROUND = '#ffffff';
+
 export const resolveEmailBranding = (): ResolvedEmailBranding => {
   const overrides = getEmailBrandingOverrides();
   const defaults = getEmailBrandingDefaults(config.email.brandName);
@@ -69,6 +77,7 @@ export const resolveEmailBranding = (): ResolvedEmailBranding => {
     footerText: overrides.footerText ?? defaults.defaultFooterText,
     senderName: overrides.senderName ?? defaults.defaultSenderName,
     replyTo: overrides.replyTo,
+    cardBackground: overrides.cardBackground ?? DEFAULT_CARD_BACKGROUND,
   };
 };
 

@@ -2308,8 +2308,11 @@ admin.get('/branding', (c) => {
 
       <div class="color-field-row" data-field-row="ctaLabel">
         <label for="cf-ctaLabel">"Write a review" button text</label>
-        <p class="muted" style="margin:0;">The label on the review call-to-action button shown to logged-in customers.</p>
-        <input type="text" id="cf-ctaLabel" name="ctaLabel" value="${escapeHtml(overrides.ctaLabel ?? '')}" maxlength="40" placeholder="Write a review">
+        <p class="muted" style="margin:0;">The label on the review call-to-action button. Applies to both the storefront widget button AND the in-email review button (the email button reads its colors, border radius, and label from this Branding → Widget config).</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="cf-ctaLabel" name="ctaLabel" value="${escapeHtml(overrides.ctaLabel ?? '')}" maxlength="40" placeholder="Write a review" style="flex:1;">
+          <button type="button" class="color-field-reset" data-reset-for="ctaLabel" ${overrides.ctaLabel ? '' : 'disabled'}>Reset to default</button>
+        </div>
         <div class="color-field-default">${overrides.ctaLabel ? '<strong style="color:#0a8a3a;">overridden</strong>' : 'Default: <code>Write a review</code>'}</div>
       </div>
 
@@ -2318,9 +2321,9 @@ admin.get('/branding', (c) => {
       </div>
     </form>
 
-    <form method="POST" action="/admin/branding/reset" style="margin-top:12px;" onsubmit="return confirm('Reset all widget styling to the Shopify-synced brand defaults? This clears every override above.');">
-      <button type="submit">Reset all widget styling to Shopify defaults</button>
-      <p class="muted" style="font-size:12px;margin-top:4px;">Clears every override on this tab so colors fall back to your synced Shopify brand colors (and background/text return to inheriting the theme).</p>
+    <form method="POST" action="/admin/branding/reset" style="margin-top:12px;" onsubmit="return confirm('Reset widget COLORS to Shopify defaults? This clears every color override above. The button border radius and CTA label keep whatever you have set — use their own Reset buttons to revert those.');">
+      <button type="submit">Reset widget colors to Shopify defaults</button>
+      <p class="muted" style="font-size:12px;margin-top:4px;">Clears every <strong>color</strong> override (star, CTA bg/fg, widget bg/text) so they fall back to Shopify brand colors (and bg/text return to inheriting the theme). The button border radius and CTA label are <em>not</em> Shopify-sourced and aren't affected — use the per-field Reset buttons in those rows to revert them.</p>
     </form>
   `;
 
@@ -2435,15 +2438,21 @@ admin.get('/branding', (c) => {
           <button type="button" data-cmd="formatBlock" data-arg="H2" title="Heading">H</button>
           <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">• List</button>
           <button type="button" data-cmd="createLink" title="Insert link">Link</button>
-          <button type="button" data-cmd="justifyLeft" title="Align left" aria-label="Align left">⫷</button>
-          <button type="button" data-cmd="justifyCenter" title="Center" aria-label="Center">≡</button>
-          <button type="button" data-cmd="justifyRight" title="Align right" aria-label="Align right">⫸</button>
+          <button type="button" data-cmd="justifyLeft" title="Align left" aria-label="Align left">
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor" style="display:block;"><rect y="0" width="14" height="1.5"/><rect y="4" width="9" height="1.5"/><rect y="8" width="14" height="1.5"/></svg>
+          </button>
+          <button type="button" data-cmd="justifyCenter" title="Center" aria-label="Center">
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor" style="display:block;"><rect y="0" width="14" height="1.5"/><rect x="2.5" y="4" width="9" height="1.5"/><rect y="8" width="14" height="1.5"/></svg>
+          </button>
+          <button type="button" data-cmd="justifyRight" title="Align right" aria-label="Align right">
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor" style="display:block;"><rect y="0" width="14" height="1.5"/><rect x="5" y="4" width="9" height="1.5"/><rect y="8" width="14" height="1.5"/></svg>
+          </button>
           <label class="tmpl-color-btn" title="Text color">
-            <span style="border-bottom:3px solid #222;padding:0 2px;font-weight:600;">A</span>
+            <span class="tmpl-color-btn-inner" style="border-bottom:3px solid #222;">A</span>
             <input type="color" data-text-color value="#222222" tabindex="-1">
           </label>
           <label class="tmpl-color-btn" title="Highlight / background color">
-            <span style="background:#fff59d;padding:0 4px;border-radius:2px;">A</span>
+            <span class="tmpl-color-btn-inner" style="background:#fff59d;border-radius:2px;padding:0 3px;">A</span>
             <input type="color" data-bg-color value="#fff59d" tabindex="-1">
           </label>
           <button type="button" data-insert-logo title="Insert logo image">Logo</button>
@@ -2468,7 +2477,7 @@ admin.get('/branding', (c) => {
 
         <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <button type="submit" class="primary">Save template</button>
-          <button type="button" data-preview-unsaved title="Preview the email with your CURRENT edits, no save required" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text);font-size:13px;background:var(--surface);cursor:pointer;">Preview (no save)</button>
+          <button type="button" data-preview-unsaved title="Preview the email in a new tab — no save required" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text);font-size:13px;background:var(--surface);cursor:pointer;">Preview in new tab</button>
           <span data-dirty-indicator style="font-size:12px;color:#a86b00;display:none;">● Unsaved changes</span>
           <code style="font-size:11px;color:var(--muted);margin-left:auto;">${escapeHtml(t.template_key)}</code>
         </div>
@@ -2479,20 +2488,30 @@ admin.get('/branding', (c) => {
     </div>
   `).join('');
 
-  const templateCards = templates.length === 0
+  // ---------------------------------------------------------------------------
+  // Email tab reorganization (collapsible sections to reduce scrolling)
+  //   1. Email templates (open by default — main work area)
+  //   2. Shared email settings (collapsible — set-once stuff)
+  //      → sender identity (logo, sender name, reply-to)
+  //      → appearance (card background)
+  //      → footer (footer text — spatially after body to match real email)
+  //   3. Available variables (collapsible reference, closed by default)
+  // The .rv-email-section CSS keeps margins tight when collapsed so the page
+  // doesn't sprawl. See the <style> block lower in this file.
+  // ---------------------------------------------------------------------------
+
+  const templatesSection = templates.length === 0
     ? '<p class="muted">No email templates found. (They should have been seeded on first boot — try restarting the container if this is unexpected.)</p>'
     : `
-      <div class="card">
-        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
-          <div style="flex:1; min-width:240px;">
-            <label for="tmpl-select">Template to edit</label>
-            <select id="tmpl-select">${templateSelectorOptions}</select>
-          </div>
-          <button type="button" id="tmpl-new-toggle">+ New template</button>
+      <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px;">
+        <div style="flex:1; min-width:240px;">
+          <label for="tmpl-select" style="margin-top:0;">Template to edit</label>
+          <select id="tmpl-select">${templateSelectorOptions}</select>
         </div>
+        <button type="button" id="tmpl-new-toggle">+ New template</button>
       </div>
 
-      <form method="POST" action="/admin/branding/email-template/new" class="card" id="tmpl-new-form" style="display:none;">
+      <form method="POST" action="/admin/branding/email-template/new" class="card" id="tmpl-new-form" style="display:none; padding:12px 16px;">
         <h4 style="margin:0 0 8px;">New template</h4>
         <label>Template name</label>
         <input type="text" name="display_name" maxlength="80" placeholder="e.g. Thank-you after review" required>
@@ -2507,52 +2526,47 @@ admin.get('/branding', (c) => {
         </div>
       </form>
 
-      <details class="card" style="margin-bottom:16px;">
-        <summary style="cursor:pointer;font-weight:600;">Available variables</summary>
-        <p class="muted" style="margin-top:8px;">Insert these in a subject or body via the editor's "Insert variable" menu. Any variable an email doesn't have a value for is left blank.</p>
-        <ul class="muted" style="font-size:13px; line-height:1.7;">${variableHelpList}</ul>
-      </details>
-
       ${templatePanels}
     `;
 
-  const emailTab = `
-    <p class="muted">Email templates ship with sensible defaults that use your Shopify brand colors (CTA button) and logo (when synced). Edit the shared branding fields below — they wrap every template — then pick a template to customize its name, trigger, subject, body, and CTA. Each template is bound to a <strong>trigger</strong> (the event that sends it); the system uses the active template for each trigger. You can create your own templates and delete ones you don't need.</p>
+  const logoUploadHtml = `
+    <h4 style="margin:0 0 6px;">Logo</h4>
+    <p class="muted" style="margin:0 0 8px;">Upload a PNG or JPG (max 250&nbsp;KB) — or paste an external URL in the "Logo URL" field below. Uploading sets Logo URL to the hosted file. The system does <strong>not</strong> auto-prepend the logo to emails; the merchant places it inside templates via the editor toolbar's Logo button if they want one.</p>
+    ${resolvedEmail.logoUrl ? `<p style="margin:0 0 8px;"><img src="${escapeHtml(resolvedEmail.logoUrl)}" alt="Current logo" style="max-height:48px;max-width:180px;vertical-align:middle;background:#fff;padding:4px;border:1px solid var(--border);border-radius:4px;"></p>` : ''}
+    <form method="POST" action="/admin/branding/logo" enctype="multipart/form-data">
+      <input type="file" name="logo" accept="image/png,image/jpeg" required>
+      <button type="submit" class="primary" style="margin-left:8px;">Upload logo</button>
+    </form>
+  `;
 
-    <h3>Shared email branding</h3>
-    <p class="muted">These fields apply to every email the dispatcher sends. Leave a field blank to use the default shown.</p>
-
-    <div class="card" style="background:var(--surface-alt);">
-      <h4 style="margin:0 0 8px;">Logo</h4>
-      <p class="muted" style="margin:0 0 8px;">Upload a logo to host it here (PNG or JPG, max 250&nbsp;KB) — or paste an external URL in the "Logo URL" field below. Uploading sets the Logo URL to the hosted file. Keep it small: it's fetched every time a customer opens an email.</p>
-      ${resolvedEmail.logoUrl ? `<p style="margin:0 0 8px;"><img src="${escapeHtml(resolvedEmail.logoUrl)}" alt="Current logo" style="max-height:48px;max-width:180px;vertical-align:middle;background:#fff;padding:4px;border:1px solid var(--border);border-radius:4px;"></p>` : ''}
-      <form method="POST" action="/admin/branding/logo" enctype="multipart/form-data">
-        <input type="file" name="logo" accept="image/png,image/jpeg" required>
-        <button type="submit" class="primary" style="margin-left:8px;">Upload logo</button>
-      </form>
+  // Email background color field (a small dedicated control alongside the rest
+  // of the shared form's text inputs).
+  const cardBgValue = emailOverrides.cardBackground ?? '';
+  const cardBgFieldHtml = `
+    <div class="color-field-row">
+      <label for="eb-cardBackground">Email background color</label>
+      <p class="muted" style="margin:0;">Background of the main content card (the box that holds the body + footer). Defaults to white. Pick a soft off-white or branded tone if you want a less stark look. Some email clients ignore custom backgrounds, so don't rely on it for legibility.</p>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input type="color" id="eb-cardBackground-color" value="${escapeHtml(cardBgValue || '#ffffff')}" style="width:44px; padding:2px; height:36px;">
+        <input type="text" id="eb-cardBackground" name="cardBackground" value="${escapeHtml(cardBgValue)}" placeholder="#ffffff (default)" maxlength="7" style="width:140px; font-family:monospace;">
+        <button type="button" data-reset-card-bg ${cardBgValue ? '' : 'disabled'}>Reset to default</button>
+      </div>
+      <div class="color-field-default">Default: <code>#ffffff</code>${cardBgValue ? ' · <strong style="color:#0a8a3a;">overridden</strong>' : ''}</div>
     </div>
+  `;
 
+  const sharedFormHtml = `
     <form method="POST" action="/admin/branding/email-branding">
+      <h4 style="margin:0 0 6px;">Sender identity</h4>
       ${textField({
         id: 'eb-logoUrl',
         name: 'logoUrl',
         label: 'Logo URL',
-        description: 'Image displayed at the top of every email. Use the synced Shopify logo, or paste a different image URL. Recommended: ~280px wide, transparent background. <strong>Leave this field empty to send emails with no logo at the top</strong> — nothing forces a logo if you don\'t want one. (You can also reference the logo inside a specific template\'s body via the editor toolbar\'s "Logo" button, or via the <code>{{ logoUrl }}</code> variable.)',
+        description: 'URL of the image referenced when you insert the logo into a template body via the editor\'s Logo button or the <code>{{ logoUrl }}</code> variable. Defaults to the most recently uploaded logo above. Leaving this blank means the <code>{{ logoUrl }}</code> variable resolves to an empty string (templates that reference it will render no image).',
         overrideValue: emailOverrides.logoUrl,
         defaultValue: emailDefaults.shopifyLogoUrl,
         placeholder: emailDefaults.shopifyLogoUrl ?? 'https://...',
       })}
-
-      ${textField({
-        id: 'eb-footerText',
-        name: 'footerText',
-        label: 'Footer text (shown before the unsubscribe link)',
-        description: 'Short line at the bottom of every email that appears immediately before the unsubscribe link. The unsubscribe link itself is always present and cannot be removed — it\'s required by anti-spam laws (CAN-SPAM in the US, Gmail / Yahoo bulk-sender requirements globally), and gives the customer a one-click way out of future emails. This field is the message that accompanies it ("You\'re receiving this because…"). Variables: <code>{{ brandName }}</code>.',
-        overrideValue: emailOverrides.footerText,
-        defaultValue: emailDefaults.defaultFooterText,
-        placeholder: emailDefaults.defaultFooterText,
-      })}
-
       ${textField({
         id: 'eb-senderName',
         name: 'senderName',
@@ -2562,7 +2576,6 @@ admin.get('/branding', (c) => {
         defaultValue: emailDefaults.defaultSenderName,
         placeholder: emailDefaults.defaultSenderName,
       })}
-
       ${textField({
         id: 'eb-replyTo',
         name: 'replyTo',
@@ -2573,14 +2586,55 @@ admin.get('/branding', (c) => {
         placeholder: 'support@brandname.com',
       })}
 
-      <div style="margin-top:16px;">
-        <button type="submit" class="primary">Save shared branding</button>
+      <h4 style="margin:18px 0 6px;">Appearance</h4>
+      ${cardBgFieldHtml}
+
+      <h4 style="margin:18px 0 6px;">Footer</h4>
+      ${textField({
+        id: 'eb-footerText',
+        name: 'footerText',
+        label: 'Footer text (shown before the unsubscribe link)',
+        description: 'Short line at the bottom of every email that appears immediately before the unsubscribe link. The unsubscribe link itself is always present and cannot be removed — it\'s required by anti-spam laws (CAN-SPAM in the US, Gmail / Yahoo bulk-sender requirements globally), and gives the customer a one-click way out of future emails. This field is the message that accompanies it ("You\'re receiving this because…"). Variables: <code>{{ brandName }}</code>.',
+        overrideValue: emailOverrides.footerText,
+        defaultValue: emailDefaults.defaultFooterText,
+        placeholder: emailDefaults.defaultFooterText,
+      })}
+
+      <div style="margin-top:14px;">
+        <button type="submit" class="primary">Save shared settings</button>
       </div>
     </form>
+  `;
 
-    <h3 style="margin-top:32px;">Templates</h3>
-    <p class="muted">Pick a template from the dropdown to edit it. The visual editor has a toolbar plus "Insert variable" and "Insert logo" — or switch to raw HTML with the <code>&lt;/&gt; HTML</code> button. Switching templates with unsaved changes will prompt before discarding.</p>
-    ${templateCards}
+  const emailTab = `
+    <p class="muted" style="margin:0 0 12px;">Email templates ship with sensible defaults. Each is bound to a <strong>trigger</strong> (the event that fires it); the system uses the active template for each trigger. Edit a template body below, or expand the collapsible sections for shared settings (logo, sender, footer, background) and the variable reference.</p>
+
+    <details open class="rv-email-section">
+      <summary>Email templates</summary>
+      <div class="rv-email-section-body">
+        <p class="muted" style="margin:0 0 10px;font-size:13px;">Pick a template from the dropdown to edit it. Switching templates with unsaved changes will prompt before discarding. Button colors, border radius, and label all come from <a href="#widget" data-tab-jump="widget">Branding → Widget</a> so the in-email button matches the storefront widget.</p>
+        ${templatesSection}
+      </div>
+    </details>
+
+    <details class="rv-email-section">
+      <summary>Shared email settings (logo, sender, footer, background)</summary>
+      <div class="rv-email-section-body">
+        <p class="muted" style="margin:0 0 10px;font-size:13px;">These apply to every email the system sends. Leave a field blank to use the default shown beneath it.</p>
+        <div class="card" style="background:var(--surface-alt); padding:14px 16px; margin-bottom:14px;">
+          ${logoUploadHtml}
+        </div>
+        ${sharedFormHtml}
+      </div>
+    </details>
+
+    <details class="rv-email-section">
+      <summary>Available variables (reference)</summary>
+      <div class="rv-email-section-body">
+        <p class="muted" style="margin:0 0 8px;font-size:13px;">Insert these in a subject or body via the editor's "Insert variable" menu. Any variable an email doesn't have a value for is left blank.</p>
+        <ul class="muted" style="font-size:13px; line-height:1.7; margin:0; padding-left:20px;">${variableHelpList}</ul>
+      </div>
+    </details>
   `;
 
   return c.html(adminShell('Branding', `
@@ -2737,12 +2791,27 @@ admin.get('/branding', (c) => {
         rangeInput.addEventListener('input', function () { setRadius(Number(rangeInput.value), true); });
         rangeReset.addEventListener('click', function () { setRadius(borderRadiusDefault, false); });
 
-        // --- CTA button label: live-update the mockup button text ---
+        // --- CTA button label: live-update the mockup button text + reset ---
         var ctaLabelInput = document.getElementById('cf-ctaLabel');
+        var ctaLabelReset = document.querySelector('[data-reset-for="ctaLabel"]');
+        function syncCtaMockup() {
+          var b = mockup.querySelector('.rv-cta-button');
+          if (b) b.textContent = ctaLabelInput.value.trim() || 'Write a review';
+        }
+        function updateCtaResetState() {
+          if (ctaLabelReset) ctaLabelReset.disabled = ctaLabelInput.value.trim() === '';
+        }
         if (ctaLabelInput) {
           ctaLabelInput.addEventListener('input', function () {
-            var b = mockup.querySelector('.rv-cta-button');
-            if (b) b.textContent = ctaLabelInput.value.trim() || 'Write a review';
+            syncCtaMockup();
+            updateCtaResetState();
+          });
+        }
+        if (ctaLabelReset) {
+          ctaLabelReset.addEventListener('click', function () {
+            ctaLabelInput.value = '';
+            syncCtaMockup();
+            updateCtaResetState();
           });
         }
 
@@ -2768,12 +2837,24 @@ admin.get('/branding', (c) => {
 
     <style>
       .tmpl-toolbar { display:flex; gap:4px; flex-wrap:wrap; align-items:center; border:1px solid var(--border-strong); border-bottom:none; border-radius:4px 4px 0 0; padding:6px; background:var(--surface-alt); }
-      .tmpl-toolbar button { padding:4px 9px; font-size:13px; }
-      .tmpl-toolbar select { width:auto; padding:4px 6px; font-size:13px; }
-      .tmpl-color-btn { position:relative; display:inline-flex; align-items:center; padding:4px 8px; border:1px solid var(--border-strong); border-radius:4px; background:var(--surface); cursor:pointer; font-size:13px; }
+      /* All toolbar controls share the same vertical metrics so they sit on
+         the same baseline regardless of icon/text content. */
+      .tmpl-toolbar button, .tmpl-toolbar .tmpl-color-btn { height:28px; box-sizing:border-box; padding:0 8px; font-size:13px; display:inline-flex; align-items:center; justify-content:center; line-height:1; }
+      .tmpl-toolbar select { height:28px; box-sizing:border-box; width:auto; padding:0 6px; font-size:13px; }
+      .tmpl-toolbar svg { vertical-align:middle; }
+      .tmpl-color-btn { position:relative; border:1px solid var(--border-strong); border-radius:4px; background:var(--surface); cursor:pointer; }
       .tmpl-color-btn:hover { background:var(--surface-alt); }
       .tmpl-color-btn input[type=color] { position:absolute; inset:0; opacity:0; cursor:pointer; }
       .tmpl-color-btn:focus-within { outline:2px solid var(--accent); outline-offset:1px; }
+      .tmpl-color-btn-inner { font-weight:600; line-height:1; display:inline-block; }
+      /* Collapsible sections on the Email tab — compact when closed so the
+         page doesn't sprawl. Custom marker (▶ that rotates to ▼ when open). */
+      .rv-email-section { background:var(--surface); border-radius:6px; margin-bottom:8px; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
+      .rv-email-section > summary { cursor:pointer; font-weight:600; font-size:15px; padding:10px 14px; user-select:none; list-style:none; display:flex; align-items:center; gap:8px; }
+      .rv-email-section > summary::-webkit-details-marker { display:none; }
+      .rv-email-section > summary::before { content:"▶"; display:inline-block; font-size:10px; color:var(--muted); transition:transform 0.15s; }
+      .rv-email-section[open] > summary::before { transform:rotate(90deg); }
+      .rv-email-section-body { padding:4px 16px 14px; }
       .tmpl-editor { border:1px solid var(--border-strong); border-radius:0 0 4px 4px; padding:12px; min-height:220px; background:var(--surface); color:var(--text); font-size:14px; line-height:1.5; overflow:auto; }
       .tmpl-editor:focus { outline:2px solid var(--accent); outline-offset:-2px; }
       .tmpl-source { border-radius:0 0 4px 4px; font-family:monospace; font-size:13px; min-height:220px; }
@@ -2930,6 +3011,30 @@ admin.get('/branding', (c) => {
         var newCancel = document.getElementById('tmpl-new-cancel');
         if (newToggle && newForm) newToggle.addEventListener('click', function () { newForm.style.display = newForm.style.display === 'none' ? 'block' : 'none'; });
         if (newCancel && newForm) newCancel.addEventListener('click', function () { newForm.style.display = 'none'; });
+
+        // Email background color picker + text field sync + reset.
+        var cardBgColor = document.getElementById('eb-cardBackground-color');
+        var cardBgText = document.getElementById('eb-cardBackground');
+        var cardBgReset = document.querySelector('[data-reset-card-bg]');
+        function updateCardBgReset() {
+          if (cardBgReset) cardBgReset.disabled = cardBgText.value.trim() === '';
+        }
+        if (cardBgColor && cardBgText) {
+          cardBgColor.addEventListener('input', function () {
+            cardBgText.value = cardBgColor.value;
+            updateCardBgReset();
+          });
+          cardBgText.addEventListener('input', function () {
+            var v = cardBgText.value.trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(v)) cardBgColor.value = v;
+            updateCardBgReset();
+          });
+        }
+        if (cardBgReset) cardBgReset.addEventListener('click', function () {
+          cardBgText.value = '';
+          cardBgColor.value = '#ffffff';
+          updateCardBgReset();
+        });
       })();
     </script>
   `, 'branding'));
@@ -2946,11 +3051,16 @@ const emptyToNull = (v: unknown): string | null => {
 
 admin.post('/branding/email-branding', async (c) => {
   const form = await c.req.formData();
+  // Card background: validate as hex; null = use default. Accepts canonical
+  // #RRGGBB only (same rule the widget config uses).
+  const cardBgRaw = String(form.get('cardBackground') ?? '').trim();
+  const cardBackground = cardBgRaw === '' ? null : (isValidHexColor(cardBgRaw) ? cardBgRaw : null);
   const overrides = {
-    logoUrl:    emptyToNull(form.get('logoUrl')),
-    footerText: emptyToNull(form.get('footerText')),
-    senderName: emptyToNull(form.get('senderName')),
-    replyTo:    emptyToNull(form.get('replyTo')),
+    logoUrl:        emptyToNull(form.get('logoUrl')),
+    footerText:     emptyToNull(form.get('footerText')),
+    senderName:     emptyToNull(form.get('senderName')),
+    replyTo:        emptyToNull(form.get('replyTo')),
+    cardBackground,
   };
   setSetting('email_branding_json', JSON.stringify(overrides));
   log('info', 'admin saved email branding', {
@@ -2958,6 +3068,7 @@ admin.post('/branding/email-branding', async (c) => {
     footerTextSet: !!overrides.footerText,
     senderNameSet: !!overrides.senderName,
     replyToSet: !!overrides.replyTo,
+    cardBackgroundSet: !!overrides.cardBackground,
   });
   return c.redirect('/admin/branding?saved=1#email');
 });
@@ -3123,7 +3234,7 @@ const renderEmailPreviewHtml = (input: {
   </div>
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
     <tr><td align="center" style="padding:32px 16px;">
-      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px; background:#ffffff; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px; background:${branding.cardBackground}; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
         <tr><td style="padding:32px 32px 16px;">
           ${renderedBody}
         </td></tr>
@@ -3188,11 +3299,24 @@ admin.post('/branding', async (c) => {
 
 admin.post('/branding/reset', async (c) => {
   if (!(await requireAuth(c))) return c.redirect('/admin');
-  // Clears every widget override so resolution falls back to Shopify brand
-  // colors (and background/text return to inheriting the theme).
-  setSetting('widget_config_json', '{}');
-  log('info', 'admin reset widget branding to defaults');
-  return c.redirect('/admin/branding?saved=1');
+  // Clears the COLOR overrides only — falls back to Shopify brand colors
+  // (and background/text return to inheriting the theme). Preserves
+  // borderRadius and ctaLabel because those aren't Shopify-sourced; resetting
+  // them belongs on the per-field "Reset to default" buttons in those rows.
+  let existing: { borderRadius?: number | null; ctaLabel?: string | null } = {};
+  try { existing = JSON.parse(getSetting('widget_config_json') ?? '{}'); } catch { /* overwrite */ }
+  const preserved = {
+    starColor:     null,
+    ctaBackground: null,
+    ctaForeground: null,
+    background:    null,
+    text:          null,
+    borderRadius:  existing.borderRadius ?? null,
+    ctaLabel:      existing.ctaLabel ?? null,
+  };
+  setSetting('widget_config_json', JSON.stringify(preserved));
+  log('info', 'admin reset widget COLOR overrides (border-radius and CTA label preserved)');
+  return c.redirect('/admin/branding?saved=1#widget');
 });
 
 // Self-hosted logo upload. On success, points the email branding logoUrl at
@@ -3356,6 +3480,25 @@ admin.get('/settings', (c) => {
     </section>
 
     <section id="tab-notifications" class="tab-panel" data-tab="notifications">
+    <div class="card" style="background:#fdecea; border:2px solid #d9534f;">
+      <h3 style="margin-top:0; color:#7a1f1c;">Email kill switch</h3>
+      <p style="margin:0 0 12px; color:#7a1f1c; font-size:14px;">
+        <strong>When ON, NO emails go out from anywhere</strong> — review requests, follow-ups, moderation notifications, campaign batches, AND your own operator notifications (new-review pings, capacity warnings). Use this when you're launching on the live store but haven't finalized email templates / triggers yet: customers can still submit reviews via the storefront widget, but no automated email is sent. Reviews and the rest of the system keep working normally.
+      </p>
+      <form method="POST" action="/admin/settings/email-kill-switch">
+        <label style="display:flex; align-items:center; gap:8px; font-weight:600; color:#7a1f1c;">
+          <input type="checkbox" name="emails_disabled" value="1" ${getSetting('emails_disabled') === '1' ? 'checked' : ''} style="width:auto;">
+          <span>Disable all outgoing emails</span>
+        </label>
+        <p class="muted" style="margin:8px 0 0; font-size:12px; color:#7a1f1c;">
+          The dispatcher still runs and the audit log still reports what would have been sent, but <code>sendMail</code> returns immediately with a "BLOCKED_BY_KILL_SWITCH" marker. Verify in <code>docker logs reviews-app</code>: look for <code>sendMail blocked: emails_disabled kill switch is ON</code> lines.
+        </p>
+        <div style="margin-top:12px;">
+          <button type="submit" class="primary" style="background:#7a1f1c; border-color:#7a1f1c;">Save kill switch</button>
+        </div>
+      </form>
+    </div>
+
     <div class="card">
       <h3 style="margin-top:0;">New review notifications</h3>
       <p class="muted">Get an email when a customer submits a review. Useful for catching low-star reviews early. Sent from the same Gmail SMTP as customer emails — no separate config.</p>
@@ -3727,6 +3870,18 @@ admin.post('/panic/resume', async (c) => {
     pausedUntil: null,
   });
   return c.redirect('/admin/reviews?resumed=1#moderation');
+});
+
+// Email kill switch — blocks every sendMail invocation when '1'. The check
+// lives inside src/email/smtp-client.ts so it can never be forgotten by a
+// future code path; this route only flips the setting.
+admin.post('/settings/email-kill-switch', async (c) => {
+  if (!(await requireAuth(c))) return c.redirect('/admin');
+  const form = await c.req.formData();
+  const enabled = form.get('emails_disabled') === '1';
+  setSetting('emails_disabled', enabled ? '1' : '0');
+  log('warn', 'admin toggled emails_disabled kill switch', { enabled });
+  return c.redirect('/admin/settings?saved=1#notifications');
 });
 
 admin.post('/settings/new-review-notify', async (c) => {

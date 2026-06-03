@@ -1,5 +1,7 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 import { config } from '../config.js';
+import { getSetting } from '../db/queries.js';
+import { log } from '../lib/logger.js';
 
 let _transporter: Transporter | null = null;
 
@@ -43,7 +45,22 @@ export interface SendMailInput {
   replyTo?: string;
 }
 
+// Master kill switch: when `emails_disabled` setting is '1', no email goes
+// out from anywhere — review-request, moderation, campaign batches, operator
+// notifications, all of it. Returns a marker messageId so callers don't think
+// the send failed (it deliberately succeeded as a no-op). Used during go-live
+// when the merchant wants the storefront and review collection live but
+// hasn't finalized email templates / triggers yet.
+const EMAIL_BLOCKED_MARKER = 'BLOCKED_BY_KILL_SWITCH';
+
 export const sendMail = async (input: SendMailInput): Promise<{ messageId: string }> => {
+  if (getSetting('emails_disabled') === '1') {
+    log('info', 'sendMail blocked: emails_disabled kill switch is ON', {
+      to: input.to,
+      subject: input.subject,
+    });
+    return { messageId: EMAIL_BLOCKED_MARKER };
+  }
   const from = input.senderName
     ? { name: input.senderName, address: extractAddress(config.email.smtp.from) }
     : config.email.smtp.from;
