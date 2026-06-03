@@ -159,7 +159,13 @@ const renderCampaignFormStyles = (): string => `
       border-radius: 3px;
     }
     .product-picker {
-      max-height: 320px;
+      /* Two-column responsive grid (#6) — collapses to one column on narrow
+         screens. minmax(260px, 1fr) lets each item fill its column without
+         shrinking below readable. */
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 4px 16px;
+      max-height: 360px;
       overflow-y: auto;
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -182,6 +188,15 @@ const renderCampaignFormStyles = (): string => `
     .product-picker .product-id {
       font-size: 11px; color: var(--muted); font-family: monospace;
     }
+    /* Side-by-side rows (#4, #5): two field-blocks per row at wide widths,
+       one per row on narrow. Auto-fit with min 240px breakpoint. */
+    .form-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 0 24px;
+      align-items: start;
+    }
+    .form-row .field-block { margin-top: 0; }
     .discount-section {
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -192,6 +207,33 @@ const renderCampaignFormStyles = (): string => `
     .discount-section.disabled input { background: var(--surface-alt); }
     .field-block { margin: 16px 0; }
     .field-block label { margin-top: 0; }
+    /* Threshold preview (#3): more prominent than the helper line above it. */
+    .campaign-threshold-preview {
+      display: none;  /* JS toggles to block when a preview is available */
+      margin: 8px 0 0;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .campaign-threshold-preview strong { font-size: 18px; }
+    /* Slug live-validation error (#2). */
+    .campaign-validation-error {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: #b00;
+      font-weight: 500;
+    }
+    /* Defensive: terms textareas explicitly opt out of any transform/filter
+       inherited from a parent so click coords match the underlying caret.
+       Same family of issue as the profanity textarea — paranoia layer for
+       campaign forms (#7). */
+    .campaign-terms-input {
+      filter: none !important;
+      transform: none !important;
+      position: relative;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
   </style>
 `;
 
@@ -205,30 +247,52 @@ const renderThresholdHelperScript = (): string => `
       const preview = document.getElementById('threshold_preview');
       const slugIn = document.getElementById('slug');
       const slugOut = document.getElementById('slug_preview_out');
+      const slugErr = document.getElementById('slug_validation_msg');
       const codePrefix = document.getElementById('discount_code_prefix');
       const codePreview = document.getElementById('discount_code_preview');
       const discountToggle = document.getElementById('discount_enabled');
       const discountSection = document.getElementById('discount-section');
 
+      // Threshold "Warning will fire at X of Y" — prominent (#3): the count is
+      // wrapped in <strong> with bigger font (handled by CSS class). Hidden
+      // entirely when there's nothing useful to show.
       const recalc = () => {
+        if (!preview) return;
         const lim = parseInt(limit && limit.value, 10);
         const p = parseInt(pct && pct.value, 10);
-        if (!preview) return;
-        if (!lim || lim <= 0) { preview.textContent = 'Unlimited — capacity warning disabled.'; return; }
-        if (!p || isNaN(p)) { preview.textContent = ''; return; }
+        if (!lim || lim <= 0) {
+          preview.style.display = 'block';
+          preview.innerHTML = 'Unlimited campaign — capacity warning disabled.';
+          return;
+        }
+        if (!p || isNaN(p)) { preview.style.display = 'none'; preview.innerHTML = ''; return; }
         const at = Math.round((p / 100) * lim);
-        preview.textContent = 'Warning will fire at about ' + at + ' of ' + lim + ' applications.';
+        preview.style.display = 'block';
+        preview.innerHTML = 'Warning will fire at <strong>' + at + ' of ' + lim + '</strong> applications.';
       };
       limit && limit.addEventListener('input', recalc);
       pct && pct.addEventListener('input', recalc);
       recalc();
 
+      // URL slug: live preview + live validation (#2). Validates on input AND
+      // blur so users see the error before they click Create. Empty string
+      // hides the error (required-field validation handles that on submit).
+      const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
       const recalcSlug = () => {
         if (!slugIn || !slugOut) return;
         const v = (slugIn.value || '').trim();
-        slugOut.textContent = v ? v : '«your-slug»';
+        slugOut.textContent = v ? v : 'your-slug';
+        if (!slugErr) return;
+        if (v === '') { slugErr.style.display = 'none'; return; }
+        if (SLUG_RE.test(v)) {
+          slugErr.style.display = 'none';
+        } else {
+          slugErr.style.display = 'block';
+          slugErr.textContent = 'Slug must be lowercase letters, digits, and hyphens only — no spaces, no capitals, no special characters.';
+        }
       };
       slugIn && slugIn.addEventListener('input', recalcSlug);
+      slugIn && slugIn.addEventListener('blur', recalcSlug);
       recalcSlug();
 
       const recalcCode = () => {
@@ -255,20 +319,22 @@ const renderThresholdHelperScript = (): string => `
 `;
 
 // The product-picker checklist. Renders all cached products as checkboxes;
-// selected ids are POSTed as repeated product_id values. A "Refresh from
-// Shopify" button at the top triggers a full-catalog sync into the cache.
-const renderProductPicker = (selectedIds: Set<string>, publicUrl: string): string => {
+// selected ids are POSTed as repeated product_id values. Two-column responsive
+// grid that collapses to one column on narrow viewports.
+//
+// IMPORTANT: this returns ONLY the picker list — no <form> inside. The
+// "Refresh from Shopify" button is a SEPARATE form, rendered by the caller
+// via renderRefreshProductsForm() and associated with the picker button
+// via the HTML `form="..."` attribute. Previously the refresh button was a
+// nested <form>, which silently closed the outer campaign form and caused
+// the Create button to do nothing on click (real bug, 2026-06-02).
+const renderProductPicker = (selectedIds: Set<string>, refreshFormId: string): string => {
   const products = listCachedProducts();
-  const refreshForm = `
-    <form method="POST" action="/admin/campaigns/refresh-product-cache" class="inline" style="float:right;">
-      <input type="hidden" name="return_to" value="${escapeHtml(publicUrl)}" />
-      <button type="submit">Refresh from Shopify</button>
-    </form>
-  `;
+  const refreshButton = `<button type="submit" form="${escapeHtml(refreshFormId)}">Refresh from Shopify</button>`;
   if (products.length === 0) {
     return `
       <p class="campaign-helper">No products cached yet. Click the button to load every product in your Shopify store into the picker.</p>
-      <div style="margin:8px 0;">${refreshForm.replace(/float:right;/, '')}</div>
+      <div style="margin:8px 0;">${refreshButton}</div>
     `;
   }
   const items = products.map((p) => {
@@ -284,12 +350,26 @@ const renderProductPicker = (selectedIds: Set<string>, publicUrl: string): strin
     </label>`;
   }).join('');
   return `
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <span class="campaign-helper" style="margin:0;">${products.length} cached product${products.length === 1 ? '' : 's'}. Refresh after adding new products in Shopify.</span>
-      ${refreshForm}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span class="campaign-helper" style="margin:0;">${products.length} cached product${products.length === 1 ? '' : 's'}. Refresh after adding new products in Shopify. (Refreshing reloads the page; you'll lose unsaved form values.)</span>
+      ${refreshButton}
     </div>
     <div class="product-picker" style="margin-top:8px;">${items}</div>
   `;
+};
+
+// Sibling form for the "Refresh from Shopify" button. Rendered OUTSIDE the
+// main campaign form (no nesting); the picker's button is associated to it
+// via form="<id>". Returns the form markup + the matching id so the caller
+// can render the picker with the right id.
+const renderRefreshProductsForm = (returnTo: string): { html: string; id: string } => {
+  const id = 'refresh-products-form';
+  const html = `
+    <form id="${id}" method="POST" action="/admin/campaigns/refresh-product-cache" style="display:none;">
+      <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}" />
+    </form>
+  `;
+  return { html, id };
 };
 
 // Existing-data shape passed into the shared form renderer. Both create
@@ -317,7 +397,7 @@ const inferThresholdPct = (threshold: number | null, limit: number): number | nu
   return Math.round((threshold / limit) * 100);
 };
 
-const renderCampaignFormFields = (data: CampaignFormData): string => {
+const renderCampaignFormFields = (data: CampaignFormData, refreshFormId: string): string => {
   const slugInput = data.slugLocked
     ? `<input type="text" name="slug" value="${escapeHtml(data.slug)}" disabled />
        <p class="campaign-helper">Slug can't be changed after creation.</p>`
@@ -325,8 +405,8 @@ const renderCampaignFormFields = (data: CampaignFormData): string => {
               pattern="${SLUG_PATTERN_HTML}"
               value="${escapeHtml(data.slug)}"
               placeholder="summer26" />
-       <p class="slug-preview">Public URL: <code><span id="slug_preview_out">${escapeHtml(data.slug || '«your-slug»')}</span></code> in your application Page; the form widget reads the slug from the embed div.</p>
-       <p class="campaign-helper">Lowercase letters, digits, and hyphens. No spaces or special characters. Used as the campaign identifier in URLs and admin lookups.</p>`;
+       <p id="slug_validation_msg" class="campaign-validation-error" style="display:none;"></p>
+       <p class="campaign-helper">A short identifier you'll paste into your Shopify application Page so the widget knows which campaign to render — like <code>&lt;div data-campaign-form="<span id="slug_preview_out">${escapeHtml(data.slug || 'your-slug')}</span>"&gt;&lt;/div&gt;</code>. Customers don't see this; only used as the embed handle. Lowercase letters, digits, and hyphens only — no spaces.</p>`;
 
   return `
     <div class="field-block">
@@ -342,25 +422,31 @@ const renderCampaignFormFields = (data: CampaignFormData): string => {
       ${slugInput}
     </div>
 
-    <div class="field-block">
-      <label>Participant limit</label>
-      <input type="number" id="participant_limit" name="participant_limit"
-             required min="0" max="100000"
-             value="${data.participantLimit}" />
-      <p class="campaign-helper">Maximum number of approved participants. When the application count reaches this number, the form auto-closes. Enter <strong>0</strong> for no limit (also disables the capacity warning).</p>
-    </div>
+    <!-- Side-by-side layout (#4): participant limit + capacity threshold sit
+         next to each other on wide screens, stack on narrow. The .form-row
+         CSS handles the responsive switch. -->
+    <div class="form-row">
+      <div class="field-block">
+        <label>Participant limit</label>
+        <input type="number" id="participant_limit" name="participant_limit"
+               required min="0" max="100000"
+               value="${data.participantLimit}" />
+        <p class="campaign-helper">Maximum number of approved participants. When the application count reaches this number, the form auto-closes. Enter <strong>0</strong> for no limit (also disables the capacity warning).</p>
+      </div>
 
-    <div class="field-block">
-      <label>Capacity-warning threshold</label>
-      <input type="number" id="threshold_pct" name="threshold_pct"
-             min="1" max="100"
-             value="${data.thresholdPct ?? ''}"
-             placeholder="80" />
-      <p class="campaign-helper">Send a warning email when the application count crosses this percentage of the participant limit. Leave blank to disable. <span id="threshold_preview"></span></p>
+      <div class="field-block">
+        <label>Capacity-warning threshold</label>
+        <input type="number" id="threshold_pct" name="threshold_pct"
+               min="1" max="100"
+               value="${data.thresholdPct ?? ''}"
+               placeholder="80" />
+        <p class="campaign-helper">Send a warning email when the application count crosses this percentage of the participant limit. Leave blank to disable.</p>
+        <p id="threshold_preview" class="campaign-threshold-preview"></p>
+      </div>
     </div>
 
     <h3 style="margin-top:32px;">Products in this campaign</h3>
-    ${renderProductPicker(data.selectedProductIds, '')}
+    ${renderProductPicker(data.selectedProductIds, refreshFormId)}
     <p class="campaign-helper">Approved applicants get a sample-invitation review link for each selected product. Variant selection is fixed per product for now — applicant choice of variants is a future feature.</p>
 
     <h3 style="margin-top:32px;">Launch discount</h3>
@@ -372,17 +458,21 @@ const renderCampaignFormFields = (data: CampaignFormData): string => {
       </label>
     </div>
     <div id="discount-section" class="discount-section${data.discountEnabled ? '' : ' disabled'}">
-      <div class="field-block">
-        <label>Percentage off</label>
-        <input type="number" name="discount_percent" min="1" max="100"
-               value="${data.discountPercent ?? ''}" placeholder="40" />
-        <p class="campaign-helper">Whole-number percentage off each order. Shopify's discount API doesn't support "percent off with a maximum cap" — combined with usage-limit-1 + per-customer scope + a short expiry, the worst case is one customer per code.</p>
-      </div>
-      <div class="field-block">
-        <label>Code expiry (days from when sent)</label>
-        <input type="number" name="discount_expires_days" min="1" max="3650"
-               value="${data.discountExpiresDays ?? ''}" placeholder="60" />
-        <p class="campaign-helper">Each code's expiry counts from the moment the launch email is sent, not from when the campaign is created.</p>
+      <!-- Side-by-side discount params (#5): percentage + expiry. Code prefix
+           stays on its own row since it's a string and may want more width. -->
+      <div class="form-row">
+        <div class="field-block">
+          <label>Percentage off</label>
+          <input type="number" name="discount_percent" min="1" max="100"
+                 value="${data.discountPercent ?? ''}" placeholder="Please enter a percentage (1-100)" />
+          <p class="campaign-helper">Whole-number percentage off each order.</p>
+        </div>
+        <div class="field-block">
+          <label>Code expiry (days from when sent)</label>
+          <input type="number" name="discount_expires_days" min="1" max="3650"
+                 value="${data.discountExpiresDays ?? ''}" placeholder="Please enter number of days" />
+          <p class="campaign-helper">Each code's expiry counts from the moment the launch email is sent, not from when the campaign is created.</p>
+        </div>
       </div>
       <div class="field-block">
         <label>Code prefix (optional)</label>
@@ -397,12 +487,12 @@ const renderCampaignFormFields = (data: CampaignFormData): string => {
       <h3 style="margin-top:32px;">Initial terms</h3>
       <div class="field-block">
         <label>Plain-language summary</label>
-        <textarea name="terms_summary" rows="6" required>${escapeHtml(data.termsSummary)}</textarea>
+        <textarea name="terms_summary" class="campaign-terms-input" rows="6" required>${escapeHtml(data.termsSummary)}</textarea>
         <p class="campaign-helper">A short summary of what the applicant is agreeing to. Shown prominently above the full terms on the application form. Use plain language — most readers won't scroll to the full terms.</p>
       </div>
       <div class="field-block">
         <label>Full terms</label>
-        <textarea name="terms_body" rows="14" required>${escapeHtml(data.termsBody)}</textarea>
+        <textarea name="terms_body" class="campaign-terms-input" rows="14" required>${escapeHtml(data.termsBody)}</textarea>
         <p class="campaign-helper">The legal terms the applicant agrees to. The boilerplate is a starting point — refine the language before launch. Editing later creates a new version snapshot; existing applicants stay tied to the version they accepted.</p>
       </div>
     `}
@@ -521,19 +611,24 @@ adminCampaigns.get('/new', (c) => {
     thresholdPct: 80,
     selectedProductIds: new Set<string>(),
     discountEnabled: true,
-    discountPercent: 40,
-    discountExpiresDays: 60,
+    // Defaults are null/blank so the merchant explicitly enters values and
+    // doesn't get a pre-filled "40%" they didn't intend. Server-side
+    // validation enforces non-null when discountEnabled.
+    discountPercent: null,
+    discountExpiresDays: null,
     discountCodePrefix: '',
     termsSummary: DEFAULT_TERMS_SUMMARY,
     termsBody: DEFAULT_TERMS_BODY,
     termsLocked: false,
   };
+  const refresh = renderRefreshProductsForm('/admin/campaigns/new');
   return c.html(adminShell('New campaign', `
     ${renderCampaignFormStyles()}
     <p><a href="/admin/campaigns">← Campaigns</a></p>
     <h2>New campaign</h2>
-    <form method="POST" action="/admin/campaigns" class="card">
-      ${renderCampaignFormFields(data)}
+    ${refresh.html}
+    <form method="POST" action="/admin/campaigns" class="card" id="campaign-create-form">
+      ${renderCampaignFormFields(data, refresh.id)}
       <div style="margin-top:24px; display:flex; gap:12px;">
         <button type="submit" class="primary">Create campaign (draft)</button>
         <a href="/admin/campaigns" style="align-self:center;">Cancel</a>
@@ -750,12 +845,14 @@ adminCampaigns.get('/:id/edit', (c) => {
     termsLocked: true,
   };
 
+  const refresh = renderRefreshProductsForm(`/admin/campaigns/${camp.id}/edit`);
   return c.html(adminShell(`Edit ${camp.name}`, `
     ${renderCampaignFormStyles()}
     <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
     <h2>Edit campaign</h2>
-    <form method="POST" action="/admin/campaigns/${camp.id}/edit" class="card">
-      ${renderCampaignFormFields(data)}
+    ${refresh.html}
+    <form method="POST" action="/admin/campaigns/${camp.id}/edit" class="card" id="campaign-edit-form">
+      ${renderCampaignFormFields(data, refresh.id)}
       <p class="campaign-helper" style="margin-top:16px;">Terms are edited separately from the campaign detail page — they're versioned so historical applicants stay tied to the version they accepted.</p>
       <div style="margin-top:24px; display:flex; gap:12px;">
         <button type="submit" class="primary">Save changes</button>
