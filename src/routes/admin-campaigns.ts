@@ -326,23 +326,74 @@ const renderThresholdHelperScript = (): string => `
       discountToggle && discountToggle.addEventListener('change', recalcDiscount);
       recalcDiscount();
 
-      // Defensive selection-sync for terms textareas. Symptom seen on first
-      // click after page load inside the Shopify embedded admin iframe: the
-      // visible cursor jumps to the click position, but the underlying
-      // selection state stays at (0,0), so the first keystroke goes to home
-      // instead of where the cursor appears. After the first keystroke,
-      // selection and visual position re-sync naturally.
+      // Defensive selection-sync for terms textareas.
       //
-      // Fix: after mouseup, when the browser has set selection from the click,
-      // explicitly re-call setSelectionRange with the same values on the next
-      // animation frame. The re-set forces the textarea's internal model to
-      // catch up to whatever the browser drew. Idempotent and cheap.
+      // Symptom (Shopify embedded admin iframe, first interaction after page
+      // load): visible cursor goes to the click position, but the underlying
+      // selection state stays at (0,0). The FIRST keystroke gets inserted at
+      // position 0 regardless of where the cursor visually appears. Subsequent
+      // keystrokes work normally because the bad first input "warms up" the
+      // textarea's internal model.
+      //
+      // The mouseup-based setSelectionRange fix from the previous round
+      // didn't help — by the time 'input' fires, the selection state is
+      // already wrong. So this version is more aggressive: catch the FIRST
+      // input event, compare what actually landed in the textarea against
+      // what should have landed if the insert respected the saved cursor
+      // position, and if the bug pattern matches (char inserted at 0 instead
+      // of the expected spot), splice it to the right position in-place.
+      //
+      // The detection is tight enough not to false-positive on legitimate
+      // insert-at-home (which would mean the saved selection was already at
+      // position 0 anyway, in which case we skip the correction).
       document.querySelectorAll('.campaign-terms-input').forEach((ta) => {
-        ta.addEventListener('mouseup', () => {
-          const s = ta.selectionStart, e = ta.selectionEnd;
-          requestAnimationFrame(() => {
-            try { ta.setSelectionRange(s, e); } catch (err) { /* ignore */ }
-          });
+        // Belt-and-suspenders: turn off browser features that have been
+        // observed to interfere with textarea selection state.
+        ta.setAttribute('autocomplete', 'off');
+        ta.setAttribute('autocorrect', 'off');
+        ta.setAttribute('autocapitalize', 'off');
+        ta.setAttribute('spellcheck', 'false');
+
+        let firstInputDone = false;
+        let savedSelection = null;
+        let prevValue = ta.value;
+
+        // Track the most recent intended cursor position across both mouse
+        // and keyboard navigation. setTimeout(0) defers until after the
+        // browser has finished its own selection update for this event.
+        const saveSelection = () => {
+          savedSelection = { start: ta.selectionStart, end: ta.selectionEnd };
+        };
+        ta.addEventListener('mouseup', () => { setTimeout(saveSelection, 0); });
+        ta.addEventListener('keyup', () => { setTimeout(saveSelection, 0); });
+        ta.addEventListener('focus', () => { setTimeout(saveSelection, 0); });
+
+        ta.addEventListener('input', (e) => {
+          const thisIsFirstInput = !firstInputDone;
+          firstInputDone = true;
+
+          if (thisIsFirstInput &&
+              e.inputType === 'insertText' &&
+              e.data &&
+              savedSelection &&
+              savedSelection.start > 0) {
+            const expectedPos = savedSelection.start;
+            const insertedChar = e.data;
+            // What the value would be if the insert went to expectedPos:
+            const expectedValue = prevValue.substring(0, expectedPos) + insertedChar + prevValue.substring(expectedPos);
+            const actualValue = ta.value;
+            // What the value would be if the bug fired (insert at position 0):
+            const bugValue = insertedChar + prevValue;
+
+            if (actualValue !== expectedValue && actualValue === bugValue) {
+              // Bug pattern matched — repair in-place.
+              ta.value = expectedValue;
+              ta.setSelectionRange(expectedPos + 1, expectedPos + 1);
+              savedSelection = { start: expectedPos + 1, end: expectedPos + 1 };
+            }
+          }
+
+          prevValue = ta.value;
         });
       });
     });
