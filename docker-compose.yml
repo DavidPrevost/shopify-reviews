@@ -35,7 +35,7 @@ services:
       TZ: America/New_York
     command: >
       sh -c "apk add --no-cache rsync openssh-client sqlite tzdata &&
-             echo '0 3 * * * sh /scripts/backup.sh >> /data/backup.log 2>&1' > /etc/crontabs/root &&
+             echo '0 3 * * * BACKUP_TARGET_PATH=${BACKUP_TARGET_PATH:-/opt/backups/shopify-reviews/} sh /scripts/backup.sh >> /data/backup.log 2>&1' > /etc/crontabs/root &&
              crond -f -d 8"
 
 networks:

@@ -35,7 +35,7 @@ The app is a single Node.js (Hono) process backed by SQLite, deployed via Docker
 
 | | Dev | Prod |
 |---|---|---|
-| Stack dir (Mercury) | `/opt/stacks/shopify-reviews-dev/` | `/opt/stacks/shopify-reviews/` |
+| Stack dir (Mercury) | `/opt/stacks/shopify-reviews-dev/` | `/opt/stacks/shopify-reviews-prod/` |
 | Host port (Tailscale-bound) | `8071` | `8070` |
 | Public URL | `https://reviews-dev.teraclay.com` | `https://reviews.teraclay.com` |
 | Shopify store | `teraclay-dev.myshopify.com` | `teraclay.myshopify.com` |

@@ -68,7 +68,7 @@ At `dev.shopify.com` → **Apps → Create app → "Start from Dev Dashboard"**.
 > ⚠️ **Launch blocker (see ROADMAP).** The committed OAuth scope set is incomplete for campaigns: `install-shopify.ts` requests only the three read scopes (no discount scopes), and `oauth.ts` requests `write_discounts` but not `read_discounts`. Campaigns need **both** `read_discounts` and `write_discounts`. This **must be reconciled before the live-store install** — settle one canonical scope set including both discount scopes, have `install-shopify.ts` reuse `OAUTH_SCOPES`, and declare them on the prod app version. Otherwise the live token is insufficient and correcting it means re-consent on the live store.
 
 ### 2.2 Create the Docker stack
-On the host, create the stack dir (`/opt/stacks/shopify-reviews/` for prod, `/opt/stacks/shopify-reviews-dev/` for dev). Add `docker-compose.yml` (the app service binds `${HOST_BIND_IP}:${HOST_PORT}:8080`; prod `HOST_PORT=8070`, dev `8071`) and a `.env`.
+On the host, create the stack dir (`/opt/stacks/shopify-reviews-prod/` for prod, `/opt/stacks/shopify-reviews-dev/` for dev). Add `docker-compose.yml` (the app service binds `${HOST_BIND_IP}:${HOST_PORT}:8080`; prod `HOST_PORT=8070`, dev `8071`) and a `.env`.
 
 Build `.env` from [`.env.example`](../.env.example). Fill in: the public URL, storefront origin, brand name, `HOST_BIND_IP` (Mercury's Tailscale IP) + `HOST_PORT`, the Shopify Client ID + secret (as `SHOPIFY_WEBHOOK_SECRET`), the API version, a **freshly generated** `EMAIL_TOKEN_SECRET` (`openssl rand -hex 32` — never reuse dev's), and the Gmail SMTP values. Leave `SHOPIFY_ADMIN_TOKEN` empty for now. Per-variable docs are in [OPERATIONS.md](OPERATIONS.md).
 
@@ -81,7 +81,7 @@ npm run install-shopify:dev -- --shop brandname        # or :  npm run install-s
 ```
 It opens the Shopify authorize page, you approve, and it prints a **permanent OFFLINE** token (new `shpua_` prefix — it explicitly rejects online/expiring tokens). Paste it into the stack `.env` as `SHOPIFY_ADMIN_TOKEN`, then **recreate** the container so the new value is read:
 ```
-cd /opt/stacks/shopify-reviews && docker compose up -d --force-recreate
+cd /opt/stacks/shopify-reviews-prod && docker compose up -d --force-recreate
 ```
 (`docker restart` is **not** enough — env vars are read at container creation; see OPERATIONS.)
 

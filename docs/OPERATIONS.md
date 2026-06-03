@@ -12,7 +12,7 @@
 
 ## Deploy & branch model
 
-- **`main` = production** (`/opt/stacks/shopify-reviews/`, port 8070, `reviews.teraclay.com`). **`develop` = development** (`/opt/stacks/shopify-reviews-dev/`, port 8071, `reviews-dev.teraclay.com`).
+- **`main` = production** (`/opt/stacks/shopify-reviews-prod/`, port 8070, `reviews.teraclay.com`). **`develop` = development** (`/opt/stacks/shopify-reviews-dev/`, port 8071, `reviews-dev.teraclay.com`).
 - Code is **written on Windows** (`D:\AI\shopify-reviews\`), pushed to **Gitea** on Mercury (`http://100.117.6.18:3000/kymermosst/shopify-reviews.git`), then pulled on the host.
 - **Normal loop:** edit → `npm run typecheck` + `npm run build` + `npx tsx tests/run-all.ts` locally → commit → push → on Mercury `git pull` in the stack dir → `sudo docker compose up -d --build` → verify `/health`.
 - **Never deploy to prod without validating on dev first.** Hotfixes made on `main` merge back to `develop`.
@@ -50,6 +50,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 | `EMAIL_TOKEN_SECRET` | HMAC secret for signed review-link / unsubscribe tokens. **Generate fresh per environment** (`openssl rand -hex 32`); never reuse dev's in prod. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Gmail SMTP config (app password as `SMTP_PASS`). |
 | `DEV_NOTIFICATION_EMAIL` | Operator notifications (panic activations, etc.). Empty = skip. |
+| `BACKUP_TARGET_PATH` | Pebbles rsync destination for the backup sidecar (baked into the cron job). Set per stack — `/opt/backups/shopify-reviews-dev/` vs `…-prod/` — so the two don't `--delete` over each other. Default `/opt/backups/shopify-reviews/`. |
 
 **Removed (do not re-add):** `ADMIN_PASSWORD_HASH`, `ADMIN_SESSION_SECRET`, `ADMIN_SESSION_TTL_DAYS` — the password-admin model is gone; auth is App Bridge session tokens. `config.ts` no longer reads them. Optional `DATA_DIR` defaults to `./data` (the compose volume mounts host `./data` → `/app/data`); `DISPATCHER_CRON` can override the schedule for tests.
 
@@ -57,7 +58,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 
 ## Backups & restore
 
-- A **backup sidecar** container snapshots the SQLite DB nightly (3 AM, `scripts/backup.sh`) to **`/opt/stacks/shopify-reviews-{dev,prod}/data/snapshots/`** and rsyncs to **Pebbles** (`/opt/backups/…`) over Tailscale. Rotation: 7 daily + 4 weekly.
+- A **backup sidecar** container snapshots the SQLite DB nightly (3 AM, `scripts/backup.sh`) to `<stack>/data/snapshots/` and rsyncs to **Pebbles** over Tailscale at `BACKUP_TARGET_PATH`. **Set `BACKUP_TARGET_PATH` per stack** (`/opt/backups/shopify-reviews-dev/` vs `…-prod/`) — both default to `/opt/backups/shopify-reviews/`, and since the rsync uses `--delete`, two stacks sharing the target would clobber each other's snapshots. Rotation: 7 daily + 4 weekly.
 - **Restore:** stop the app, replace `data/reviews.db` with a snapshot, `docker compose up -d`.
 - **Snapshot before every migration.** It's the primary recovery path (see Rollback below).
 - Note: the backup snapshots the DB, **not** `data/uploads/` (logos). Extend `backup.sh` if logo durability across host loss matters.
