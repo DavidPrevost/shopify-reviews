@@ -7,7 +7,7 @@
 services:
   reviews-app:
     build: .
-    container_name: reviews-app
+    container_name: ${REVIEWS_CONTAINER_NAME:-reviews-app}
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -25,7 +25,7 @@ services:
 
   backup:
     image: alpine:latest
-    container_name: reviews-backup
+    container_name: ${REVIEWS_BACKUP_CONTAINER_NAME:-reviews-backup}
     restart: unless-stopped
     volumes:
       - ./data:/data

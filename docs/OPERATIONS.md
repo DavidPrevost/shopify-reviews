@@ -41,6 +41,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 | `BRAND_NAME` | Default sender/brand name in emails. |
 | `HOST_BIND_IP` | Mercury's Tailscale IP — restricts the published port to the tailnet (read by docker-compose, not the app). |
 | `HOST_PORT` | Published host port: `8070` prod, `8071` dev (read by docker-compose). |
+| `REVIEWS_CONTAINER_NAME` / `REVIEWS_BACKUP_CONTAINER_NAME` | Container names (compose interpolation). Default `reviews-app`/`reviews-backup`; prod sets `reviews-app-prod`/`reviews-backup-prod` so the two stacks don't collide on the same host. Substitute the prod names in the `docker exec` recipes when operating prod. |
 | `SHOPIFY_SHOP_DOMAIN` | `<store>.myshopify.com`. |
 | `SHOPIFY_CLIENT_ID` | App client ID / API key (public; also the App Bridge key). |
 | `SHOPIFY_ADMIN_TOKEN` | Offline Admin API token from `install-shopify` (`shpua_…`). Fallback only — the per-shop `shops.access_token` written by OAuth takes precedence once present. |
