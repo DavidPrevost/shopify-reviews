@@ -2,9 +2,9 @@
 // the app on a shop and capture the per-shop OFFLINE access token. We deliberately
 // roll our own here rather than wire up @shopify/shopify-api's full session
 // lifecycle, because the lib's session-storage abstraction is more machinery
-// than we need for a Hono + SQLite single-tenant install. The lib still earns
-// its keep elsewhere — it'll do session-token (JWT) verification on every
-// embedded admin request in the next commit. Mirrors the patterns in
+// than we need for a Hono + SQLite single-tenant install. (Embedded-admin
+// session-token (JWT) verification is likewise hand-rolled — see
+// src/lib/embed-auth.ts.) Mirrors the patterns in
 // src/scripts/install-shopify.ts (which does the same thing for the one-shot
 // CLI flow) — they share concepts but not code, because the install script is
 // deliberately self-contained.

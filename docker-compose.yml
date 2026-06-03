@@ -18,7 +18,7 @@ services:
       - ./data:/app/data
     ports:
       # HOST_BIND_IP should be Mercury's Tailscale IP (100.x.y.z).
-      # HOST_PORT is 8080 for prod, 8081 for dev.
+      # HOST_PORT is 8070 for prod, 8071 for dev (maps to internal 8080).
       - "${HOST_BIND_IP}:${HOST_PORT}:8080"
     networks:
       - reviews-net

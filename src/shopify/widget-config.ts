@@ -1,8 +1,8 @@
 // Resolves the widget's visible styling from three layers, in order of
 // precedence:
 //   1. Per-field admin overrides stored as `widget_config_json` in settings
-//   2. Synced Shopify brand colors (`shop_brand_json` — populated by the
-//      "Sync brand info from Shopify" admin action)
+//   2. Brand colors in `shop_brand_json` — populated by the Liquid brand relay
+//      (the theme posts them to /proxy/brand) or by manual entry in Branding
 //   3. Hardcoded fallbacks (so the widget renders sensibly out of the box
 //      even before either layer has been populated)
 //
@@ -52,8 +52,6 @@ export const HARDCODED_DEFAULTS: ResolvedWidgetConfig = {
   text: null,
   ctaLabel: 'Write a review',
 };
-
-export const DEFAULT_CTA_LABEL = 'Write a review';
 
 // Curated preset palette offered to admin users alongside the full color
 // picker. Keys match the names the user listed; values are chosen to render

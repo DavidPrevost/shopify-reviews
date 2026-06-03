@@ -84,7 +84,6 @@ import {
 } from '../email/email-config.js';
 import { renderString } from '../email/render.js';
 import { backfillRecentOrders } from '../shopify/sync.js';
-import { fetchShopifyBrand, resolveBrandColors } from '../shopify/brand-info.js';
 import { runDispatcher } from '../scheduler/dispatcher.js';
 import { restartScheduler } from '../scheduler/cron.js';
 import {
@@ -3978,23 +3977,6 @@ admin.post('/branding/brand-colors', async (c) => {
   setSetting('shop_brand_json', JSON.stringify(blob, null, 2));
   log('info', 'admin saved manual brand colors');
   return c.redirect('/admin/branding?saved=1#widget');
-});
-
-admin.post('/settings/sync-brand', async (c) => {
-  try {
-    const brandInfo = await fetchShopifyBrand();
-    setSetting('shop_brand_json', JSON.stringify(brandInfo, null, 2));
-    log('info', 'admin synced brand info from Shopify', {
-      hasPrimary: !!brandInfo.colors?.primary?.background,
-      hasSecondary: !!brandInfo.colors?.secondary?.background,
-      hasLogo: !!brandInfo.logoUrl,
-    });
-    return c.redirect('/admin/branding?saved=1#brand');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log('error', 'brand sync failed', { error: msg });
-    return c.html(adminShell('Brand sync failed', `<div class="err">${escapeHtml(msg)}</div><p><a href="/admin/settings">Back to settings</a></p>`), 500);
-  }
 });
 
 // --- Manual operations ---

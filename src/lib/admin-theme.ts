@@ -8,8 +8,8 @@
 //
 // Ten presets: five accents (blue, green, terracotta, purple, pink) in light
 // and dark, all matte/pastel and contrast-checked for readability. An eleventh
-// "brand" option (auto-matched from Shopify brand colors) is reserved for when
-// brand-sync is wired through.
+// "brand" option (auto-matched from the store's brand colors) activates once
+// shop_brand_json has colors — populated by the Liquid brand relay or manual entry.
 
 import { getSetting } from '../db/queries.js';
 
@@ -92,7 +92,7 @@ export const ADMIN_THEMES: Record<string, AdminTheme> = {
 export const DEFAULT_ADMIN_THEME = 'blue-light';
 
 // The "Brand" theme key — not a static palette; its vars are derived from the
-// store's synced brand colors (shop_brand_json) at render time.
+// store's brand colors (shop_brand_json) at render time.
 export const BRAND_THEME_KEY = 'brand';
 
 export const getActiveAdminTheme = (): string => {
@@ -101,7 +101,7 @@ export const getActiveAdminTheme = (): string => {
   return DEFAULT_ADMIN_THEME;
 };
 
-// Derives admin chrome vars from the synced Shopify brand colors. We use a
+// Derives admin chrome vars from the stored brand colors (shop_brand_json). We use a
 // neutral light base for backgrounds/text/borders (deliberately NOT trying to
 // generate light/dark variants from arbitrary brand colors) and apply the brand
 // PRIMARY pair to the header + accent. Shopify provides primary as a

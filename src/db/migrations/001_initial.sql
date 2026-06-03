@@ -50,6 +50,8 @@ CREATE TABLE reviews (
   body TEXT NOT NULL,
   verified_purchase INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'published',
+  -- Merchant replies: admin can store a reply, but the storefront widget does
+  -- not surface them yet. Future-feature columns (forward-compat).
   merchant_reply TEXT,
   merchant_reply_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -57,6 +59,9 @@ CREATE TABLE reviews (
 );
 CREATE INDEX idx_reviews_product ON reviews(shopify_product_id, status);
 
+-- Reserved for a future photo/video reviews feature. Schema only: no app code
+-- reads or writes this table yet (touched solely by the GDPR redact wipe).
+-- Kept per the "pour the schema now" forward-compat decision.
 CREATE TABLE review_media (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
@@ -78,6 +83,10 @@ CREATE TABLE email_events (
 );
 CREATE INDEX idx_email_events_customer ON email_events(customer_id, kind);
 
+-- Reserved for a future product Q&A feature. Schema only: no app code reads or
+-- writes this table yet (touched solely by the GDPR redact wipe). NOTE: this is
+-- NOT the campaign feedback questions table — those are campaign_feedback_*
+-- (migration 019) and are fully built.
 CREATE TABLE questions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shopify_product_id TEXT NOT NULL,

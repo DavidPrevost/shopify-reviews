@@ -1,11 +1,11 @@
 // The single chokepoint for "which shop is this request for."
 //
-// Today we're single-tenant — getCurrentShopId() returns a constant. When
-// the embedded admin lands (next sprint), this function becomes "read the
-// shop from the Shopify session token / X-Shopify-Shop-Domain" — and every
-// other place in the code that needs a shop id keeps calling this same
-// function, unchanged. That's the whole point of the seam: one place to
-// edit when we go multi-tenant, not a thousand.
+// Today we're single-tenant — getCurrentShopId() returns a constant. Embedded
+// admin has since shipped (see embed-auth.ts), but multi-tenancy is still
+// deferred: when it lands, this function becomes "read the shop from the
+// Shopify session token / X-Shopify-Shop-Domain" — and every other place that
+// needs a shop id keeps calling this same function, unchanged. That's the
+// point of the seam: one place to edit when we go multi-tenant, not a thousand.
 //
 // See multi-tenancy-foundation.md for the full plan + decisions.
 
