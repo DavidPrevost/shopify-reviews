@@ -809,6 +809,89 @@ adminCampaigns.post('/', async (c) => {
   return c.redirect(`/admin/campaigns/${campaignId}`);
 });
 
+// --- Retention queue ---
+//
+// MUST be registered BEFORE `/:id` because both are single-segment paths and
+// Hono matches in registration order — putting this after `/:id` would have
+// `GET /admin/campaigns/retention-queue` matched as `/:id` with
+// id="retention-queue", which fails Number.isInteger and 404s. Same gotcha
+// as the email-template literal-vs-`:key` issue from the handoff doc.
+
+const renderQuarantinedRow = (m: QuarantinedMemberRow): string => {
+  const data = parseApplicationData(m);
+  const name = data ? `${data.firstName} ${data.lastName}`.trim() : '(unparseable)';
+  const email = data?.email ?? '';
+  return `<tr>
+    <td><input type="checkbox" name="member_id" value="${m.id}" /></td>
+    <td><a href="/admin/campaigns/${m.campaign_id}">${escapeHtml(m.campaign_name)}</a></td>
+    <td>${escapeHtml(name)}<br /><span class="muted">${escapeHtml(email)}</span></td>
+    <td class="muted">${formatTs(m.created_at)}</td>
+  </tr>`;
+};
+
+adminCampaigns.get('/retention-queue', (c) => {
+  const rows = listQuarantinedMembers();
+  if (rows.length === 0) {
+    return c.html(adminShell('Retention queue', `
+      <p><a href="/admin/campaigns">← Campaigns</a></p>
+      <h2>Retention queue</h2>
+      <p class="muted">No shipping addresses are pending purge.</p>
+      <p>Shipping addresses are quarantined automatically when a campaign moves to Completed or Cancelled. They land here for review and confirmation before the actual deletion.</p>
+    `, 'campaigns'));
+  }
+
+  const tableHtml = `
+    <form method="POST" action="/admin/campaigns/retention-queue/purge"
+          onsubmit="return confirm('Permanently delete the selected shipping addresses? This cannot be undone.');">
+      <table>
+        <thead>
+          <tr>
+            <th><input type="checkbox" onclick="document.querySelectorAll('input[name=member_id]').forEach(cb=>cb.checked=this.checked)" /></th>
+            <th>Campaign</th>
+            <th>Applicant</th>
+            <th>Quarantined since</th>
+          </tr>
+        </thead>
+        <tbody>${rows.map(renderQuarantinedRow).join('')}</tbody>
+      </table>
+      <p style="margin-top:16px;">
+        <button type="submit" class="primary">Permanently delete selected shipping addresses</button>
+      </p>
+    </form>
+  `;
+
+  return c.html(adminShell('Retention queue', `
+    <p><a href="/admin/campaigns">← Campaigns</a></p>
+    <h2>Retention queue <span class="muted" style="font-size:14px;font-weight:normal;">· ${rows.length} pending</span></h2>
+    <p>These shipping addresses are quarantined — the rest of the app no longer reads them. Confirm to hard-delete the JSON column. Name and email stay on the application record.</p>
+    ${renderMemberPillStyles()}
+    ${tableHtml}
+  `, 'campaigns'));
+});
+
+adminCampaigns.post('/retention-queue/purge', async (c) => {
+  const form = await c.req.parseBody({ all: true });
+  const raw = form.member_id;
+  const ids: number[] = [];
+  if (Array.isArray(raw)) {
+    for (const v of raw) {
+      const n = Number(v);
+      if (Number.isInteger(n)) ids.push(n);
+    }
+  } else if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isInteger(n)) ids.push(n);
+  }
+
+  if (ids.length === 0) {
+    return c.redirect('/admin/campaigns/retention-queue');
+  }
+
+  const purged = confirmPurgeShippingAddresses(ids);
+  log('info', 'campaign retention purge confirmed', { requested: ids.length, purged });
+  return c.redirect('/admin/campaigns/retention-queue');
+});
+
 // --- Detail page ---
 
 adminCampaigns.get('/:id', (c) => {
@@ -2262,83 +2345,6 @@ adminCampaigns.get('/:id/feedback/:formId/report', (c) => {
     <p class="muted">${responseCount} total response${responseCount === 1 ? '' : 's'}</p>
     ${blocksHtml}
   `, 'campaigns'));
-});
-
-// --- Retention queue ---
-
-const renderQuarantinedRow = (m: QuarantinedMemberRow): string => {
-  const data = parseApplicationData(m);
-  const name = data ? `${data.firstName} ${data.lastName}`.trim() : '(unparseable)';
-  const email = data?.email ?? '';
-  return `<tr>
-    <td><input type="checkbox" name="member_id" value="${m.id}" /></td>
-    <td><a href="/admin/campaigns/${m.campaign_id}">${escapeHtml(m.campaign_name)}</a></td>
-    <td>${escapeHtml(name)}<br /><span class="muted">${escapeHtml(email)}</span></td>
-    <td class="muted">${formatTs(m.created_at)}</td>
-  </tr>`;
-};
-
-adminCampaigns.get('/retention-queue', (c) => {
-  const rows = listQuarantinedMembers();
-  if (rows.length === 0) {
-    return c.html(adminShell('Retention queue', `
-      <p><a href="/admin/campaigns">← Campaigns</a></p>
-      <h2>Retention queue</h2>
-      <p class="muted">No shipping addresses are pending purge.</p>
-      <p>Shipping addresses are quarantined automatically when a campaign moves to Completed or Cancelled. They land here for review and confirmation before the actual deletion.</p>
-    `, 'campaigns'));
-  }
-
-  const tableHtml = `
-    <form method="POST" action="/admin/campaigns/retention-queue/purge"
-          onsubmit="return confirm('Permanently delete the selected shipping addresses? This cannot be undone.');">
-      <table>
-        <thead>
-          <tr>
-            <th><input type="checkbox" onclick="document.querySelectorAll('input[name=member_id]').forEach(cb=>cb.checked=this.checked)" /></th>
-            <th>Campaign</th>
-            <th>Applicant</th>
-            <th>Quarantined since</th>
-          </tr>
-        </thead>
-        <tbody>${rows.map(renderQuarantinedRow).join('')}</tbody>
-      </table>
-      <p style="margin-top:16px;">
-        <button type="submit" class="primary">Permanently delete selected shipping addresses</button>
-      </p>
-    </form>
-  `;
-
-  return c.html(adminShell('Retention queue', `
-    <p><a href="/admin/campaigns">← Campaigns</a></p>
-    <h2>Retention queue <span class="muted" style="font-size:14px;font-weight:normal;">· ${rows.length} pending</span></h2>
-    <p>These shipping addresses are quarantined — the rest of the app no longer reads them. Confirm to hard-delete the JSON column. Name and email stay on the application record.</p>
-    ${renderMemberPillStyles()}
-    ${tableHtml}
-  `, 'campaigns'));
-});
-
-adminCampaigns.post('/retention-queue/purge', async (c) => {
-  const form = await c.req.parseBody({ all: true });
-  const raw = form.member_id;
-  const ids: number[] = [];
-  if (Array.isArray(raw)) {
-    for (const v of raw) {
-      const n = Number(v);
-      if (Number.isInteger(n)) ids.push(n);
-    }
-  } else if (raw !== undefined) {
-    const n = Number(raw);
-    if (Number.isInteger(n)) ids.push(n);
-  }
-
-  if (ids.length === 0) {
-    return c.redirect('/admin/campaigns/retention-queue');
-  }
-
-  const purged = confirmPurgeShippingAddresses(ids);
-  log('info', 'campaign retention purge confirmed', { requested: ids.length, purged });
-  return c.redirect('/admin/campaigns/retention-queue');
 });
 
 // --- Suppress unused-import warnings for symbols later steps will use ---
