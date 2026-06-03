@@ -38,6 +38,7 @@ This is the catch-all for everything not built yet but worth remembering — bug
 - Per-product **"skip review requests"** metafield (`reviews.skip_requests`) — exclude gift cards/services/sensitive products from the dispatcher (same pattern as `variant_handling`).
 - Per-product **cadence overrides** (metafield overriding `request_delay_days` per product).
 - Widget visual polish: SVG stars, disclosure animation, typography/empty-state refinement.
+- **Structured data for SEO (JSON-LD `AggregateRating` / `Review`).** The widget emits no schema today. The (now-sunset) Shopify Product Reviews app gave Google its star-rating rich snippets via an `AggregateRating` block, so the live cutover **drops those Google stars** until we emit our own — e.g. a Liquid block fed by the aggregate API, or from the widget. Flagged at cutover (2026-06-03) as an SEO regression to restore.
 
 **Schema-ready v2 surfaces** (tables/columns already poured; no feature code yet)
 - **Photos in reviews** — `review_media` table exists; needs upload handling, storage (Mercury FS → CDN-pluggable), widget display.
