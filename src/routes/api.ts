@@ -25,8 +25,16 @@ import { log } from '../lib/logger.js';
 
 const api = new Hono();
 
+// Allow the storefront's origin(s) to read the public review API. STOREFRONT_ORIGIN
+// may be a comma-separated list, because the store can be served on its
+// .myshopify.com domain and/or one or more custom domains — each is allowed.
+const allowedOrigins = config.storefrontOrigin
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 api.use('*', cors({
-  origin: config.storefrontOrigin,
+  origin: allowedOrigins,
   allowMethods: ['GET', 'POST', 'OPTIONS'],
   allowHeaders: ['Content-Type'],
   maxAge: 600,

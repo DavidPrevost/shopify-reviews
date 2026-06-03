@@ -7,6 +7,8 @@ export const config = {
   dataDir,
   dbPath: path.join(dataDir, 'reviews.db'),
   publicUrl: process.env.PUBLIC_URL ?? 'http://localhost:8080',
+  // Allowed storefront origin(s) for public /api CORS. May be a comma-separated
+  // list — the store can serve on its .myshopify.com domain and/or custom domains.
   storefrontOrigin: process.env.STOREFRONT_ORIGIN ?? 'http://localhost',
   shopify: {
     shopDomain: process.env.SHOPIFY_SHOP_DOMAIN ?? '',

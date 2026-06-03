@@ -37,7 +37,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 | `PORT` | Container-internal listen port (fixed `8080`; the host maps `HOST_PORT`→8080). |
 | `TZ` | Process/OS timezone (display + the backup sidecar). The dispatcher schedule itself is handled via the admin's local-time picker, stored as UTC. |
 | `PUBLIC_URL` | The stack's public HTTPS URL; used to build webhook callback URLs and email links. |
-| `STOREFRONT_ORIGIN` | Allowed CORS origin for the public `/api/*` read endpoints. |
+| `STOREFRONT_ORIGIN` | Allowed CORS origin(s) for the public `/api/*` read endpoints — the domain(s) the storefront *pages* serve from (where the widget runs). Comma-separate for multiple (e.g. the `.myshopify.com` domain + custom domains). Must match or the widget's reads are CORS-blocked ("Reviews Unavailable"). |
 | `BRAND_NAME` | Default sender/brand name in emails. |
 | `HOST_BIND_IP` | Mercury's Tailscale IP — restricts the published port to the tailnet (read by docker-compose, not the app). |
 | `HOST_PORT` | Published host port: `8070` prod, `8071` dev (read by docker-compose). |
