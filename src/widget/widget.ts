@@ -1051,26 +1051,96 @@ const CAMPAIGN_STYLES = `
   line-height: 1.5;
 }
 .rv-campaign h2 { margin: 0 0 12px; font-size: 1.4em; font-weight: 600; }
-.rv-campaign-intro { margin: 0 0 24px; opacity: 0.85; }
-.rv-campaign-field { display: block; margin: 12px 0; }
-.rv-campaign-field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-.rv-campaign-field input, .rv-campaign-field textarea {
-  width: 100%; padding: 8px 10px; border: 1px solid #bbb; border-radius: 4px;
-  font-size: 14px; font-family: inherit; box-sizing: border-box;
-  background: transparent; color: inherit;
+.rv-campaign h3 { margin: 24px 0 12px; font-size: 1.05em; font-weight: 600; }
+.rv-campaign-intro { margin: 0 0 16px; opacity: 0.85; }
+.rv-campaign-summary {
+  margin: 0 0 28px;
+  padding: 16px 18px;
+  border-left: 4px solid var(--reviews-cta-bg, #444);
+  background: rgba(0,0,0,0.04);
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
-.rv-campaign-row { display: flex; gap: 12px; }
-.rv-campaign-row .rv-campaign-field { flex: 1; }
-.rv-campaign-terms {
-  margin: 24px 0 12px; padding: 12px; border: 1px solid #ddd; border-radius: 4px;
-  max-height: 180px; overflow-y: auto; font-size: 13px; white-space: pre-wrap;
+.rv-campaign-summary-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+.rv-campaign-field { display: block; margin: 14px 0; }
+.rv-campaign-field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.rv-campaign-field input,
+.rv-campaign-field textarea {
+  width: 100%; padding: 10px 12px;
+  border: 1px solid #c0c0c0; border-radius: 4px;
+  font-size: 14px; font-family: inherit; box-sizing: border-box;
+  background: #ffffff; color: #111;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.rv-campaign-field input:focus,
+.rv-campaign-field textarea:focus {
+  outline: none;
+  border-color: var(--reviews-cta-bg, #444);
+  box-shadow: 0 0 0 3px rgba(0,0,0,0.06);
+}
+.rv-campaign-field input[readonly] {
+  background: #f4f4f4;
+  color: #555;
+  cursor: not-allowed;
+}
+.rv-campaign-field input:invalid:not(:placeholder-shown) {
+  border-color: #b00;
+}
+.rv-campaign-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.rv-campaign-row .rv-campaign-field { flex: 1; min-width: 180px; }
+.rv-campaign-terms-wrap {
+  margin: 24px 0 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
   background: rgba(0,0,0,0.02);
+  overflow: hidden;
+}
+.rv-campaign-terms-header {
+  padding: 12px 14px;
+  background: rgba(0,0,0,0.03);
+  border-bottom: 1px solid #ddd;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.rv-campaign-terms-header-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 6px;
+}
+.rv-campaign-terms {
+  padding: 12px 14px;
+  max-height: 180px; overflow-y: auto;
+  font-size: 13px; white-space: pre-wrap;
+}
+.rv-campaign-terms-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 6px;
 }
 .rv-campaign-accept { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 24px; font-size: 14px; }
 .rv-campaign-accept input { margin-top: 3px; }
 .rv-campaign-submit {
   background: var(--reviews-cta-bg, #111); color: var(--reviews-cta-fg, #fff);
-  border: none; padding: 10px 20px; font-size: 15px; font-weight: 600;
+  border: none; padding: 12px 24px; font-size: 15px; font-weight: 600;
   border-radius: 4px; cursor: pointer; font-family: inherit;
 }
 .rv-campaign-submit:disabled { opacity: 0.6; cursor: wait; }
@@ -1093,7 +1163,7 @@ interface CampaignConfig {
   campaignName: string;
   slug?: string;
   productCount?: number;
-  terms?: { versionId: number; versionNumber: number; body: string };
+  terms?: { versionId: number; versionNumber: number; body: string; summary: string | null };
 }
 
 const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> => {
@@ -1125,58 +1195,89 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
   }
 
   const terms = cfg.terms;
+  // Plain-language summary lands in two places: a prominent intro block at the
+  // top of the form (so applicants see "what they're signing up for" before
+  // they even start typing) AND as a labeled header inside the legal-terms
+  // box (so it travels with the terms wherever they're surfaced). Both fall
+  // back gracefully when the merchant hasn't filled in the summary.
+  const summary = (terms.summary ?? '').trim();
+  const summaryIntroHtml = summary
+    ? `<div class="rv-campaign-summary">
+         <span class="rv-campaign-summary-label">What to expect</span>
+         ${escapeHtmlText(summary)}
+       </div>`
+    : '';
+  const summaryHeaderHtml = summary
+    ? `<div class="rv-campaign-terms-header">
+         <span class="rv-campaign-terms-header-label">Plain-language summary</span>
+         ${escapeHtmlText(summary)}
+       </div>`
+    : '';
+
   el.innerHTML = `
     <h2>${escapeHtmlText(cfg.campaignName)}</h2>
     <p class="rv-campaign-intro">Apply below to be considered for this sample program.</p>
+    ${summaryIntroHtml}
     <form class="rv-campaign-form" novalidate>
       <div class="rv-campaign-row">
         <div class="rv-campaign-field">
           <label>First name</label>
-          <input type="text" name="firstName" required maxlength="80" />
+          <input type="text" name="firstName" required maxlength="80" placeholder="Jane" />
         </div>
         <div class="rv-campaign-field">
           <label>Last name</label>
-          <input type="text" name="lastName" required maxlength="80" />
+          <input type="text" name="lastName" required maxlength="80" placeholder="Smith" />
         </div>
       </div>
       <div class="rv-campaign-field">
         <label>Email</label>
-        <input type="email" name="email" required maxlength="254" />
+        <input type="email" name="email" required maxlength="254" placeholder="you@example.com" />
       </div>
-      <h3 style="margin-top:24px; font-size:1em;">Shipping address</h3>
+      <h3>Shipping address</h3>
       <div class="rv-campaign-field">
         <label>Street address</label>
-        <input type="text" name="street1" required maxlength="200" />
+        <input type="text" name="street1" required maxlength="200" placeholder="123 Main St" />
       </div>
       <div class="rv-campaign-field">
         <label>Apartment, suite, etc. (optional)</label>
-        <input type="text" name="street2" maxlength="200" />
+        <input type="text" name="street2" maxlength="200" placeholder="Apt 4B" />
       </div>
       <div class="rv-campaign-row">
         <div class="rv-campaign-field">
           <label>City</label>
-          <input type="text" name="city" required maxlength="100" />
+          <input type="text" name="city" required maxlength="100" placeholder="Springfield" />
         </div>
         <div class="rv-campaign-field">
-          <label>State / Region</label>
-          <input type="text" name="state" maxlength="100" />
+          <label>State</label>
+          <input type="text" name="state" required maxlength="100" placeholder="IL" />
         </div>
       </div>
       <div class="rv-campaign-row">
         <div class="rv-campaign-field">
-          <label>Postal code</label>
-          <input type="text" name="postalCode" required maxlength="24" />
+          <label>ZIP code</label>
+          <input type="text" name="postalCode" required maxlength="10"
+                 pattern="\\d{5}(-\\d{4})?"
+                 inputmode="numeric"
+                 placeholder="12345"
+                 title="5 digits, or 5+4 (e.g. 12345 or 12345-6789)" />
         </div>
         <div class="rv-campaign-field">
           <label>Country</label>
-          <input type="text" name="country" required maxlength="100" />
+          <input type="text" name="country" required maxlength="100"
+                 value="United States" readonly aria-readonly="true" />
         </div>
       </div>
       <div class="rv-campaign-field">
         <label>Anything you'd like us to know? (optional)</label>
         <textarea name="message" rows="3" maxlength="2000"></textarea>
       </div>
-      <div class="rv-campaign-terms" aria-label="Program terms">${escapeHtmlText(terms.body)}</div>
+      <div class="rv-campaign-terms-wrap" aria-label="Program terms">
+        ${summaryHeaderHtml}
+        <div class="rv-campaign-terms">
+          <span class="rv-campaign-terms-label">Full terms</span>
+          ${escapeHtmlText(terms.body)}
+        </div>
+      </div>
       <label class="rv-campaign-accept">
         <input type="checkbox" name="termsAccepted" required />
         <span>I have read and agree to the terms above.</span>
@@ -1201,6 +1302,23 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
     if (!accepted) {
       errorEl.hidden = false;
       errorEl.textContent = 'You must accept the terms to continue.';
+      return;
+    }
+
+    // Browser HTML5 validity handles required/email/pattern. We surface a
+    // friendly message + focus the first invalid field rather than letting
+    // the browser's own bubble fire (which doesn't always show in the
+    // Shopify embedded surface).
+    if (!formEl.checkValidity()) {
+      const firstInvalid = formEl.querySelector<HTMLInputElement>(':invalid');
+      const fieldLabel = firstInvalid?.previousElementSibling?.textContent?.trim()
+        ?? firstInvalid?.getAttribute('name')
+        ?? 'a required field';
+      errorEl.hidden = false;
+      errorEl.textContent = firstInvalid?.name === 'postalCode'
+        ? 'Please enter a valid US ZIP code (5 digits, e.g. 12345).'
+        : `Please fill in ${fieldLabel.toLowerCase()}.`;
+      if (firstInvalid) firstInvalid.focus();
       return;
     }
 
@@ -1262,7 +1380,8 @@ const campaignErrorMessage = (code: string | undefined): string | null => {
     case 'invalid_email':              return 'Please enter a valid email address.';
     case 'missing_first_name':         return 'First name is required.';
     case 'missing_last_name':          return 'Last name is required.';
-    case 'incomplete_shipping_address':return 'Please complete the shipping address.';
+    case 'incomplete_shipping_address':return 'Please complete the shipping address (including state).';
+    case 'invalid_postal_code':        return 'Please enter a valid US ZIP code (5 digits, e.g. 12345).';
     case 'applications_closed':        return 'Applications for this program are closed.';
     case 'terms_changed':              return 'The program terms were updated while you were filling out the form. Please reload.';
     case 'rate_limited':               return 'Too many submissions from your network. Please try again in a minute.';

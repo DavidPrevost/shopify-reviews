@@ -56,6 +56,10 @@ import { config } from '../config.js';
 import { daysToSec, nowSec } from '../lib/time.js';
 import { log } from '../lib/logger.js';
 import {
+  renderTextareaCursorFixScript,
+  ADMIN_TEXTAREA_FIX_CSS,
+} from '../lib/admin-textarea-fix.js';
+import {
   sendCampaignBatch,
   countEligibleForTrigger,
   type CampaignBatchTrigger,
@@ -875,9 +879,7 @@ adminCampaigns.get('/:id', (c) => {
       ${transitionsHtml}
     </div>
 
-    <h3>Applications</h3>
-    ${memberStatsHtml}
-    ${renderApplicationQueue(camp, parseProductSet(camp).length)}
+    ${renderApplicationsSummaryCard(camp, parseProductSet(camp).length, memberStatsHtml)}
 
     <div class="card">
       <h3 style="margin-top:0;">Emails</h3>
@@ -939,57 +941,42 @@ adminCampaigns.get('/:id', (c) => {
   `, 'campaigns'));
 });
 
-// Selection-sync fix for terms textareas — extracted as a reusable function
-// since both the campaign-create page and the campaign-detail page have
-// these textareas pre-filled with content and need the same fix. See the
-// inline comment in the script for the full rationale.
-const renderTermsTextareaCursorFixScript = (): string => `
-  <script>
-    document.addEventListener('DOMContentLoaded', function () {
-      document.querySelectorAll('.campaign-terms-input').forEach(function (ta) {
-        ta.setAttribute('autocomplete', 'off');
-        ta.setAttribute('autocorrect', 'off');
-        ta.setAttribute('autocapitalize', 'off');
-        ta.setAttribute('spellcheck', 'false');
+// Thin shim around the shared cursor-fix helper. Older call sites in this
+// file still reference renderTermsTextareaCursorFixScript() — keep the name
+// for them but route through the shared helper.
+const renderTermsTextareaCursorFixScript = (): string =>
+  renderTextareaCursorFixScript('.campaign-terms-input');
 
-        var firstInputDone = false;
-        var savedSelection = null;
-        var prevValue = ta.value;
+// --- Applicants management page (dedicated tab) ---
+//
+// The campaign detail page used to inline the full applicants queue plus the
+// approve/reject/remove controls; once a campaign collects more than ~5
+// applications the detail page got unwieldy. Moved to its own page so the
+// detail page stays a scannable overview and applicants triage gets its own
+// surface — with a status filter so the merchant can work one bucket at a
+// time.
 
-        var saveSelection = function () {
-          savedSelection = { start: ta.selectionStart, end: ta.selectionEnd };
-        };
-        ta.addEventListener('mouseup', function () { setTimeout(saveSelection, 0); });
-        ta.addEventListener('keyup', function () { setTimeout(saveSelection, 0); });
-        ta.addEventListener('focus', function () { setTimeout(saveSelection, 0); });
+adminCampaigns.get('/:id/applicants', (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.notFound();
+  const camp = findCampaignById(id);
+  if (!camp) return c.notFound();
 
-        ta.addEventListener('input', function (e) {
-          var thisIsFirstInput = !firstInputDone;
-          firstInputDone = true;
+  const products = parseProductSet(camp);
+  const statusParam = c.req.query('status') ?? 'all';
+  const statusFilter = statusParam === 'all'
+    || (CAMPAIGN_MEMBER_STATUSES as readonly string[]).includes(statusParam)
+    ? (statusParam as CampaignMemberRow['status'] | 'all')
+    : 'all';
 
-          if (thisIsFirstInput &&
-              e.inputType === 'insertText' &&
-              e.data &&
-              savedSelection &&
-              savedSelection.start > 0) {
-            var expectedPos = savedSelection.start;
-            var insertedChar = e.data;
-            var expectedValue = prevValue.substring(0, expectedPos) + insertedChar + prevValue.substring(expectedPos);
-            var actualValue = ta.value;
-            var bugValue = insertedChar + prevValue;
-
-            if (actualValue !== expectedValue && actualValue === bugValue) {
-              ta.value = expectedValue;
-              ta.setSelectionRange(expectedPos + 1, expectedPos + 1);
-              savedSelection = { start: expectedPos + 1, end: expectedPos + 1 };
-            }
-          }
-          prevValue = ta.value;
-        });
-      });
-    });
-  </script>
-`;
+  return c.html(adminShell(`Applicants — ${camp.name}`, `
+    ${renderCampaignPillStyles()}
+    <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
+    <h2>Applicants — ${escapeHtml(camp.name)}</h2>
+    <p class="muted">Approve, reject, or remove individual applications. Once approved members exist, use the Generate-invitations button below to create their sample-invitation review links (one per campaign product, idempotent).</p>
+    ${renderApplicationQueue(camp, products.length, statusFilter)}
+  `, 'campaigns'));
+});
 
 // --- Edit settings (form) ---
 
@@ -1233,18 +1220,70 @@ const renderMemberPillStyles = (): string => `
   </style>
 `;
 
-const renderApplicationQueue = (camp: CampaignRow, productCount: number): string => {
+// Detail-page summary card. Shows the per-status counts + a single link
+// across to the dedicated Applicants page where the merchant does the actual
+// approve/reject/remove work. We surface the Generate-invitations CTA here
+// too when it's actionable, since that's the most time-sensitive operation
+// once approvals start landing.
+const renderApplicationsSummaryCard = (
+  camp: CampaignRow,
+  productCount: number,
+  memberStatsHtml: string,
+): string => {
   const members = listMembersByCampaign(camp.id);
-  if (members.length === 0) {
-    return `<p class="muted">No applications yet. Share the form URL once the campaign is in Recruiting status.</p>`;
-  }
 
-  // Approved-but-no-invitations count drives the "Generate invitations" CTA.
-  // Skip entirely when the product set is empty — generating zero invitations
-  // per member isn't useful.
   let approvedAwaitingInvitations = 0;
   if (productCount > 0) {
     for (const m of members) {
+      if (m.status !== 'approved') continue;
+      const data = parseApplicationData(m);
+      if (!data || !data.email) continue;
+      if (!memberHasInvitations(camp.id, data.email)) approvedAwaitingInvitations += 1;
+    }
+  }
+
+  const generateCta = approvedAwaitingInvitations > 0
+    ? `<div style="margin:16px 0 0; padding:12px 14px; background:var(--surface-alt); border-radius:4px;">
+        <p style="margin:0 0 10px;"><strong>${approvedAwaitingInvitations}</strong> approved ${approvedAwaitingInvitations === 1 ? 'applicant has' : 'applicants have'} no invitations yet.</p>
+        <form method="POST" action="/admin/campaigns/${camp.id}/generate-invitations">
+          <button type="submit" class="primary">Generate ${productCount} sample invitations per approved applicant</button>
+        </form>
+        <p class="muted" style="margin:10px 0 0;">Creates one invitation per product in the campaign's product set. Idempotent — re-running skips applicants who already have invitations.</p>
+      </div>`
+    : '';
+
+  const totalApplications = members.length;
+  const summaryLine = totalApplications === 0
+    ? '<p class="muted" style="margin:0;">No applications yet. Share the form URL once the campaign is in Recruiting status.</p>'
+    : `<p class="muted" style="margin:0;">${totalApplications} ${totalApplications === 1 ? 'application' : 'applications'} total.</p>`;
+
+  return `
+    <div class="card">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+        <h3 style="margin:0;">Applications</h3>
+        <a href="/admin/campaigns/${camp.id}/applicants" class="primary" style="text-decoration:none; padding:6px 14px; background:var(--accent); color:var(--accent-fg, #fff); border-radius:4px; font-size:13px;">Manage applicants →</a>
+      </div>
+      ${memberStatsHtml}
+      ${summaryLine}
+      ${generateCta}
+    </div>
+  `;
+};
+
+// Full queue rendered on the dedicated /applicants page. Same data as the
+// old inline card, just expanded with a status filter so the merchant can
+// triage one bucket at a time once the list gets long.
+const renderApplicationQueue = (
+  camp: CampaignRow,
+  productCount: number,
+  statusFilter: CampaignMemberRow['status'] | 'all',
+): string => {
+  const all = listMembersByCampaign(camp.id);
+  const filtered = statusFilter === 'all' ? all : all.filter((m) => m.status === statusFilter);
+
+  let approvedAwaitingInvitations = 0;
+  if (productCount > 0) {
+    for (const m of all) {
       if (m.status !== 'approved') continue;
       const data = parseApplicationData(m);
       if (!data || !data.email) continue;
@@ -1262,21 +1301,56 @@ const renderApplicationQueue = (camp: CampaignRow, productCount: number): string
       </div>`
     : '';
 
+  // Status filter row: All + each member status. Counts come from `all` so
+  // the buckets reflect the full list (not whatever bucket is currently
+  // selected).
+  const counts: Record<string, number> = { all: all.length };
+  for (const s of CAMPAIGN_MEMBER_STATUSES) counts[s] = 0;
+  for (const m of all) counts[m.status] = (counts[m.status] ?? 0) + 1;
+
+  const filterLink = (key: string, label: string): string => {
+    const isActive = statusFilter === key;
+    const href = key === 'all'
+      ? `/admin/campaigns/${camp.id}/applicants`
+      : `/admin/campaigns/${camp.id}/applicants?status=${encodeURIComponent(key)}`;
+    return `<a href="${href}" class="${isActive ? 'tab-active' : ''}"
+              style="padding:6px 12px; border-radius:4px; text-decoration:none; font-size:13px;
+                     ${isActive ? 'background:var(--accent); color:var(--accent-fg, #fff);' : 'color:var(--text); background:var(--surface-alt);'}">
+              ${escapeHtml(label)} <span class="muted" style="opacity:0.75;">${counts[key] ?? 0}</span>
+            </a>`;
+  };
+
+  const filterRow = `
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin:16px 0;">
+      ${filterLink('all', 'All')}
+      ${CAMPAIGN_MEMBER_STATUSES.map((s) => filterLink(s, CAMPAIGN_MEMBER_STATUS_LABELS[s])).join('')}
+    </div>
+  `;
+
+  const emptyMsg = all.length === 0
+    ? `<p class="muted">No applications yet. Share the form URL once the campaign is in Recruiting status.</p>`
+    : `<p class="muted">No applications matching <code>${escapeHtml(statusFilter)}</code>.</p>`;
+
+  const tableHtml = filtered.length === 0
+    ? emptyMsg
+    : `<table>
+        <thead>
+          <tr>
+            <th>Applicant</th>
+            <th>Status</th>
+            <th>Invitations</th>
+            <th>Applied</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>${filtered.map((m) => memberRowHtml(m, camp, productCount)).join('')}</tbody>
+      </table>`;
+
   return `
     ${renderMemberPillStyles()}
     ${generateCta}
-    <table>
-      <thead>
-        <tr>
-          <th>Applicant</th>
-          <th>Status</th>
-          <th>Invitations</th>
-          <th>Applied</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>${members.map((m) => memberRowHtml(m, camp, productCount)).join('')}</tbody>
-    </table>
+    ${filterRow}
+    ${tableHtml}
   `;
 };
 
@@ -1315,7 +1389,7 @@ adminCampaigns.post('/:id/members/:memberId/approve', (c) => {
     decidedBy: 'admin',
   });
   log('info', 'campaign member approved', { campaignId: camp.id, memberId: member.id, customerId: customer.id });
-  return c.redirect(`/admin/campaigns/${camp.id}`);
+  return c.redirect(`/admin/campaigns/${camp.id}/applicants`);
 });
 
 adminCampaigns.post('/:id/members/:memberId/reject', (c) => {
@@ -1329,7 +1403,7 @@ adminCampaigns.post('/:id/members/:memberId/reject', (c) => {
   }
   updateMemberStatus({ id: member.id, status: 'rejected', decidedBy: 'admin' });
   log('info', 'campaign member rejected', { campaignId: camp.id, memberId: member.id });
-  return c.redirect(`/admin/campaigns/${camp.id}`);
+  return c.redirect(`/admin/campaigns/${camp.id}/applicants`);
 });
 
 // Hard-delete a member pre-ship. Used when the applicant changes their mind
@@ -1347,7 +1421,7 @@ adminCampaigns.post('/:id/members/:memberId/remove', (c) => {
   }
   deleteCampaignMember(member.id);
   log('info', 'campaign member removed', { campaignId: camp.id, memberId: member.id });
-  return c.redirect(`/admin/campaigns/${camp.id}`);
+  return c.redirect(`/admin/campaigns/${camp.id}/applicants`);
 });
 
 // --- Bulk: generate sample invitations for approved members ---
@@ -1404,7 +1478,7 @@ adminCampaigns.post('/:id/generate-invitations', (c) => {
     membersSkipped,
     invitationsCreated,
   });
-  return c.redirect(`/admin/campaigns/${camp.id}`);
+  return c.redirect(`/admin/campaigns/${camp.id}/applicants`);
 });
 
 // --- Batch-send UI + routes ---
@@ -1505,7 +1579,7 @@ const renderTemplateEditor = (camp: CampaignRow, template: ReturnType<typeof fin
       <input type="text" name="subject" required maxlength="200" value="${escapeHtml(template.subject)}" data-dirty-watch />
 
       <label style="margin-top:16px;">Body (HTML)</label>
-      <textarea name="body_html" id="campaign-template-body" rows="20" required
+      <textarea name="body_html" id="campaign-template-body" class="admin-cursorfix-textarea" rows="20" required
                 style="font-family:monospace; font-size:13px;"
                 data-dirty-watch>${escapeHtml(template.body_html)}</textarea>
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
@@ -1600,6 +1674,13 @@ const renderTemplateEditor = (camp: CampaignRow, template: ReturnType<typeof fin
         });
       })();
     </script>
+
+    <style>
+      .admin-cursorfix-textarea {
+        ${ADMIN_TEXTAREA_FIX_CSS}
+      }
+    </style>
+    ${renderTextareaCursorFixScript('.admin-cursorfix-textarea')}
   `;
 };
 

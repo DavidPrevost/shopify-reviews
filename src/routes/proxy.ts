@@ -401,6 +401,7 @@ proxy.get('/campaigns/:slug/config', (c) => {
       versionId: terms.id,
       versionNumber: terms.version_number,
       body: terms.body_text,
+      summary: terms.summary_text ?? null,
     },
   });
 });
@@ -482,8 +483,15 @@ proxy.post('/campaigns/:slug/apply', async (c) => {
   const postalCode = String(shipping.postalCode ?? '').trim().slice(0, 24);
   const country = String(shipping.country ?? '').trim().slice(0, 100);
 
-  if (!street1 || !city || !postalCode || !country) {
+  if (!street1 || !city || !state || !postalCode || !country) {
     return c.json({ error: 'incomplete_shipping_address' }, 400);
+  }
+  // US ZIP format: 5 digits, optionally followed by -4. We're USA-only at
+  // launch, so a tighter check here saves a downstream "we couldn't ship to
+  // this address" round-trip. If we ever broaden to other countries, gate
+  // this on `country === 'United States'` instead of always running it.
+  if (!/^\d{5}(-\d{4})?$/.test(postalCode)) {
+    return c.json({ error: 'invalid_postal_code' }, 400);
   }
 
   // Dedupe by email within the campaign. Friendly 200 — the applicant doesn't

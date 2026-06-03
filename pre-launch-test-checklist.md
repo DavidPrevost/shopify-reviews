@@ -19,14 +19,14 @@ Work through it linearly. Each part assumes the parts before it have passed. Whe
 
 I'm assuming all of the following. Flag any that aren't true before starting:
 
-- [ ] App is installed on the dev test store via OAuth (you confirmed this).
-- [ ] Dev test store has **3 products with the `<div data-reviews-widget="full" ...>` snippet** on their product pages (you confirmed this).
-- [ ] Dev test store has **at least one customer account** you can sign in as for App-Proxy review submission testing. (Shopify dev stores → Customers → New customer → you'll need to set up Customer Accounts in Settings → Customer accounts if not already on.)
-- [ ] App Proxy is configured on the dev test store (subpath prefix `apps`, subpath `reviews`, Proxy URL `https://reviews-dev.teraclay.com/proxy/`). Without this, the customer-review modal, campaign application form, brand-color relay, and widget-mounted feedback form all silently 404 at the Shopify edge.
-- [ ] The dev store has at least one **payment method that lets you place test orders** (Shopify's "Bogus Gateway" is the standard; otherwise the dev store with `(for testing) Bogus Gateway` enabled in Settings → Payments).
-- [ ] You can SSH into Mercury (Tailscale).
-- [ ] You can access the dev test store as both an **admin** (Shopify admin) and as a **customer** (storefront, logged in to a customer account) — ideally in two different browsers or one regular + one incognito so cookies don't collide.
-- [ ] You have a working email address you can receive at (the test customers will need to use it as their email so you can read the request emails). Gmail "plus addressing" (`youraddress+test1@gmail.com`, `youraddress+test2@gmail.com`) lets you use the same inbox for multiple distinct test customers.
+- [x] App is installed on the dev test store via OAuth (you confirmed this).
+- [x] Dev test store has **3 products with the `<div data-reviews-widget="full" ...>` snippet** on their product pages (you confirmed this).
+- [x] Dev test store has **at least one customer account** you can sign in as for App-Proxy review submission testing. (Shopify dev stores → Customers → New customer → you'll need to set up Customer Accounts in Settings → Customer accounts if not already on.)
+- [x] App Proxy is configured on the dev test store (subpath prefix `apps`, subpath `reviews`, Proxy URL `https://reviews-dev.teraclay.com/proxy/`). Without this, the customer-review modal, campaign application form, brand-color relay, and widget-mounted feedback form all silently 404 at the Shopify edge.
+- [x] The dev store has at least one **payment method that lets you place test orders** (Shopify's "Bogus Gateway" is the standard; otherwise the dev store with `(for testing) Bogus Gateway` enabled in Settings → Payments).
+- [x] You can SSH into Mercury (Tailscale).
+- [x] You can access the dev test store as both an **admin** (Shopify admin) and as a **customer** (storefront, logged in to a customer account) — ideally in two different browsers or one regular + one incognito so cookies don't collide.
+- [x] You have a working email address you can receive at (the test customers will need to use it as their email so you can read the request emails). Gmail "plus addressing" (`youraddress+test1@gmail.com`, `youraddress+test2@gmail.com`) lets you use the same inbox for multiple distinct test customers.
 
 ---
 
@@ -85,39 +85,39 @@ Five-minute pre-flight before the real test begins. If any of these fail, the de
 
 ### 0.1 — App is reachable
 
-- [ ] In a browser, hit `https://reviews-dev.teraclay.com/health` — should return `{"status":"ok"}`.
+- [x] In a browser, hit `https://reviews-dev.teraclay.com/health` — should return `{"status":"ok"}`.
 
 ### 0.2 — Admin loads
 
-- [ ] In Shopify admin, click on the Reviews app in the left nav. The embedded admin should load with the **Dashboard** tab active.
-- [ ] **Check the logs:** no "session token verification failed" or "embed session" warnings.
+- [x] In Shopify admin, click on the Reviews app in the left nav. The embedded admin should load with the **Dashboard** tab active.
+- [x] **Check the logs:** no "session token verification failed" or "embed session" warnings.
 
 ### 0.3 — All admin nav tabs respond
 
 Click each tab in the top nav and verify it loads without error:
 
-- [ ] Dashboard
-- [ ] Reviews
-- [ ] Reports (badge will show open-reports count, if any)
-- [ ] Campaigns
-- [ ] Invitations
-- [ ] Branding
-- [ ] Settings
+- [x] Dashboard
+- [x] Reviews
+- [x] Reports (badge will show open-reports count, if any)
+- [x] Campaigns
+- [x] Invitations
+- [x] Branding
+- [x] Settings
 
 ### 0.4 — Storefront widget loads
 
-- [ ] In the shopper window, open one of the 3 product pages with the widget.
-- [ ] The widget should render. If there are no reviews yet, expect "No reviews yet."
-- [ ] DevTools console should have **zero errors** related to `widget.js`.
-- [ ] DevTools network tab should show a successful `GET /widget.js`, `GET /api/widget/config`, and `GET /api/products/{id}/reviews`.
+- [x] In the shopper window, open one of the 3 product pages with the widget.
+- [x] The widget should render. If there are no reviews yet, expect "No reviews yet."
+- [x] DevTools console should have **zero errors** related to `widget.js`.
+- [x] DevTools network tab should show a successful `GET /widget.js`, `GET /api/widget/config`, and `GET /api/products/{id}/reviews`.
 
 ### 0.5 — Verify webhooks are firing
 
 Quickest way: place a fake test order on the dev store now (you'll use it again in Part 4). In Shopify admin:
 
-- [ ] Orders → Create order → add one of the 3 widget-enabled products → use a customer with your real email (set up the customer first if needed) → Mark as paid (Bogus Gateway).
-- [ ] **In the log tail:** within ~5 seconds you should see `orders/paid processed` with the order ID, customer email, and a `lines: 1` field.
-- [ ] **In SQLite:** verify the row landed:
+- [x] Orders → Create order → add one of the 3 widget-enabled products → use a customer with your real email (set up the customer first if needed) → Mark as paid (Bogus Gateway).
+- [x] **In the log tail:** within ~5 seconds you should see `orders/paid processed` with the order ID, customer email, and a `lines: 1` field.
+- [x] **In SQLite:** verify the row landed:
   ```sql
   SELECT id, email, shopify_customer_id FROM customers ORDER BY id DESC LIMIT 1;
   SELECT id, shopify_order_id, shopify_product_id, fulfilled_at, due_at FROM purchases ORDER BY id DESC LIMIT 1;
@@ -132,23 +132,23 @@ If `orders/paid processed` does NOT show up in logs: **stop here**. Either the w
 
 ### 1.1 — Full widget on a product page with no reviews
 
-- [ ] Shopper window → product 1's page.
-- [ ] Widget shows the empty state ("No reviews yet" or similar copy).
-- [ ] Aggregate stars are absent or show 0.
-- [ ] **Network tab:** `GET /api/products/{id}/reviews` returns 200 with `{"reviews": [], "aggregate": {"avg": null, "count": 0}, ...}`.
+- [x] Shopper window → product 1's page.
+- [x] Widget shows the empty state ("No reviews yet" or similar copy).
+- [x] Aggregate stars are absent or show 0.
+- [x] **Network tab:** `GET /api/products/{id}/reviews` returns 200 with `{"reviews": [], "aggregate": {"avg": null, "count": 0}, ...}`.
 
 ### 1.2 — Aggregate-only widget (optional, only if you've added one to a theme section)
 
 If you've added `<div data-reviews-widget="aggregate" data-product-id="...">` to a collection card template:
 
-- [ ] Visit the collection page. Each card with the snippet should show stars + count (or empty state if no reviews).
+- [x] Visit the collection page. Each card with the snippet should show stars + count (or empty state if no reviews).
 
 If you haven't added these anywhere, skip — it's not a launch blocker.
 
 ### 1.3 — Widget styling matches the storefront theme
 
-- [ ] Widget colors look correct (stars, button, background).
-- [ ] If brand colors haven't been synced yet (the relay only fires when the theme has the `data-brand-*` attributes on the widget div), the widget will use hardcoded defaults — that's expected for this dev store unless you've added them.
+- [x] Widget colors look correct (stars, button, background).
+- [x] If brand colors haven't been synced yet (the relay only fires when the theme has the `data-brand-*` attributes on the widget div), the widget will use hardcoded defaults — that's expected for this dev store unless you've added them.
 
 > **To enable the brand relay**, the theme's widget div should look like:
 > ```liquid
@@ -175,33 +175,33 @@ We'll set sensible test values now and verify each setting saves correctly. This
 
 Navigate: Settings → Cadence tab.
 
-- [ ] **Max requests per purchase:** set to `3` (default), save, verify it persists after reload.
-- [ ] **Min days between requests:** set to `7` (default).
-- [ ] **Days after fulfillment before first request:** set to `7` (default).
-- [ ] **Per-run safety cap:** set to `100` (default).
-- [ ] **Daily dispatcher time:** pick a time in the next 10-15 minutes (in your local timezone). Save. Verify the page reloads showing the same time in your local tz. Verify the next scheduled run actually fires when that time arrives (you can watch `docker logs -f reviews-app` for "scheduled dispatcher run starting"). Then reset to a non-disruptive time (e.g., 2pm local) for the rest of testing.
-- [ ] **Dispatch immediately on fulfillment:** **leave OFF for now**. (We'll toggle it on later as part of the email test; it must be off for cadence-suppression tests to make sense.)
+- [x] **Max requests per purchase:** set to `3` (default), save, verify it persists after reload.
+- [x] **Min days between requests:** set to `7` (default).
+- [x] **Days after fulfillment before first request:** set to `7` (default).
+- [x] **Per-run safety cap:** set to `100` (default).
+- [x] **Daily dispatcher time:** pick a time in the next 10-15 minutes (in your local timezone). Save. Verify the page reloads showing the same time in your local tz. Verify the next scheduled run actually fires when that time arrives (you can watch `docker logs -f reviews-app` for "scheduled dispatcher run starting"). Then reset to a non-disruptive time (e.g., 2pm local) for the rest of testing.
+- [x] **Dispatch immediately on fulfillment:** **leave OFF for now**. (We'll toggle it on later as part of the email test; it must be off for cadence-suppression tests to make sense.)
 
 ### 2.2 — Settings → Cadence → Go-live guard
 
-- [ ] **Verify the guard is currently OFF** (says "Disabled — every imported order is eligible"). If it's set, click "Disable guard" — we want all eligibility tests to work without cutoff-filtering noise. We'll test the guard itself in Part 17.
+- [x] **Verify the guard is currently OFF** (says "Disabled — every imported order is eligible"). If it's set, click "Disable guard" — we want all eligibility tests to work without cutoff-filtering noise. We'll test the guard itself in Part 17.
 
 ### 2.3 — Settings → Notifications
 
-- [ ] **Enable new-review notifications:** check the box.
-- [ ] **Recipient email:** put your own working email here.
-- [ ] **Ratings:** check **all five** (1-5) for now so every test review pings you.
-- [ ] Save. Reload to verify it persisted.
+- [x] **Enable new-review notifications:** check the box.
+- [x] **Recipient email:** put your own working email here.
+- [x] **Ratings:** check **all five** (1-5) for now so every test review pings you.
+- [x] Save. Reload to verify it persisted.
 
 ### 2.4 — Settings → Appearance
 
-- [ ] Pick an admin theme (try "Brand — from Shopify" — it'll fall back to the default if no brand colors are synced yet). Verify the chrome (header bar, accents) recolors. Pick a different theme; verify recolor. Settle on whichever you like for the rest of the test.
+- [x] Pick an admin theme (try "Brand — from Shopify" — it'll fall back to the default if no brand colors are synced yet). Verify the chrome (header bar, accents) recolors. Pick a different theme; verify recolor. Settle on whichever you like for the rest of the test.
 
 ### 2.5 — Settings → Setup
 
-- [ ] Read the per-variant reviews setup section (you'll exercise this in Part 13).
-- [ ] Read the App Proxy setup section. Confirm the **App Proxy URL it shows** matches what's actually configured in dev.shopify.com.
-- [ ] Click **Refresh product cache**. The page should redirect with a confirmation banner ("Cleared N cached products"). On the next product-page load, the widget re-fetches each product's data from Shopify.
+- [x] Read the per-variant reviews setup section (you'll exercise this in Part 13).
+- [x] Read the App Proxy setup section. Confirm the **App Proxy URL it shows** matches what's actually configured in dev.shopify.com.
+- [x] Click **Refresh product cache**. The page should redirect with a confirmation banner ("Cleared N cached products"). On the next product-page load, the widget re-fetches each product's data from Shopify.
 
 ---
 
@@ -209,57 +209,57 @@ Navigate: Settings → Cadence tab.
 
 ### 3.1 — Branding → Widget tab
 
-- [ ] The live mockup at the top of the page should render with the current colors.
-- [ ] Click the **Star color** chip → change the color via the color picker. Mockup updates instantly.
-- [ ] Click the **CTA button** in the mockup itself (the green/dark "Write a review" button). It should select the `ctaBackground` chip automatically and scroll the editor into view with a brief highlight flash.
-- [ ] Pick a preset from the swatch row. Verify mockup updates.
-- [ ] Click **Reset to default** on the active chip. Mockup reverts.
-- [ ] Adjust the border-radius slider. Mockup button corners change.
-- [ ] Change the **"Write a review" button text**. Mockup button text changes.
-- [ ] Save.
-- [ ] **Open the shopper window and reload a product page.** Verify the widget's styling reflects your saved changes. (Hard-reload with cache disabled, since `/api/widget/config` has a 5-minute cache header.)
-- [ ] Come back to admin and click **Reset all widget styling to Shopify defaults**. Confirm. Reload the storefront → widget should be back to defaults.
+- [x] The live mockup at the top of the page should render with the current colors.
+- [x] Click the **Star color** chip → change the color via the color picker. Mockup updates instantly.
+- [x] Click the **CTA button** in the mockup itself (the green/dark "Write a review" button). It should select the `ctaBackground` chip automatically and scroll the editor into view with a brief highlight flash.
+- [x] Pick a preset from the swatch row. Verify mockup updates.
+- [x] Click **Reset to default** on the active chip. Mockup reverts.
+- [x] Adjust the border-radius slider. Mockup button corners change.
+- [x] Change the **"Write a review" button text**. Mockup button text changes.
+- [x] Save.
+- [x] **Open the shopper window and reload a product page.** Verify the widget's styling reflects your saved changes. (Hard-reload with cache disabled, since `/api/widget/config` has a 5-minute cache header.)
+- [x] Come back to admin and click **Reset all widget styling to Shopify defaults**. Confirm. Reload the storefront → widget should be back to defaults.
 
 ### 3.2 — Branding → Email tab — shared branding
 
-- [ ] **Logo upload:** upload a small PNG (under 250KB). Should save and the image appears at the top of the page.
-- [ ] **Footer text:** set to something distinctive like `Test footer for {{ brandName }}`. Save.
-- [ ] **Sender display name:** leave blank (defaults to brand name) or set to something custom.
-- [ ] **Reply-to address:** leave blank for now.
+- [x] **Logo upload:** upload a small PNG (under 250KB). Should save and the image appears at the top of the page.
+- [x] **Footer text:** set to something distinctive like `Test footer for {{ brandName }}`. Save.
+- [x] **Sender display name:** leave blank (defaults to brand name) or set to something custom.
+- [x] **Reply-to address:** leave blank for now.
 
 ### 3.3 — Branding → Email tab — per-template editing
 
 For each of the seeded templates (Review Request, Review Request Followup, Repeat Customer Review, Review Removed, plus any others present), do the following:
 
-- [ ] Pick the template from the dropdown.
-- [ ] Click **Preview in new tab**. The preview should render with sample data (no broken images, no `{{ undefined }}` placeholders).
-- [ ] Edit the subject (e.g., append `[TEST]`). The unsaved-changes indicator should activate.
-- [ ] Switch to a different template via the dropdown — it should prompt "discard changes?". Click cancel; you're back on the edited template. Click save.
-- [ ] **Toggle the raw HTML view** (`</> HTML` button). Verify the body HTML is sane. Toggle back to the visual editor.
-- [ ] Use the **Insert variable** dropdown. Insert `{{ firstName }}`. It should appear in the body.
-- [ ] Use the **Insert logo** button. An `<img>` tag appears.
-- [ ] Save. Reload the page; verify changes persisted.
-- [ ] Click "Preview in new tab" again to verify your edits render correctly.
+- [x] Pick the template from the dropdown.
+- [x] Click **Preview in new tab**. The preview should render with sample data (no broken images, no `{{ undefined }}` placeholders).
+- [x] Edit the subject (e.g., append `[TEST]`). The unsaved-changes indicator should activate.
+- [x] Switch to a different template via the dropdown — it should prompt "discard changes?". Click cancel; you're back on the edited template. Click save.
+- [x] **Toggle the raw HTML view** (`</> HTML` button). Verify the body HTML is sane. Toggle back to the visual editor.
+- [x] Use the **Insert variable** dropdown. Insert `{{ firstName }}`. It should appear in the body.
+- [x] Use the **Insert logo** button. An `<img>` tag appears.
+- [x] Save. Reload the page; verify changes persisted.
+- [x] Click "Preview in new tab" again to verify your edits render correctly.
 
 ### 3.4 — Create a new email template
 
-- [ ] Click **+ New template**.
-- [ ] Give it a name like `Test custom template`, pick the `review_submitted_thankyou` trigger (which is currently inactive in the system but available in the picker).
-- [ ] Subject: `Thanks for your review`.
-- [ ] Save.
-- [ ] It should now appear in the dropdown. Open it, customize the body, save again.
-- [ ] **Delete it** via the red Delete button. Confirm. It's gone from the dropdown.
+- [x] Click **+ New template**.
+- [x] Give it a name like `Test custom template`, pick the `review_submitted_thankyou` trigger (which is currently inactive in the system but available in the picker).
+- [x] Subject: `Thanks for your review`.
+- [x] Save.
+- [x] It should now appear in the dropdown. Open it, customize the body, save again.
+- [x] **Delete it** via the red Delete button. Confirm. It's gone from the dropdown.
 
 ### 3.5 — Branding → Brand colors tab
 
-- [ ] Note the current state. If empty, manually enter:
+- [x] Note the current state. If empty, manually enter:
   - Primary background: `#2d572c`
   - Primary text: `#ffffff`
   - Secondary background: `#f5a623`
   - Secondary text: `#222222`
-- [ ] Save.
-- [ ] Go back to **Widget** tab. The Shopify-brand swatch row should now show those 4 colors. Click "Brand primary" — the active chip's color updates. Reset.
-- [ ] Try the "Brand — from Shopify" admin theme (Settings → Appearance). The admin chrome should now use your manually-entered primary colors.
+- [x] Save.
+- [x] Go back to **Widget** tab. The Shopify-brand swatch row should now show those 4 colors. Click "Brand primary" — the active chip's color updates. Reset.
+- [x] Try the "Brand — from Shopify" admin theme (Settings → Appearance). The admin chrome should now use your manually-entered primary colors.
 
 ---
 
@@ -513,25 +513,25 @@ This requires Customer Accounts to be enabled on the dev store and at least one 
 
 ### 5.1 — Anonymous visitor sees the "log in" affordance
 
-- [ ] Shopper window, signed OUT.
-- [ ] Open a product page. The widget should show some form of "Log in to write a review" call-to-action (NOT the "Write a review" button, NOT a form).
+- [x] Shopper window, signed OUT.
+- [x] Open a product page. The widget should show some form of "Log in to write a review" call-to-action (NOT the "Write a review" button, NOT a form).
 
 ### 5.2 — Logged-in customer with no prior review sees "Write a review"
 
-- [ ] Sign in as a Shopify customer account on the dev storefront.
-- [ ] Open a product page (use a product the customer has NOT yet reviewed). The widget header should now show a **"Write a review"** button.
-- [ ] **In DevTools Network tab:** look for a request to `/apps/reviews/customer/review?logged_in_customer_id=...&signature=...` — Shopify-edge-signed. Status 200 (or 401 if the customer has no review yet, which the widget treats as "no prior review").
+- [x] Sign in as a Shopify customer account on the dev storefront.
+- [x] Open a product page (use a product the customer has NOT yet reviewed). The widget header should now show a **"Write a review"** button.
+- [x] **In DevTools Network tab:** look for a request to `/apps/reviews/customer/review?logged_in_customer_id=...&signature=...` — Shopify-edge-signed. Status 200 (or 401 if the customer has no review yet, which the widget treats as "no prior review").
 
 ### 5.3 — Submit a review via the modal
 
-- [ ] Click **Write a review** in the widget.
-- [ ] Native `<dialog>` opens with a form (stars, title, body).
-- [ ] Hit ESC — modal closes (focus trap working).
-- [ ] Reopen, fill it out, submit.
-- [ ] Success message in the modal, modal closes after a beat, widget refreshes to show the new review.
-- [ ] **The review is at the top** with a **"Your review"** badge/tag.
-- [ ] **Log line:** `proxy review insert` or similar.
-- [ ] **In SQLite:**
+- [x] Click **Write a review** in the widget.
+- [x] Native `<dialog>` opens with a form (stars, title, body).
+- [x] Hit ESC — modal closes (focus trap working).
+- [x] Reopen, fill it out, submit.
+- [x] Success message in the modal, modal closes after a beat, widget refreshes to show the new review.
+- [x] **The review is at the top** with a **"Your review"** badge/tag.
+- [x] **Log line:** `proxy review insert` or similar.
+- [x] **In SQLite:**
   ```sql
   SELECT id, rating, customer_id, verified_kind, verified_purchase, status FROM reviews ORDER BY id DESC LIMIT 1;
   ```
@@ -539,21 +539,21 @@ This requires Customer Accounts to be enabled on the dev store and at least one 
 
 ### 5.4 — Edit your own review
 
-- [ ] Same logged-in customer, same product. The widget header now shows **"Edit your review"** instead of "Write a review".
-- [ ] Click it. Modal opens **pre-populated** with the existing review's stars, title, body.
-- [ ] Change the body, change the rating, submit.
-- [ ] Widget refreshes; review shows the new content.
-- [ ] **In SQLite, verify the row was UPDATED, not duplicated:**
+- [x] Same logged-in customer, same product. The widget header now shows **"Edit your review"** instead of "Write a review".
+- [x] Click it. Modal opens **pre-populated** with the existing review's stars, title, body.
+- [x] Change the body, change the rating, submit.
+- [x] Widget refreshes; review shows the new content.
+- [x] **In SQLite, verify the row was UPDATED, not duplicated:**
   ```sql
   SELECT COUNT(*) FROM reviews WHERE customer_id = <customer_id> AND shopify_product_id = '<product_id>';
   -- Expect 1
   ```
-- [ ] **`updated_at` should be more recent than `created_at`** on that row.
+- [x] **`updated_at` should be more recent than `created_at`** on that row.
 
 ### 5.5 — Submission while reviews are paused
 
-- [ ] Activate the panic button (skip ahead to 9.1 if you want; otherwise come back here later).
-- [ ] Try to write a new review via the modal. Should fail gracefully with a paused notice (not a stack trace).
+- [x] Activate the panic button (skip ahead to 9.1 if you want; otherwise come back here later).
+- [x] Try to write a new review via the modal. Should fail gracefully with a paused notice (not a stack trace).
 
 ### 5.6 — App Proxy signature failure detection
 
@@ -565,7 +565,7 @@ curl -i 'https://reviews-dev.teraclay.com/proxy/customer/review?logged_in_custom
 # Expect: HTTP/1.1 401 Unauthorized, body {"error":"invalid_signature"}
 ```
 
-- [ ] Verified: the endpoint refuses unsigned requests.
+- [x] Verified: the endpoint refuses unsigned requests.
 
 ---
 
@@ -731,44 +731,44 @@ SELECT name, sql FROM sqlite_master WHERE name = 'idx_reviews_customer_product';
 
 ### 8.1 — Set up a wordlist
 
-- [ ] Admin → Reviews → **Moderation** sub-tab.
-- [ ] In the Profanity Filter card, click **Reveal list**.
-- [ ] If empty, add a few test words (use innocuous test words to avoid awkwardness — `# Test wordlist` as a header, then `widget`, `frodo`, `bananas` on their own lines). The first line should be a comment.
-- [ ] Save. Page reloads with banner "Wordlist saved. Re-ran the filter over existing reviews (N re-checked)."
+- [x] Admin → Reviews → **Moderation** sub-tab.
+- [x] In the Profanity Filter card, click **Reveal list**.
+- [x] If empty, add a few test words (use innocuous test words to avoid awkwardness — `# Test wordlist` as a header, then `widget`, `frodo`, `bananas` on their own lines). The first line should be a comment.
+- [x] Save. Page reloads with banner "Wordlist saved. Re-ran the filter over existing reviews (N re-checked)."
 
 ### 8.2 — Submit a review containing a wordlisted word
 
-- [ ] Submit a fresh review (any submission path) with body containing the word `bananas`.
-- [ ] Verify on the storefront — the word should appear as `*******` (asterisks of equal length).
-- [ ] **In SQLite:**
+- [x] Submit a fresh review (any submission path) with body containing the word `bananas`.
+- [x] Verify on the storefront — the word should appear as `*******` (asterisks of equal length).
+- [x] **In SQLite:**
   ```sql
   SELECT id, title, body, title_original, body_original FROM reviews ORDER BY id DESC LIMIT 1;
   -- Expect: body has asterisks, body_original has the literal word.
   ```
-- [ ] Admin review detail page shows the **original** uncensored text with a "Showing the original text" note.
+- [x] Admin review detail page shows the **original** uncensored text with a "Showing the original text" note.
 
 ### 8.3 — Add a word, verify re-censor on save
 
-- [ ] Add another word to the wordlist (e.g., `widget`).
-- [ ] Save.
-- [ ] Reviews that contain the word `widget` in their original text should now be censored on the storefront.
+- [x] Add another word to the wordlist (e.g., `widget`).
+- [x] Save.
+- [x] Reviews that contain the word `widget` in their original text should now be censored on the storefront.
 
 ### 8.4 — Remove a word, verify un-censor on save
 
-- [ ] Remove `bananas` from the wordlist.
-- [ ] Save.
-- [ ] Reviews with `bananas` in their original should now show it uncensored on the storefront.
+- [x] Remove `bananas` from the wordlist.
+- [x] Save.
+- [x] Reviews with `bananas` in their original should now show it uncensored on the storefront.
 
 ### 8.5 — Reviewer names are never censored
 
-- [ ] Make sure the wordlist has some word that's also someone's first name (or use the test customer's actual first name temporarily).
-- [ ] Verify the reviewer name still displays in full on the storefront.
-- [ ] Reset: remove that word from the wordlist when done.
+- [x] Make sure the wordlist has some word that's also someone's first name (or use the test customer's actual first name temporarily).
+- [x] Verify the reviewer name still displays in full on the storefront.
+- [x] Reset: remove that word from the wordlist when done.
 
 ### 8.6 — Whole-word, case-insensitive matching
 
-- [ ] Test that `widget` matches `Widget` and `WIDGET` but does NOT match `widgets` (the partial-substring problem — "widget" in "widgets" should NOT be censored).
-- [ ] If `widgets` IS censored, that's a bug.
+- [x] Test that `widget` matches `Widget` and `WIDGET` but does NOT match `widgets` (the partial-substring problem — "widget" in "widgets" should NOT be censored).
+- [x] If `widgets` IS censored, that's a bug.
 
 ---
 
@@ -776,83 +776,83 @@ SELECT name, sql FROM sqlite_master WHERE name = 'idx_reviews_customer_product';
 
 ### 9.1 — Activate
 
-- [ ] Admin → Reviews → Moderation sub-tab → **Pause reviews now** button.
-- [ ] Modal opens.
-- [ ] Type a reason (e.g., "Testing the panic button").
-- [ ] Set duration to **1 hour** (we don't want the test to leave reviews paused).
-- [ ] Type the confirmation phrase: `PAUSE REVIEWS`.
-- [ ] Click **Pause reviews**.
-- [ ] Page reloads to the Reviews tab with a confirmation banner.
+- [x] Admin → Reviews → Moderation sub-tab → **Pause reviews now** button.
+- [x] Modal opens.
+- [x] Type a reason (e.g., "Testing the panic button").
+- [x] Set duration to **1 hour** (we don't want the test to leave reviews paused).
+- [x] Type the confirmation phrase: `PAUSE REVIEWS`.
+- [x] Click **Pause reviews**.
+- [x] Page reloads to the Reviews tab with a confirmation banner.
 
 ### 9.2 — Red banner appears on every admin page
 
-- [ ] **Top of every admin page** now has the red "REVIEWS ARE PAUSED — auto-resumes in Xh Ym" banner with a one-click Resume button.
-- [ ] Visible on Dashboard, Reviews, Reports, Campaigns, Invitations, Branding, Settings.
+- [x] **Top of every admin page** now has the red "REVIEWS ARE PAUSED — auto-resumes in Xh Ym" banner with a one-click Resume button.
+- [x] Visible on Dashboard, Reviews, Reports, Campaigns, Invitations, Branding, Settings.
 
 ### 9.3 — Storefront widget shows the paused notice
 
-- [ ] Shopper window → reload a product page.
-- [ ] The widget shows "Reviews are temporarily unavailable" (or similar) instead of reviews and aggregate.
-- [ ] **No JS errors** in the DevTools console.
+- [x] Shopper window → reload a product page.
+- [x] The widget shows "Reviews are temporarily unavailable" (or similar) instead of reviews and aggregate.
+- [x] **No JS errors** in the DevTools console.
 
 ### 9.4 — All submission paths return errors
 
-- [ ] **Email-link path:** click through any saved review email's "Write a review" link → the hosted page should show a non-alarming "Reviews are temporarily unavailable" notice with HTTP status 503.
-- [ ] **Sample-invitation path:** visit any pending sample invitation URL → same paused notice, 503.
-- [ ] **App Proxy customer-review submission:** if you try to submit via the modal, you get an error.
-- [ ] **`/api/reviews/submit` direct call:**
+- [x] **Email-link path:** click through any saved review email's "Write a review" link → the hosted page should show a non-alarming "Reviews are temporarily unavailable" notice with HTTP status 503.
+- [x] **Sample-invitation path:** visit any pending sample invitation URL → same paused notice, 503.
+- [x] **App Proxy customer-review submission:** if you try to submit via the modal, you get an error.
+- [x] **`/api/reviews/submit` direct call:**
   ```bash
   curl -i -X POST https://reviews-dev.teraclay.com/api/reviews/submit \
     -H 'Content-Type: application/json' \
     -d '{"token":"x","rating":5,"body":"test"}'
   # Expect: 503 with {"error":"reviews_paused"}
   ```
-- [ ] **Campaign application:** if you have an active campaign with applications open, try to submit one — should fail (or show paused). (Skip if no active campaign yet; this rule isn't critical for the panic feature.)
+- [x] **Campaign application:** if you have an active campaign with applications open, try to submit one — should fail (or show paused). (Skip if no active campaign yet; this rule isn't critical for the panic feature.)
 
 ### 9.5 — Dispatcher run skips
 
-- [ ] Admin → Dashboard → **Run dispatcher now**.
-- [ ] **Log line:** `dispatcher skipped: reviews are paused`.
-- [ ] Result page shows `{"sent": 0, ...}` and no emails actually go out.
+- [x] Admin → Dashboard → **Run dispatcher now**.
+- [x] **Log line:** `dispatcher skipped: reviews are paused`.
+- [x] Result page shows `{"sent": 0, ...}` and no emails actually go out.
 
 ### 9.6 — Dev notification email arrives
 
-- [ ] If `DEV_NOTIFICATION_EMAIL` is set in the env, you should have received an email like `[Reviews / <brand>] Panic button PAUSED` shortly after activating.
-- [ ] If you don't see it, check the log for `panic event: dev notification skipped` (means env var isn't set — that's a config issue, not a bug).
+- [x] If `DEV_NOTIFICATION_EMAIL` is set in the env, you should have received an email like `[Reviews / <brand>] Panic button PAUSED` shortly after activating.
+- [x] If you don't see it, check the log for `panic event: dev notification skipped` (means env var isn't set — that's a config issue, not a bug).
 
 ### 9.7 — Extend the pause
 
-- [ ] Admin → Reviews → Moderation tab → Panic card.
-- [ ] Set extend hours to 2, click **Extend pause**.
-- [ ] Page reloads showing the new auto-resume time roughly 2 hours from now.
-- [ ] **Log line:** `panic event: dev notified` with `eventType: extend`.
-- [ ] **Second dev notification email** arrives.
+- [x] Admin → Reviews → Moderation tab → Panic card.
+- [x] Set extend hours to 2, click **Extend pause**.
+- [x] Page reloads showing the new auto-resume time roughly 2 hours from now.
+- [x] **Log line:** `panic event: dev notified` with `eventType: extend`.
+- [x] **Second dev notification email** arrives.
 
 ### 9.8 — Resume
 
-- [ ] Click **Resume reviews now** (either in the banner or the Panic card).
-- [ ] Page reloads with success flash.
-- [ ] Banner is gone from all pages.
-- [ ] Storefront widget renders reviews again.
-- [ ] **Log line:** `panic event: dev notified` with `eventType: resume`.
-- [ ] **Third dev notification email** arrives.
+- [x] Click **Resume reviews now** (either in the banner or the Panic card).
+- [x] Page reloads with success flash.
+- [x] Banner is gone from all pages.
+- [x] Storefront widget renders reviews again.
+- [x] **Log line:** `panic event: dev notified` with `eventType: resume`.
+- [x] **Third dev notification email** arrives.
 
 ### 9.9 — Pause history is preserved
 
-- [ ] Admin → Reviews → Moderation sub-tab → Panic card.
-- [ ] **Pause history** table shows all three events: pause, extend, resume — in reverse chronological order with timestamps, reasons, and actor.
+- [x] Admin → Reviews → Moderation sub-tab → Panic card.
+- [x] **Pause history** table shows all three events: pause, extend, resume — in reverse chronological order with timestamps, reasons, and actor.
 
 ### 9.10 — Auto-resume
 
 (Optional — slow test. Skip unless you want to validate the timer.)
 
-- [ ] Pause for 1 hour.
-- [ ] **In SQLite, force the timer to expire:**
+- [x] Pause for 1 hour.
+- [x] **In SQLite, force the timer to expire:**
   ```sql
   -- Set panic_paused_until to 1 minute ago
   UPDATE settings SET value = CAST((unixepoch() - 60) AS TEXT) WHERE key = 'panic_paused_until';
   ```
-- [ ] Reload any admin page. The banner should be gone. Storefront widget should work again. No "resume" event was recorded (auto-lapse is silent — that's by design).
+- [x] Reload any admin page. The banner should be gone. Storefront widget should work again. No "resume" event was recorded (auto-lapse is silent — that's by design).
 
 ---
 
@@ -933,8 +933,8 @@ UPDATE sample_invitations SET expires_at = unixepoch() - 60 WHERE id = <invitati
 
 ### 11.1 — Look up a customer
 
-- [ ] Admin → Customers → enter an email (or navigate from a review-detail page via the customer link).
-- [ ] Page renders: name, email, opt-out state, unanswered request count, last-request timestamp, purchases table.
+- [x] Admin → Customers → enter an email (or navigate from a review-detail page via the customer link).
+- [x] Page renders: name, email, opt-out state, unanswered request count, last-request timestamp, purchases table.
 
 ### 11.2 — Apply global opt-out (covered in 4D.2)
 
@@ -953,22 +953,22 @@ UPDATE sample_invitations SET expires_at = unixepoch() - 60 WHERE id = <invitati
 
 For each of the 7 stat cards, click and verify:
 
-- [ ] Published → Reviews tab filtered to `status=published`.
-- [ ] Pending → Reviews tab filtered to `status=pending`.
-- [ ] Rejected → Reviews tab filtered to `status=rejected`.
-- [ ] Submitted (30d) → Reviews tab filtered to date range.
-- [ ] Sent (30d) → Activity list (with Product column).
-- [ ] Unsubscribed (30d) → Activity list.
-- [ ] Send failed (30d) → Activity list.
+- [x] Published → Reviews tab filtered to `status=published`.
+- [x] Pending → Reviews tab filtered to `status=pending`.
+- [x] Rejected → Reviews tab filtered to `status=rejected`.
+- [x] Submitted (30d) → Reviews tab filtered to date range.
+- [x] Sent (30d) → Activity list (with Product column).
+- [x] Unsubscribed (30d) → Activity list.
+- [x] Send failed (30d) → Activity list.
 
 ### 12.3 — Recent reviews table
 
-- [ ] Up to 10 most recent reviews appear. Click "View" on one — review detail page loads.
+- [x] Up to 10 most recent reviews appear. Click "View" on one — review detail page loads.
 
 ### 12.4 — Manual operations
 
-- [ ] Click **Run Shopify backfill (last 90 days)**. Page reloads with a JSON dump of the result. No 500.
-- [ ] Click **Run dispatcher now**. Page reloads with a JSON dump of the dispatch result.
+- [x] Click **Run Shopify backfill (last 90 days)**. Page reloads with a JSON dump of the result. No 500.
+- [x] Click **Run dispatcher now**. Page reloads with a JSON dump of the dispatch result.
 
 ---
 
@@ -1015,51 +1015,51 @@ This is the most complex feature in the system. Plan ~1 hour for this part if yo
 
 ### 14.1 — Create a campaign
 
-- [ ] Admin → Campaigns → **+ New campaign**.
-- [ ] **Name:** `Summer Test Campaign`.
-- [ ] **Slug:** verify the URL preview updates as you type (live preview shows `/page/<slug>` or similar). Type something with capital letters or spaces — the field should reject them per the HTML5 pattern.
-- [ ] **Participant Limit:** `5` (small for testing).
-- [ ] **Capacity warning threshold:** `60` (percent). Verify the live "warning fires at 3 applications" helper text below.
-- [ ] **Products:** check 2 of the 3 widget-enabled products. If the picker is empty, click **Refresh from Shopify** to populate it.
-- [ ] **Enable discount terms:** checked.
-- [ ] **Discount percent:** `15`.
-- [ ] **Discount expiry days:** `30`.
-- [ ] **Discount code prefix:** `SUMMER`. Verify the live preview shows `SUMMERXXXXXXXX`.
-- [ ] **Terms summary:** keep the seeded boilerplate (or shorten for testing).
-- [ ] **Terms body:** keep the seeded boilerplate.
-- [ ] **Create campaign**.
+- [x] Admin → Campaigns → **+ New campaign**.
+- [x] **Name:** `Summer Test Campaign`.
+- [x] **Slug:** verify the URL preview updates as you type (live preview shows `/page/<slug>` or similar). Type something with capital letters or spaces — the field should reject them per the HTML5 pattern.
+- [x] **Participant Limit:** `5` (small for testing).
+- [x] **Capacity warning threshold:** `60` (percent). Verify the live "warning fires at 3 applications" helper text below.
+- [x] **Products:** check 2 of the 3 widget-enabled products. If the picker is empty, click **Refresh from Shopify** to populate it.
+- [x] **Enable discount terms:** checked.
+- [x] **Discount percent:** `15`.
+- [x] **Discount expiry days:** `30`.
+- [x] **Discount code prefix:** `SUMMER`. Verify the live preview shows `SUMMERXXXXXXXX`.
+- [x] **Terms summary:** keep the seeded boilerplate (or shorten for testing).
+- [x] **Terms body:** keep the seeded boilerplate.
+- [x] **Create campaign**.
 
 ### 14.2 — Verify the campaign was created
 
-- [ ] You land on the campaign detail page. Status pill = `draft`. Slug, status, products, discount terms all match what you entered.
-- [ ] **In SQLite:**
+- [x] You land on the campaign detail page. Status pill = `draft`. Slug, status, products, discount terms all match what you entered.
+- [x] **In SQLite:**
   ```sql
   SELECT id, name, slug, status, target_size, capacity_warning_threshold, discount_percent, discount_expires_days, discount_code_prefix FROM campaigns ORDER BY id DESC LIMIT 1;
   SELECT id, version_number, summary_text, body_text FROM campaign_terms_versions ORDER BY id DESC LIMIT 1;
   ```
-- [ ] Click **Edit settings** → make a small change (e.g., bump participant limit to 6) → save → verify it sticks.
+- [x] Click **Edit settings** → make a small change (e.g., bump participant limit to 6) → save → verify it sticks.
 
 ### 14.3 — Move to Recruiting
 
-- [ ] On the campaign detail page, click **Move to Recruiting** (or whatever the next-status button is labeled).
-- [ ] Status pill flips to `recruiting`.
+- [x] On the campaign detail page, click **Move to Recruiting** (or whatever the next-status button is labeled).
+- [x] Status pill flips to `recruiting`.
 
 ### 14.4 — Create the Shopify Page with the application form
 
-- [ ] Shopify admin → Online Store → Pages → **Add page**.
-- [ ] Title: `Apply to Summer Campaign`.
-- [ ] Content (use the HTML view / `<>` button):
+- [x] Shopify admin → Online Store → Pages → **Add page**.
+- [x] Title: `Apply to Summer Campaign`.
+- [x] Content (use the HTML view / `<>` button):
   ```html
   <div data-campaign-form="summer-test-campaign"></div>
   ```
   (Replace `summer-test-campaign` with whatever slug you actually used.)
-- [ ] Visibility: Visible.
-- [ ] Save. Note the page URL — should look like `https://<dev-store>.myshopify.com/pages/apply-to-summer-campaign`.
+- [x] Visibility: Visible.
+- [x] Save. Note the page URL — should look like `https://<dev-store>.myshopify.com/pages/apply-to-summer-campaign`.
 
 ### 14.5 — Application form renders publicly
 
-- [ ] Shopper window (signed out — campaigns are open to anyone). Open the Page URL.
-- [ ] The application form renders within ~1 second. Form should include:
+- [x] Shopper window (signed out — campaigns are open to anyone). Open the Page URL.
+- [x] The application form renders within ~1 second. Form should include:
   - Plain-language summary box (from your terms summary)
   - Full terms expandable
   - Name field
@@ -1067,42 +1067,42 @@ This is the most complex feature in the system. Plan ~1 hour for this part if yo
   - Shipping address fields
   - "I agree to the terms" checkbox
   - Submit button
-- [ ] **DevTools console:** no errors. **Network tab:** `GET /apps/reviews/campaigns/<slug>/config` returns 200 with the campaign config.
+- [x] **DevTools console:** no errors. **Network tab:** `GET /apps/reviews/campaigns/<slug>/config` returns 200 with the campaign config.
 
 ### 14.6 — Submit an application
 
-- [ ] Fill out the form with `youremail+applicant1@gmail.com` (NOT one of your earlier test emails — fresh customer).
-- [ ] Realistic name and shipping address.
-- [ ] Tick the terms-agreement checkbox.
-- [ ] Submit.
-- [ ] Success screen: "Thanks, we'll be in touch."
-- [ ] **In SQLite:**
+- [x] Fill out the form with `youremail+applicant1@gmail.com` (NOT one of your earlier test emails — fresh customer).
+- [x] Realistic name and shipping address.
+- [x] Tick the terms-agreement checkbox.
+- [x] Submit.
+- [x] Success screen: "Thanks, we'll be in touch."
+- [x] **In SQLite:**
   ```sql
   SELECT id, campaign_id, customer_id, status, terms_version_id, terms_accepted_at FROM campaign_members ORDER BY id DESC LIMIT 1;
   -- Expect status='applied', customer_id=NULL (until approval), terms_version_id matches.
   SELECT shipping_address_json FROM campaign_members WHERE id = <member_id>;
   -- JSON object with the address.
   ```
-- [ ] **Application-confirmation email** arrives in `youremail+applicant1@gmail.com`. Subject and body match the `campaign_application_confirmation` template. Should include a recap of the terms summary.
+- [x] **Application-confirmation email** arrives in `youremail+applicant1@gmail.com`. Subject and body match the `campaign_application_confirmation` template. Should include a recap of the terms summary.
 
 ### 14.7 — Submit a few more applications
 
-- [ ] Submit 2 more applications with `+applicant2@gmail.com`, `+applicant3@gmail.com`.
-- [ ] **Each one triggers a confirmation email.**
+- [x] Submit 2 more applications with `+applicant2@gmail.com`, `+applicant3@gmail.com`.
+- [x] **Each one triggers a confirmation email.**
 
 ### 14.8 — Verify capacity-warning email fires at the threshold
 
 You set the threshold at 60% of 6 = 4 (warning fires when reaching the 4th application). Submit a 4th application:
 
-- [ ] Submit `+applicant4@gmail.com`.
-- [ ] **Capacity-warning email** arrives at whatever admin email is configured. Verify it lands.
-- [ ] **Log line:** `campaign capacity warning fired` (or similar — search the dispatch-campaign code for the exact wording).
-- [ ] Submit a 5th and 6th application. Capacity warning should **NOT** fire again (it's one-shot per campaign unless you re-arm it).
+- [x] Submit `+applicant4@gmail.com`.
+- [x] **Capacity-warning email** arrives at whatever admin email is configured. Verify it lands.
+- [x] **Log line:** `campaign capacity warning fired` (or similar — search the dispatch-campaign code for the exact wording).
+- [x] Submit a 5th and 6th application. Capacity warning should **NOT** fire again (it's one-shot per campaign unless you re-arm it).
 
 ### 14.9 — Re-arm capacity warning
 
-- [ ] Admin → Campaigns → detail page → **Reset capacity warning** button.
-- [ ] **In SQLite:**
+- [x] Admin → Campaigns → detail page → **Reset capacity warning** button.
+- [x] **In SQLite:**
   ```sql
   SELECT capacity_warning_fired_at FROM campaigns WHERE id = <campaign_id>;
   -- Expect NULL (re-armed)
@@ -1110,42 +1110,42 @@ You set the threshold at 60% of 6 = 4 (warning fires when reaching the 4th appli
 
 ### 14.10 — Auto-close at target
 
-- [ ] You've hit 6 of 6 applications. The campaign should have **auto-closed** — status pill is now `closed`.
-- [ ] If you try to submit a 7th, the application page should show "Applications are closed."
+- [x] You've hit 6 of 6 applications. The campaign should have **auto-closed** — status pill is now `closed`.
+- [x] If you try to submit a 7th, the application page should show "Applications are closed."
 
 ### 14.11 — Approve members
 
-- [ ] On the campaign detail page, you should see the applications queue. Approve `applicant1`, `applicant2`, `applicant3`.
-- [ ] For each approval:
+- [x] On the campaign detail page, you should see the applications queue. Approve `applicant1`, `applicant2`, `applicant3`.
+- [x] For each approval:
   - **In SQLite:** member status = `approved`, customer_id is now set (a customer record was upserted).
-  - A sample invitation is automatically created for that member.
+- [x] Sample invitations are NOT auto-created on approval. After approving, the queue shows a "Generate N sample invitations per approved applicant" button — click it (covered in 14.14). Idempotent; re-running skips members who already have invitations.
   ```sql
   SELECT id, campaign_id, intended_email FROM sample_invitations WHERE campaign_id = <campaign_id>;
   ```
 
 ### 14.12 — Reject and remove
 
-- [ ] Reject `applicant4` (with a reason if the UI asks).
-- [ ] Remove `applicant5` entirely.
-- [ ] In SQLite, verify the statuses match.
+- [x] Reject `applicant4` (with a reason if the UI asks). The member row stays in the DB with `status='rejected'` — retained for the audit trail.
+- [x] Remove `applicant5` entirely. Note: **Remove hard-deletes the `campaign_members` row** (and the shipping_address_json with it). Only offered pre-ship (status `applied` or `approved`); once a member is shipped/reviewed/done, Remove is hidden because downstream artifacts already exist (invitations, codes, sent emails).
+- [x] In SQLite, verify: the rejected member's row is still present with `status='rejected'`; the removed member's row is gone.
 
 ### 14.13 — Move to Shipping
 
-- [ ] Status transition: campaign → `shipping`.
+- [x] Status transition: campaign → `shipping`.
 
 ### 14.14 — Bulk-generate invitations
 
-If invitations weren't auto-generated on approval (depending on workflow), click **Generate invitations for approved members**. Otherwise verify all 3 approved members have invitations.
+Approval does not auto-create invitations. Click **Generate N sample invitations per approved applicant** in the queue. Verify all 3 approved members now have invitations (one per campaign product).
 
 ### 14.15 — Send the "Samples shipped" batch email
 
-- [ ] On the campaign detail page, find the **Batch emails** card.
-- [ ] The "Samples shipped" row shows `Eligible: 3` (the 3 approved members with invitations).
-- [ ] Click **Send "Samples shipped"**.
-- [ ] Confirmation page (or inline result): `sent: 3, failed: 0`.
-- [ ] All 3 approved members receive their email with personalized review links for each of the 2 products.
-- [ ] **Log lines:** 3 `campaign batch send sent` (or similar) entries.
-- [ ] **In SQLite:**
+- [x] On the campaign detail page, find the **Batch emails** card.
+- [x] The "Samples shipped" row shows `Eligible: 3` (the 3 approved members with invitations).
+- [x] Click **Send "Samples shipped"**.
+- [x] Confirmation page (or inline result): `sent: 3, failed: 0`.
+- [x] All 3 approved members receive their email with personalized review links for each of the 2 products.
+- [x] **Log lines:** 3 `campaign batch send sent` (or similar) entries.
+- [x] **In SQLite:**
   ```sql
   SELECT id, status, decided_at FROM campaign_members WHERE status IN ('shipped', 'reviewed', 'done') AND campaign_id = <campaign_id>;
   -- All 3 should now be in 'shipped' status.

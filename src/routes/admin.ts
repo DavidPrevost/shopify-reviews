@@ -104,6 +104,7 @@ import { saveLogo } from '../lib/uploads.js';
 import { EMAIL_TRIGGERS, isEmailTrigger, triggerLabel } from '../email/triggers.js';
 import { EMAIL_VARIABLES } from '../email/variables.js';
 import adminCampaigns from './admin-campaigns.js';
+import { renderTextareaCursorFixScript, ADMIN_TEXTAREA_FIX_CSS } from '../lib/admin-textarea-fix.js';
 
 const admin = new Hono();
 
@@ -2483,7 +2484,7 @@ admin.get('/branding', (c) => {
           <button type="button" data-toggle-source title="Edit raw HTML">&lt;/&gt; HTML</button>
         </div>
         <div class="tmpl-editor" contenteditable="true" data-editor data-dirty-watch>${t.body_html}</div>
-        <textarea class="tmpl-source" name="body_html" data-source style="display:none;">${escapeHtml(t.body_html)}</textarea>
+        <textarea class="tmpl-source admin-cursorfix-textarea" name="body_html" data-source style="display:none;">${escapeHtml(t.body_html)}</textarea>
 
         <label style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" name="cta_enabled" value="1" ${t.cta_enabled ? 'checked' : ''} style="width:auto;" data-dirty-watch>
@@ -2675,6 +2676,12 @@ admin.get('/branding', (c) => {
     <section id="tab-brand"  class="tab-panel" data-tab="brand">${brandTab}</section>
 
     <style>${widgetMockupCss}</style>
+    <style>
+      .admin-cursorfix-textarea {
+        ${ADMIN_TEXTAREA_FIX_CSS}
+      }
+    </style>
+    ${renderTextareaCursorFixScript('.admin-cursorfix-textarea')}
 
     <script>
       (function () {
