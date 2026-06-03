@@ -14,16 +14,6 @@ This is the catch-all for everything not built yet but worth remembering — bug
 
 ---
 
-## Launch blockers — fix before the live-store install
-
-Resolve these **before** installing on the live store. Shopify grants scopes at install time, so getting them wrong means a re-install / re-consent on the live store to correct — notable rework, not a quiet forward fix. (Non-breaking fixes are fine to defer; these are not.)
-
-- **OAuth scope set is incomplete and inconsistent across install paths.** Campaigns need both `read_discounts` and `write_discounts`, but the committed code requests neither consistently:
-  - [`src/scripts/install-shopify.ts`](../src/scripts/install-shopify.ts) (the documented live-install tool) requests only `read_orders,read_customers,read_products` — **no discount scopes at all**.
-  - [`src/shopify/oauth.ts`](../src/shopify/oauth.ts) `OAUTH_SCOPES` (the embedded-admin OAuth path) requests `…,write_discounts` — but **not `read_discounts`**.
-  - `read_discounts` is therefore requested by **no committed path**; the dev store got the discount scopes via the embedded OAuth flow and/or the Dev Dashboard app-version declaration, *not* via `install-shopify.ts`.
-  - **Before the live install:** (1) settle the canonical scope set including `read_discounts` + `write_discounts`; (2) define it in **one** place — have `install-shopify.ts` reuse `OAUTH_SCOPES` instead of its own copy, so the two can't drift; (3) declare those scopes on the new prod Dev Dashboard app version.
-
 ## Known bugs / small fixes
 
 - **Hardcoded dispatcher-time string.** [`src/routes/admin.ts:461`](../src/routes/admin.ts#L461) tells the operator "The dispatcher normally runs daily at 14:00 UTC" next to the manual-run button. The schedule is operator-configurable (local-time picker), so this is wrong/misleading. Make it read the actual configured time, or remove the line.

@@ -53,19 +53,17 @@ The app sends through Gmail using the brand's existing alias (e.g. `reviews@bran
 ### 2.1 Create the Shopify app (Dev Dashboard — current embedded model)
 At `dev.shopify.com` → **Apps → Create app → "Start from Dev Dashboard"**. Name it `Reviews`. Then **Versions → Create version** and configure:
 
-- **App URL**: the stack's public URL (e.g. `https://reviews.brandname.com`).
+- **App URL**: the embedded-admin entry — `https://reviews.brandname.com/admin` (Shopify loads this in the admin iframe; it serves the App Bridge bootstrap). Not the bare domain.
 - **Embed app in Shopify admin**: ✅ **CHECKED** (the admin is embedded via App Bridge).
-- **Allowed redirection URL(s)**: `http://localhost:3456/auth/callback` (the `install-shopify` helper listens here). Add the embedded callback `https://reviews.brandname.com/auth/callback` as well.
-- **Use legacy install flow**: ✅ CHECKED (the OAuth grant flow `install-shopify` performs).
+- **Allowed redirection URL(s)**: `https://reviews.brandname.com/auth/callback` (the app's own `/auth` flow — the primary install path). Also add `http://localhost:3456/auth/callback` for the optional `install-shopify` CLI fallback.
+- **Use legacy install flow**: ✅ CHECKED (both the app's `/auth` flow and the CLI use the OAuth grant).
 - **Scopes**: `read_orders, read_customers, read_products, read_discounts, write_discounts`
-  - `read_orders` covers fulfillment data; `read_customers` is protected data (validates on dev, may need consent on a live store); **`read_discounts` + `write_discounts` are required for campaign discount codes** (see the launch-blocker note below — the install scripts must request these too, not just the Dev Dashboard).
+  - `read_orders` covers fulfillment data; `read_customers` is protected data (validates on dev, may need consent on a live store); **`read_discounts` + `write_discounts` are required for campaign discount codes**. Declare exactly the canonical set the code requests — defined once in [`src/shopify/scopes.ts`](../src/shopify/scopes.ts) and used by both install paths.
 - **Webhooks API version**: current (matches `SHOPIFY_API_VERSION`).
 - **App Proxy** (configure now, at v1 — not later): subpath prefix `apps`, subpath `reviews`, **Proxy URL `https://reviews.brandname.com/proxy/`** (the trailing slash is required). This powers storefront review submit/edit, the brand relay, and campaign/feedback forms.
 - **Compliance (GDPR) webhooks**: **not applicable to a custom, single-store app** — there is no field for them. Shopify only requires/exposes the compliance webhooks (and the linked "protected customer data access" process) for **App-Store-distributed** apps. The handlers in `src/routes/webhooks.ts` for `customers/data_request`, `customers/redact`, `shop/redact` sit dormant as a safety net and would only be wired if the app ever goes public. Skip this step.
 
-**Release the version.** Then from **Settings → Credentials**, copy the **Client ID** and **Client secret** (the secret doubles as the webhook signing secret).
-
-> ⚠️ **Launch blocker (see ROADMAP).** The committed OAuth scope set is incomplete for campaigns: `install-shopify.ts` requests only the three read scopes (no discount scopes), and `oauth.ts` requests `write_discounts` but not `read_discounts`. Campaigns need **both** `read_discounts` and `write_discounts`. This **must be reconciled before the live-store install** — settle one canonical scope set including both discount scopes, have `install-shopify.ts` reuse `OAUTH_SCOPES`, and declare them on the prod app version. Otherwise the live token is insufficient and correcting it means re-consent on the live store.
+**Release the version.** Then from **Settings → Credentials**, copy the **Client ID** and **Client secret** (the secret doubles as the webhook signing secret). Paste the secret into `.env` (`SHOPIFY_WEBHOOK_SECRET`) carefully — a trailing space or stray character from copy-paste silently fails OAuth/webhook HMAC verification ("signature invalid").
 
 ### 2.2 Create the Docker stack
 On the host, create the stack dir (`/opt/stacks/shopify-reviews-prod/` for prod, `/opt/stacks/shopify-reviews-dev/` for dev). Add `docker-compose.yml` (the app service binds `${HOST_BIND_IP}:${HOST_PORT}:8080`; prod `HOST_PORT=8070`, dev `8071`) and a `.env`.
@@ -74,23 +72,27 @@ Build `.env` from [`.env.example`](../.env.example). Fill in: the public URL, st
 
 Bring it up: `sudo docker compose up -d --build`. Confirm migrations + seeds ran cleanly: `docker compose logs reviews-app | grep -i 'migration\|listening'`.
 
-### 2.3 Capture the Admin API token (OAuth)
-From your workstation (with `SHOPIFY_CLIENT_ID` + `SHOPIFY_WEBHOOK_SECRET` in `.env`):
+### 2.3 Install the app on the store (OAuth)
+With the stack running and reachable at its public HTTPS URL, install via the app's **own** OAuth flow — logged into the target store's Shopify admin, visit:
 ```
-npm run install-shopify:dev -- --shop brandname        # or :  npm run install-shopify -- --shop brandname
+https://reviews.brandname.com/auth?shop=<store>.myshopify.com
 ```
-It opens the Shopify authorize page, you approve, and it prints a **permanent OFFLINE** token (new `shpua_` prefix — it explicitly rejects online/expiring tokens). Paste it into the stack `.env` as `SHOPIFY_ADMIN_TOKEN`, then **recreate** the container so the new value is read:
-```
-cd /opt/stacks/shopify-reviews-prod && docker compose up -d --force-recreate
-```
-(`docker restart` is **not** enough — env vars are read at container creation; see OPERATIONS.)
+Approve the scopes. The app exchanges the code for a **permanent OFFLINE** token (`shpua_…`; it rejects online/expiring tokens), **persists it to `shops.access_token` in the DB** (the Admin API client prefers this over `SHOPIFY_ADMIN_TOKEN`), and lands you in the embedded admin. No token copy-paste; `SHOPIFY_ADMIN_TOKEN` in `.env` stays empty.
+
+Prereqs: the public HTTPS URL must already serve (the callback returns to `https://reviews.brandname.com/auth/callback`, which must be an Allowed redirection URL), and `SHOPIFY_WEBHOOK_SECRET` must exactly match the app's client secret (a mismatch fails the callback with "signature invalid").
+
+**Alternative — `install-shopify` CLI** (e.g. before the stack is up, or for an env-var token model): from your workstation with `SHOPIFY_CLIENT_ID` + `SHOPIFY_WEBHOOK_SECRET` available, `npm run install-shopify:dev -- --shop <handle>` runs the grant via a `localhost:3456` listener and prints the token to paste into `.env` as `SHOPIFY_ADMIN_TOKEN`, then `docker compose up -d --force-recreate`. (Pass the creds as real env vars or a dedicated env file — a stray `.env` already loaded will override them.)
 
 ### 2.4 Subscribe webhooks
-Webhooks are **not** auto-subscribed on install. Run, per store:
+Webhooks are **not** auto-subscribed on install. After installing via `/auth` (token in the DB, not `.env`), run on the host — it reads the token from the DB and passes it in:
 ```
-npm run install-webhooks        # needs SHOPIFY_SHOP_DOMAIN, SHOPIFY_ADMIN_TOKEN, PUBLIC_URL in env
+docker exec -e SHOPIFY_SHOP_DOMAIN=<store>.myshopify.com \
+  -e SHOPIFY_ADMIN_TOKEN="$(docker exec <container> sqlite3 /app/data/reviews.db \
+      "SELECT access_token FROM shops WHERE shop_domain='<store>.myshopify.com'")" \
+  -e PUBLIC_URL=https://reviews.brandname.com \
+  <container> node dist/scripts/install-webhooks.js
 ```
-It idempotently subscribes `orders/paid` and `orders/fulfilled` to `PUBLIC_URL/webhooks/...`. (GDPR topics are handled by the Dev Dashboard compliance config from 2.1, not here.) If running inside the container against the per-shop DB token, see the recipe in OPERATIONS.
+(`<container>` is `reviews-app-prod` / `reviews-app-dev`.) If instead you used the CLI and `SHOPIFY_ADMIN_TOKEN` is in `.env`, a plain `npm run install-webhooks` (or `docker exec <container> node dist/scripts/install-webhooks.js`) works. It idempotently subscribes `orders/paid` and `orders/fulfilled` to `PUBLIC_URL/webhooks/...`. (GDPR topics aren't subscribed here — see 2.1.)
 
 ### 2.5 Brand assets
 Set the store's colors + logo in Shopify **Settings → Brand** *before* the first storefront visit, so the **brand relay** populates on first load. The theme's widget `<div>` carries `data-brand-*` attributes (guard the logo: `{% if shop.brand.logo %}…{% endif %}`); the widget posts them to `/proxy/brand`. If brand data isn't set, use **manual entry** in the admin Branding page as the fallback. `shop_brand_json` stays empty until either path runs.
