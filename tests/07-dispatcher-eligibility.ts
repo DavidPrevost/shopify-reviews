@@ -205,6 +205,44 @@ await run.test('Suppression: cadenceTooSoon excludes + accounted', () => {
   assertEqual(audit.cadenceTooSoon, 1, `Audit cadenceTooSoon should be 1; got ${audit.cadenceTooSoon}`);
 });
 
+await run.test('Audit priority: alreadyReviewed wins over cadenceTooSoon when both apply', () => {
+  // Regression coverage for an operator-confusion case from 2026-06-03: with
+  // bypass_cadence_min_days=1 the eligibility query lifts the cadence clause,
+  // but a row that's ALSO alreadyReviewed gets excluded by the NOT EXISTS
+  // (reviews) clause (correctly — that's a respect rule, not bypassable).
+  // The audit used to attribute that row to cadenceTooSoon, making the
+  // operator think the bypass wasn't working. New priority: alreadyReviewed
+  // catches first.
+  const db = getDb();
+  db.exec(`
+    DELETE FROM email_events;
+    DELETE FROM review_media;
+    DELETE FROM moderation_events;
+    DELETE FROM review_reports;
+    DELETE FROM reviews;
+    DELETE FROM purchases;
+    DELETE FROM customers;
+  `);
+  const { customerId, productId } = createFulfilledDuePurchase('cadence-and-reviewed');
+  // Recent email → cadence too soon
+  db.prepare('UPDATE customers SET last_request_sent_at = ? WHERE id = ?').run(NOW - 3 * DAY, customerId);
+  // …AND the customer has already reviewed this product
+  insertReview({
+    shopifyProductId: productId,
+    shopifyVariantId: null,
+    customerId,
+    reviewerEmail: 'test@example.com',
+    reviewerName: 'Test',
+    rating: 5,
+    title: 'ok', body: 'body',
+    titleOriginal: 'ok', bodyOriginal: 'body',
+    verifiedKind: 'purchase', status: 'published',
+  });
+  const audit = auditSuppressions();
+  assertEqual(audit.alreadyReviewed, 1, 'alreadyReviewed wins — it is a non-bypassable respect rule and should be surfaced first');
+  assertEqual(audit.cadenceTooSoon, 0, 'cadenceTooSoon=0 — the row is attributed to alreadyReviewed under the new priority order');
+});
+
 await run.test('Suppression: alreadyReviewed excludes + accounted', () => {
   const db = getDb();
   // Wipe in FK order: children first.
@@ -525,9 +563,10 @@ await run.test('Both bypasses on simultaneously: cadence-window AND at-cap purch
   assertEqual(rows.length, 1, 'Both bypasses lift both rules; the purchase is eligible');
 
   // The audit assigns each row to exactly ONE bucket using its documented
-  // priority order: globalOptOut → productOptOut → maxRequestsHit → cadenceTooSoon
-  // → alreadyReviewed. A row that's both at-cap AND in-cadence-window goes to
-  // maxRequestsHit only. So cadenceTooSoon=0 here is correct.
+  // priority order: globalOptOut → productOptOut → alreadyReviewed →
+  // maxRequestsHit → cadenceTooSoon. A row that's both at-cap AND in-cadence-
+  // window (no review on the product) goes to maxRequestsHit only. So
+  // cadenceTooSoon=0 here is correct.
   const audit = auditSuppressions();
   assertEqual(audit.maxRequestsHit, 1, 'maxRequestsHit reported (higher priority bucket)');
   assertEqual(audit.cadenceTooSoon, 0, 'cadenceTooSoon=0 — the row was already attributed to maxRequestsHit (priority order)');

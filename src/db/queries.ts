@@ -292,9 +292,18 @@ export interface SuppressionAudit {
 // Counts purchases that would otherwise be eligible (due, unreviewed) but
 // were excluded from the dispatcher's eligibility set by each suppression
 // rule. Each purchase is counted in exactly one bucket using the priority
-// order: globalOptOut → productOptOut → maxRequestsHit → cadenceTooSoon →
-// alreadyReviewed. Purpose: observability for "why didn't X get an email?"
+// order: globalOptOut → productOptOut → alreadyReviewed → maxRequestsHit →
+// cadenceTooSoon. Purpose: observability for "why didn't X get an email?"
 // without changing the canonical eligibility query.
+//
+// Priority rationale: all three respect rules (globalOptOut, productOptOut,
+// alreadyReviewed) outrank the two policy rules (maxRequestsHit,
+// cadenceTooSoon) because the respect rules are NOT bypassable. When the
+// dev toggles bypass_cadence_min_days / bypass_cadence_max_requests are on,
+// the eligibility query lifts the policy clauses; if a row still doesn't
+// get sent, the audit's correctly-attributed bucket tells the operator
+// which respect rule is the actual blocker (rather than misleadingly
+// attributing the exclusion to a now-bypassed cadence rule).
 export const auditSuppressions = (): SuppressionAudit => {
   const row = getDb().prepare(`
     SELECT
@@ -302,21 +311,20 @@ export const auditSuppressions = (): SuppressionAudit => {
       SUM(CASE WHEN c.global_opt_out = 0 AND p.product_opt_out = 1 THEN 1 ELSE 0 END) AS product_opt_out,
       SUM(CASE
         WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND EXISTS (SELECT 1 FROM reviews r WHERE r.customer_id = c.id AND r.shopify_product_id = p.shopify_product_id)
+        THEN 1 ELSE 0 END) AS already_reviewed,
+      SUM(CASE
+        WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.customer_id = c.id AND r.shopify_product_id = p.shopify_product_id)
          AND p.request_count >= CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
         THEN 1 ELSE 0 END) AS max_requests_hit,
       SUM(CASE
         WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
+         AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.customer_id = c.id AND r.shopify_product_id = p.shopify_product_id)
          AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
          AND c.last_request_sent_at IS NOT NULL
          AND c.last_request_sent_at >= unixepoch() - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400
-        THEN 1 ELSE 0 END) AS cadence_too_soon,
-      SUM(CASE
-        WHEN c.global_opt_out = 0 AND p.product_opt_out = 0
-         AND p.request_count < CAST((SELECT value FROM settings WHERE key='cadence_max_requests') AS INTEGER)
-         AND (c.last_request_sent_at IS NULL
-              OR c.last_request_sent_at < unixepoch() - CAST((SELECT value FROM settings WHERE key='cadence_min_days_between') AS INTEGER) * 86400)
-         AND EXISTS (SELECT 1 FROM reviews r WHERE r.customer_id = c.id AND r.shopify_product_id = p.shopify_product_id)
-        THEN 1 ELSE 0 END) AS already_reviewed
+        THEN 1 ELSE 0 END) AS cadence_too_soon
     FROM purchases p
     JOIN customers c ON c.id = p.customer_id
     WHERE p.due_at IS NOT NULL
