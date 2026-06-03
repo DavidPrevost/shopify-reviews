@@ -22,7 +22,6 @@ import {
   updateCampaignSettings,
   updateCampaignStatus,
   saveTermsVersion,
-  listTermsVersions,
   getActiveTermsVersion,
   findTermsVersion,
   countMembersByStatus,
@@ -88,6 +87,7 @@ import {
   type FeedbackQuestionRow,
   type QuestionAggregate,
 } from '../db/feedback.js';
+import { EMAIL_VARIABLES } from '../email/variables.js';
 
 // Campaign-tagged sample invitations get a longer TTL than the default 90-day
 // SAMPLE_INVITE_TTL_DAYS because the campaign's email sequence (shipped →
@@ -814,15 +814,30 @@ adminCampaigns.get('/:id', (c) => {
   if (!camp) return c.notFound();
 
   const activeTerms = getActiveTermsVersion(camp.id);
-  const termsVersions = listTermsVersions(camp.id);
   const memberCounts = countMembersByStatus(camp.id);
   const activeMembers = countActiveMembers(camp.id);
   const products = parseProductSet(camp);
 
+  // Build a quick product-id → title lookup from the cache so the Settings
+  // summary lists products by name instead of by 13-digit Shopify ID. Falls
+  // back to the ID when the cache doesn't have the product (rare — usually
+  // means the product was deleted in Shopify after the campaign was created).
+  const productCache = new Map(
+    listCachedProducts().map((p) => [p.shopifyProductId, p.title]),
+  );
   const productListHtml = products.length === 0
     ? '<p class="muted">No products configured yet. Edit the campaign to add them.</p>'
     : `<ul style="margin:8px 0 0; padding-left:20px;">${products
-        .map((p) => `<li><code>${escapeHtml(p.shopifyProductId)}</code>${p.shopifyVariantId ? ` <span class="muted">(variant ${escapeHtml(p.shopifyVariantId)})</span>` : ''}</li>`)
+        .map((p) => {
+          const title = productCache.get(p.shopifyProductId);
+          if (title) {
+            // Name primary; tiny ID as muted secondary line (useful only for
+            // debugging — merchant doesn't read it normally).
+            return `<li>${escapeHtml(title)}${p.shopifyVariantId ? ` <span class="muted">(variant ${escapeHtml(p.shopifyVariantId)})</span>` : ''} <span class="muted" style="font-size:11px;font-family:monospace;">${escapeHtml(p.shopifyProductId)}</span></li>`;
+          }
+          // No cached title — fall back to the ID with a hint to refresh.
+          return `<li><span class="muted">[uncached] </span><code>${escapeHtml(p.shopifyProductId)}</code>${p.shopifyVariantId ? ` <span class="muted">(variant ${escapeHtml(p.shopifyVariantId)})</span>` : ''}</li>`;
+        })
         .join('')}</ul>`;
 
   const statusPillHtml = `<span class="pill pill-campaign-${camp.status}">${escapeHtml(CAMPAIGN_STATUS_LABELS[camp.status])}</span>`;
@@ -845,14 +860,8 @@ adminCampaigns.get('/:id', (c) => {
     return `<div class="stat"><div class="num">${n}</div><div class="label">${escapeHtml(CAMPAIGN_MEMBER_STATUS_LABELS[s])}</div></div>`;
   }).join('')}</div>`;
 
-  const termsHistoryHtml = termsVersions.length <= 1
-    ? '<p class="muted">Only the original version exists.</p>'
-    : `<ul style="margin:8px 0 0; padding-left:20px;">${termsVersions.map((v) => `
-        <li>v${v.version_number} · ${formatTs(v.created_at)}${activeTerms && v.id === activeTerms.id ? ' <strong>(current)</strong>' : ''}</li>
-      `).join('')}</ul>`;
-
   const discountTermsHtml = camp.discount_percent
-    ? `${camp.discount_percent}% off, expires ${camp.discount_expires_days ?? '—'} days after issue${camp.discount_code_prefix ? `, code prefix "${escapeHtml(camp.discount_code_prefix)}"` : ''}`
+    ? `${camp.discount_percent}% off, expires ${camp.discount_expires_days ?? '—'} days after issue${camp.discount_code_prefix ? `, code prefix "${escapeHtml(camp.discount_code_prefix)}"` : ''}, ${camp.discount_usage_limit} use${camp.discount_usage_limit === 1 ? '' : 's'} per code`
     : 'Not configured.';
 
   return c.html(adminShell(camp.name, `
@@ -871,11 +880,14 @@ adminCampaigns.get('/:id', (c) => {
     ${renderApplicationQueue(camp, parseProductSet(camp).length)}
 
     <div class="card">
-      <h3 style="margin-top:0;">Batch emails</h3>
+      <h3 style="margin-top:0;">Emails</h3>
+      <h4 style="margin:8px 0 4px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px;">Automated (fires on application)</h4>
+      ${renderAutomatedTemplateRow(camp, 'campaign_application_confirmation', 'Application received')}
+      <h4 style="margin:18px 0 4px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px;">Batch — manually sent</h4>
       ${renderBatchSendRow(camp, 'campaign_shipped_notification', 'Samples shipped')}
       ${renderBatchSendRow(camp, 'campaign_review_reminder', 'Review reminder')}
       ${renderBatchSendRow(camp, 'campaign_launch_thanks', 'Launch thanks')}
-      <p class="muted" style="margin-top:16px;">Each button sends to every eligible member. "Shipped" requires approved members with generated invitations; "Reminder" requires members already in shipped; "Launch" requires members in shipped or reviewed who have a discount code.</p>
+      <p class="muted" style="margin-top:16px;">Each Send button delivers the email to every eligible member. "Shipped" requires approved members with generated invitations; "Reminder" requires members already in shipped; "Launch" requires members in shipped or reviewed who have a discount code. The Application-received email fires automatically when someone submits the application form — there's no batch button for it because it sends one at a time, in real time.</p>
     </div>
 
     ${renderDiscountCard(camp)}
@@ -901,21 +913,83 @@ adminCampaigns.get('/:id', (c) => {
 
     <div class="card">
       <h3 style="margin-top:0;">Terms</h3>
-      <p class="muted">Current version: ${activeTerms ? `v${activeTerms.version_number}, saved ${formatTs(activeTerms.created_at)}` : 'none'}</p>
+      <p class="muted">Current version: ${activeTerms ? `v${activeTerms.version_number}, saved ${formatTs(activeTerms.created_at)}` : 'none'}. Saving creates a new version snapshot — existing applicants stay tied to whatever version they originally accepted.</p>
       <form method="POST" action="/admin/campaigns/${camp.id}/terms">
         <label>Plain-language summary</label>
-        <textarea name="terms_summary" rows="6" required>${escapeHtml(activeTerms?.summary_text ?? '')}</textarea>
+        <textarea name="terms_summary" class="campaign-terms-input" rows="6" required>${escapeHtml(activeTerms?.summary_text ?? '')}</textarea>
         <p class="muted" style="font-style:italic;">Short summary shown prominently above the full terms on the application form.</p>
         <label style="margin-top:16px;">Full terms</label>
-        <textarea name="terms_body" rows="14" required>${escapeHtml(activeTerms?.body_text ?? '')}</textarea>
-        <p class="muted" style="font-style:italic;">Saving creates a new version snapshot. Existing applicants stay tied to the version they accepted.</p>
+        <textarea name="terms_body" class="campaign-terms-input" rows="14" required>${escapeHtml(activeTerms?.body_text ?? '')}</textarea>
         <button type="submit" class="primary" style="margin-top:8px;">Save new terms version</button>
       </form>
-      <h4 style="margin-top:24px;">History</h4>
-      ${termsHistoryHtml}
     </div>
+
+    <!-- Inline styles + script for textarea selection-sync. Same fix that
+         ships on the create form, applied to the detail page's terms editor. -->
+    <style>
+      .campaign-terms-input {
+        filter: none !important;
+        transform: none !important;
+        position: relative;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        line-height: 1.5;
+      }
+    </style>
+    ${renderTermsTextareaCursorFixScript()}
   `, 'campaigns'));
 });
+
+// Selection-sync fix for terms textareas — extracted as a reusable function
+// since both the campaign-create page and the campaign-detail page have
+// these textareas pre-filled with content and need the same fix. See the
+// inline comment in the script for the full rationale.
+const renderTermsTextareaCursorFixScript = (): string => `
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      document.querySelectorAll('.campaign-terms-input').forEach(function (ta) {
+        ta.setAttribute('autocomplete', 'off');
+        ta.setAttribute('autocorrect', 'off');
+        ta.setAttribute('autocapitalize', 'off');
+        ta.setAttribute('spellcheck', 'false');
+
+        var firstInputDone = false;
+        var savedSelection = null;
+        var prevValue = ta.value;
+
+        var saveSelection = function () {
+          savedSelection = { start: ta.selectionStart, end: ta.selectionEnd };
+        };
+        ta.addEventListener('mouseup', function () { setTimeout(saveSelection, 0); });
+        ta.addEventListener('keyup', function () { setTimeout(saveSelection, 0); });
+        ta.addEventListener('focus', function () { setTimeout(saveSelection, 0); });
+
+        ta.addEventListener('input', function (e) {
+          var thisIsFirstInput = !firstInputDone;
+          firstInputDone = true;
+
+          if (thisIsFirstInput &&
+              e.inputType === 'insertText' &&
+              e.data &&
+              savedSelection &&
+              savedSelection.start > 0) {
+            var expectedPos = savedSelection.start;
+            var insertedChar = e.data;
+            var expectedValue = prevValue.substring(0, expectedPos) + insertedChar + prevValue.substring(expectedPos);
+            var actualValue = ta.value;
+            var bugValue = insertedChar + prevValue;
+
+            if (actualValue !== expectedValue && actualValue === bugValue) {
+              ta.value = expectedValue;
+              ta.setSelectionRange(expectedPos + 1, expectedPos + 1);
+              savedSelection = { start: expectedPos + 1, end: expectedPos + 1 };
+            }
+          }
+          prevValue = ta.value;
+        });
+      });
+    });
+  </script>
+`;
 
 // --- Edit settings (form) ---
 
@@ -1335,6 +1409,23 @@ adminCampaigns.post('/:id/generate-invitations', (c) => {
 
 // --- Batch-send UI + routes ---
 
+// Editable-template button styled to look like the other action buttons.
+// Same styling on the batch-send and the automated (signup-confirmation) row
+// so the merchant has consistent visual treatment for "edit this template."
+const renderEditTemplateButton = (camp: CampaignRow, trigger: string): string =>
+  `<a href="/admin/campaigns/${camp.id}/templates/${trigger}/edit"
+      style="display:inline-block;padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;text-decoration:none;color:var(--text);font-size:13px;background:var(--surface);">Preview / edit template</a>`;
+
+const renderTemplateSubjectPreview = (camp: CampaignRow, trigger: string): string => {
+  const activeTemplate = findActiveTemplateForTriggerCampaignAware(trigger, camp.id);
+  const hasOverride = findCampaignTemplateRow(camp.id, trigger) !== null;
+  return activeTemplate
+    ? `<div class="campaign-helper" style="margin:4px 0 0; max-width:540px;">
+         <strong>Subject:</strong> ${escapeHtml(activeTemplate.subject)} ${hasOverride ? '<em>(campaign-specific override)</em>' : '<em>(shop default)</em>'}
+       </div>`
+    : `<div class="campaign-helper" style="margin:4px 0 0;color:#b00;">No active template found for this trigger.</div>`;
+};
+
 const renderBatchSendRow = (
   camp: CampaignRow,
   trigger: CampaignBatchTrigger,
@@ -1346,32 +1437,39 @@ const renderBatchSendRow = (
     ? `Send "${label}" to ${eligible} eligible member${eligible === 1 ? '' : 's'}? This will generate discount codes for everyone who doesn't have one yet, then send. Cannot be undone.`
     : `Send "${label}" to ${eligible} eligible member${eligible === 1 ? '' : 's'}? This cannot be undone.`;
 
-  // Look up whatever template the dispatcher would actually use for this
-  // trigger/campaign (campaign override beats default). Surface subject as
-  // a preview so the merchant sees what they're about to send.
-  const activeTemplate = findActiveTemplateForTriggerCampaignAware(trigger, camp.id);
-  const hasOverride = findCampaignTemplateRow(camp.id, trigger) !== null;
-  const subjectPreview = activeTemplate
-    ? `<div class="campaign-helper" style="margin:4px 0 0; max-width:540px;">
-         <strong>Subject:</strong> ${escapeHtml(activeTemplate.subject)} ${hasOverride ? '<em>(campaign-specific override)</em>' : '<em>(shop default)</em>'}
-       </div>`
-    : `<div class="campaign-helper" style="margin:4px 0 0;color:#b00;">No active template found for this trigger.</div>`;
-
-  const editLink = `<a href="/admin/campaigns/${camp.id}/templates/${trigger}/edit" style="font-size:13px; margin-left:8px;">Preview / edit template</a>`;
-
   return `
     <div style="margin:12px 0; padding:8px 0; border-bottom:1px dashed var(--border);">
       <form method="POST" action="/admin/campaigns/${camp.id}/send/${trigger}"
             onsubmit="return confirm(${JSON.stringify(confirmMsg)});"
-            style="display:flex; gap:12px; align-items:center;">
+            style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
         <button type="submit" class="primary" ${disabled}>Send "${escapeHtml(label)}"</button>
         <span class="muted">${eligible} eligible</span>
-        ${editLink}
+        ${renderEditTemplateButton(camp, trigger)}
       </form>
-      ${subjectPreview}
+      ${renderTemplateSubjectPreview(camp, trigger)}
     </div>
   `;
 };
+
+// Same shape as renderBatchSendRow but without a send button — the
+// signup-confirmation email fires automatically when an applicant submits
+// the public form (see proxy.ts), so no "Send" action belongs here. The
+// merchant still needs to be able to preview and customize it, which is
+// what this row exposes.
+const renderAutomatedTemplateRow = (
+  camp: CampaignRow,
+  trigger: string,
+  label: string,
+): string => `
+  <div style="margin:12px 0; padding:8px 0; border-bottom:1px dashed var(--border);">
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+      <strong style="min-width:180px;">${escapeHtml(label)}</strong>
+      <span class="muted" style="font-size:13px;">Sent automatically on application submit</span>
+      ${renderEditTemplateButton(camp, trigger)}
+    </div>
+    ${renderTemplateSubjectPreview(camp, trigger)}
+  </div>
+`;
 
 // --- Per-campaign template editor ---
 //
@@ -1385,33 +1483,123 @@ const renderTemplateEditor = (camp: CampaignRow, template: ReturnType<typeof fin
   if (!template) {
     return `<div class="err">Template not found.</div>`;
   }
+  // Variable-insert dropdown options sourced from the shared registry. Same
+  // set the Branding > Email editor offers.
+  const variableInsertOptions = EMAIL_VARIABLES
+    .map((v) => `<option value="${v.key}">${escapeHtml(v.label)} — {{ ${v.key} }}${v.expands ? ' (expands)' : ''}</option>`)
+    .join('');
   return `
     <p><a href="/admin/campaigns/${camp.id}">← ${escapeHtml(camp.name)}</a></p>
     <h2>Edit "${escapeHtml(template.display_name)}"</h2>
     <p class="muted">Campaign override for trigger <code>${escapeHtml(trigger)}</code>. Editing here does not change the shop default. Sends for this campaign use this version; sends for other campaigns fall back to the default.</p>
-    <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}" class="card">
+
+    <!-- Revert is a separate sibling form so it doesn't share the main form's
+         submit handler — it has its own action + confirm prompt. -->
+    <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}/revert"
+          id="revert-form"
+          onsubmit="return confirm('Revert to the shop default? This deletes the campaign-specific override; future sends use the default until you make a new override.');"
+          style="display:none;"></form>
+
+    <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}" class="card" id="campaign-template-form">
       <label>Subject line</label>
-      <input type="text" name="subject" required maxlength="200" value="${escapeHtml(template.subject)}" />
+      <input type="text" name="subject" required maxlength="200" value="${escapeHtml(template.subject)}" data-dirty-watch />
 
       <label style="margin-top:16px;">Body (HTML)</label>
-      <textarea name="body_html" rows="20" required style="font-family:monospace; font-size:13px;">${escapeHtml(template.body_html)}</textarea>
-      <p class="campaign-helper">Available variables: <code>{{ firstName }}</code>, <code>{{ brandName }}</code>, <code>{{ campaignName }}</code>, <code>{{ reviewLinksHtml }}</code>, <code>{{ discountCode }}</code>, <code>{{ feedbackUrlsHtml }}</code>. Each renders as plain string substitution.</p>
+      <textarea name="body_html" id="campaign-template-body" rows="20" required
+                style="font-family:monospace; font-size:13px;"
+                data-dirty-watch>${escapeHtml(template.body_html)}</textarea>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+        <select id="campaign-insert-var" aria-label="Insert variable">
+          <option value="">Insert variable…</option>${variableInsertOptions}
+        </select>
+        <span class="campaign-helper" style="margin:0;">Inserts a token at the cursor position in the body.</span>
+      </div>
 
       <label style="margin-top:16px; display:flex; align-items:center; gap:8px; font-weight:normal;">
-        <input type="checkbox" name="is_active" value="1" ${template.is_active === 1 ? 'checked' : ''} />
+        <input type="checkbox" name="is_active" value="1" ${template.is_active === 1 ? 'checked' : ''} data-dirty-watch />
         <span>Active (used by the dispatcher)</span>
       </label>
 
-      <div style="margin-top:24px; display:flex; gap:12px;">
+      <div style="margin-top:24px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
         <button type="submit" class="primary">Save changes</button>
+        <button type="button" id="campaign-template-preview"
+                style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:4px;color:var(--text);font-size:13px;background:var(--surface);cursor:pointer;">Preview in new tab</button>
+        <span id="campaign-template-dirty" style="font-size:12px;color:#a86b00;display:none;">● Unsaved changes</span>
         <a href="/admin/campaigns/${camp.id}" style="align-self:center;">Cancel</a>
-        <form method="POST" action="/admin/campaigns/${camp.id}/templates/${template.id}/revert"
-              onsubmit="return confirm('Revert to the shop default? This deletes the campaign-specific override; future sends use the default until you make a new override.');"
-              style="margin-left:auto;">
-          <button type="submit" class="danger">Revert to default</button>
-        </form>
+        <button type="submit" form="revert-form" class="danger" style="margin-left:auto;">Revert to default</button>
       </div>
     </form>
+
+    <script>
+      (function () {
+        var form = document.getElementById('campaign-template-form');
+        var body = document.getElementById('campaign-template-body');
+        var dirty = document.getElementById('campaign-template-dirty');
+        var varSel = document.getElementById('campaign-insert-var');
+        var previewBtn = document.getElementById('campaign-template-preview');
+
+        var isDirty = false;
+        function markDirty() {
+          if (isDirty) return;
+          isDirty = true;
+          if (dirty) dirty.style.display = 'inline';
+        }
+        function markClean() {
+          isDirty = false;
+          if (dirty) dirty.style.display = 'none';
+        }
+        form.querySelectorAll('[data-dirty-watch]').forEach(function (el) {
+          el.addEventListener('input', markDirty);
+          el.addEventListener('change', markDirty);
+        });
+        form.addEventListener('submit', markClean);
+        // beforeunload guard — same as the Branding > Email editor. Browser
+        // shows its native "unsaved changes" prompt when the user tries to
+        // navigate away with isDirty=true.
+        window.addEventListener('beforeunload', function (e) {
+          if (isDirty) { e.preventDefault(); e.returnValue = ''; return ''; }
+        });
+
+        // Insert-variable: drop the {{ key }} token at the current cursor
+        // position in the body textarea. Same UX as Branding > Email.
+        if (varSel) varSel.addEventListener('change', function () {
+          var key = varSel.value; if (!key) return;
+          var token = '{{ ' + key + ' }}';
+          var start = body.selectionStart || 0, end = body.selectionEnd || 0;
+          body.value = body.value.slice(0, start) + token + body.value.slice(end);
+          body.selectionStart = body.selectionEnd = start + token.length;
+          body.focus();
+          markDirty();
+          varSel.value = '';
+        });
+
+        // Preview-in-new-tab without saving: build a temporary form, POST the
+        // current values to the unsaved-preview endpoint. The endpoint is
+        // shared with the Branding > Email tab — same renderer behind it.
+        if (previewBtn) previewBtn.addEventListener('click', function () {
+          var subject = form.querySelector('[name="subject"]').value;
+          var bodyHtml = body.value;
+          var tmp = document.createElement('form');
+          tmp.method = 'POST';
+          tmp.action = '/admin/branding/email-template/preview';
+          tmp.target = '_blank';
+          function add(name, value) {
+            var i = document.createElement('input');
+            i.type = 'hidden'; i.name = name; i.value = value; tmp.appendChild(i);
+          }
+          add('subject', subject);
+          add('body_html', bodyHtml);
+          // Campaign templates render with cta_enabled determined by the
+          // shop's default for that trigger; for preview, mirror the saved
+          // template's cta_enabled (this template, not the default — close
+          // enough for visual feedback).
+          add('cta_enabled', ${template.cta_enabled === 1 ? "'1'" : "'0'"});
+          document.body.appendChild(tmp);
+          tmp.submit();
+          document.body.removeChild(tmp);
+        });
+      })();
+    </script>
   `;
 };
 
