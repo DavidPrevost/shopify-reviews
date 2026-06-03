@@ -128,6 +128,7 @@ const generateCodesForLaunch = async (
         percentageOff: camp.discount_percent,
         startsAtIso,
         endsAtIso,
+        usageLimit: camp.discount_usage_limit,
       });
       setMemberDiscountCode({ memberId: m.id, code, discountId: result.discountId });
       created += 1;

@@ -159,11 +159,11 @@ const renderCampaignFormStyles = (): string => `
       border-radius: 3px;
     }
     .product-picker {
-      /* Two-column responsive grid (#6) — collapses to one column on narrow
-         screens. minmax(260px, 1fr) lets each item fill its column without
-         shrinking below readable. */
+      /* Two-column grid (capped at 2). On narrow viewports a media query
+         collapses to one column. Previously auto-fit could yield 3+ columns
+         on wide screens, which the merchant didn't want. */
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: 1fr 1fr;
       gap: 4px 16px;
       max-height: 360px;
       overflow-y: auto;
@@ -171,6 +171,9 @@ const renderCampaignFormStyles = (): string => `
       border-radius: 4px;
       padding: 8px 12px;
       background: var(--surface);
+    }
+    @media (max-width: 620px) {
+      .product-picker { grid-template-columns: 1fr; }
     }
     .product-picker label {
       display: flex;
@@ -207,15 +210,23 @@ const renderCampaignFormStyles = (): string => `
     .discount-section.disabled input { background: var(--surface-alt); }
     .field-block { margin: 16px 0; }
     .field-block label { margin-top: 0; }
-    /* Threshold preview (#3): more prominent than the helper line above it. */
+    /* Threshold preview: muted + italic like the surrounding helper text,
+       but the "X of Y" count inside <strong> is upsized + bolded + uses the
+       normal text color so it stands out. */
     .campaign-threshold-preview {
       display: none;  /* JS toggles to block when a preview is available */
       margin: 8px 0 0;
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--accent);
+      font-size: 12px;
+      font-style: italic;
+      color: var(--muted);
+      line-height: 1.4;
     }
-    .campaign-threshold-preview strong { font-size: 18px; }
+    .campaign-threshold-preview strong {
+      font-size: 18px;
+      font-weight: 600;
+      font-style: normal;
+      color: var(--text);
+    }
     /* Slug live-validation error (#2). */
     .campaign-validation-error {
       margin: 4px 0 0;
@@ -314,6 +325,26 @@ const renderThresholdHelperScript = (): string => `
       };
       discountToggle && discountToggle.addEventListener('change', recalcDiscount);
       recalcDiscount();
+
+      // Defensive selection-sync for terms textareas. Symptom seen on first
+      // click after page load inside the Shopify embedded admin iframe: the
+      // visible cursor jumps to the click position, but the underlying
+      // selection state stays at (0,0), so the first keystroke goes to home
+      // instead of where the cursor appears. After the first keystroke,
+      // selection and visual position re-sync naturally.
+      //
+      // Fix: after mouseup, when the browser has set selection from the click,
+      // explicitly re-call setSelectionRange with the same values on the next
+      // animation frame. The re-set forces the textarea's internal model to
+      // catch up to whatever the browser drew. Idempotent and cheap.
+      document.querySelectorAll('.campaign-terms-input').forEach((ta) => {
+        ta.addEventListener('mouseup', () => {
+          const s = ta.selectionStart, e = ta.selectionEnd;
+          requestAnimationFrame(() => {
+            try { ta.setSelectionRange(s, e); } catch (err) { /* ignore */ }
+          });
+        });
+      });
     });
   </script>
 `;
@@ -385,6 +416,9 @@ interface CampaignFormData {
   discountPercent: number | null;
   discountExpiresDays: number | null;
   discountCodePrefix: string;
+  // Per-recipient redemption count for the unique code each member receives.
+  // null = unset (form renders blank with placeholder); 1+ = explicit value.
+  discountUsageLimit: number | null;
   termsSummary: string;
   termsBody: string;
   termsLocked: boolean;         // true on edit — terms have their own editor
@@ -458,8 +492,9 @@ const renderCampaignFormFields = (data: CampaignFormData, refreshFormId: string)
       </label>
     </div>
     <div id="discount-section" class="discount-section${data.discountEnabled ? '' : ' disabled'}">
-      <!-- Side-by-side discount params (#5): percentage + expiry. Code prefix
-           stays on its own row since it's a string and may want more width. -->
+      <!-- Side-by-side discount params: percentage off + expiry + usage limit.
+           The form-row grid will give 3 columns at wide widths, 2 at medium,
+           1 on narrow. -->
       <div class="form-row">
         <div class="field-block">
           <label>Percentage off</label>
@@ -472,6 +507,12 @@ const renderCampaignFormFields = (data: CampaignFormData, refreshFormId: string)
           <input type="number" name="discount_expires_days" min="1" max="3650"
                  value="${data.discountExpiresDays ?? ''}" placeholder="Please enter number of days" />
           <p class="campaign-helper">Each code's expiry counts from the moment the launch email is sent, not from when the campaign is created.</p>
+        </div>
+        <div class="field-block">
+          <label>Uses per code</label>
+          <input type="number" name="discount_usage_limit" min="1" max="1000"
+                 value="${data.discountUsageLimit ?? ''}" placeholder="Please enter number of uses" />
+          <p class="campaign-helper">Each participant receives a <strong>unique</strong> code; this is how many times that participant's code can be redeemed. <code>1</code> = single-use (default for one-shot launch thanks). Higher values let the same participant come back and redeem multiple times before the code expires.</p>
         </div>
       </div>
       <div class="field-block">
@@ -617,6 +658,7 @@ adminCampaigns.get('/new', (c) => {
     discountPercent: null,
     discountExpiresDays: null,
     discountCodePrefix: '',
+    discountUsageLimit: null,
     termsSummary: DEFAULT_TERMS_SUMMARY,
     termsBody: DEFAULT_TERMS_BODY,
     termsLocked: false,
@@ -650,6 +692,7 @@ adminCampaigns.post('/', async (c) => {
   const discountPercent = discountEnabled ? parseIntOrNull(form.discount_percent) : null;
   const discountExpiresDays = discountEnabled ? parseIntOrNull(form.discount_expires_days) : null;
   const discountCodePrefix = String(form.discount_code_prefix ?? '').trim() || null;
+  const discountUsageLimit = discountEnabled ? parseIntOrNull(form.discount_usage_limit) : null;
   const termsSummary = String(form.terms_summary ?? '').trim();
   const termsBody = String(form.terms_body ?? '').trim();
 
@@ -673,6 +716,7 @@ adminCampaigns.post('/', async (c) => {
   if (discountEnabled) {
     if (discountPercent === null || discountPercent < 1 || discountPercent > 100) errors.push('Discount percentage must be 1-100.');
     if (discountExpiresDays === null || discountExpiresDays < 1) errors.push('Discount expiry must be at least 1 day.');
+    if (discountUsageLimit === null || discountUsageLimit < 1) errors.push('Discount uses per code must be at least 1.');
   }
   if (!termsSummary) errors.push('Plain-language summary is required.');
   if (!termsBody) errors.push('Full terms text is required.');
@@ -701,6 +745,7 @@ adminCampaigns.post('/', async (c) => {
     discountPercent,
     discountExpiresDays,
     discountCodePrefix,
+    discountUsageLimit: discountUsageLimit ?? undefined,
     termsSummaryText: termsSummary,
     termsBodyText: termsBody,
   });
@@ -840,6 +885,7 @@ adminCampaigns.get('/:id/edit', (c) => {
     discountPercent: camp.discount_percent,
     discountExpiresDays: camp.discount_expires_days,
     discountCodePrefix: camp.discount_code_prefix ?? '',
+    discountUsageLimit: camp.discount_usage_limit,
     termsSummary: '',  // unused — termsLocked = true
     termsBody: '',
     termsLocked: true,
@@ -876,6 +922,7 @@ adminCampaigns.post('/:id/edit', async (c) => {
   const discountPercent = discountEnabled ? parseIntOrNull(form.discount_percent) : null;
   const discountExpiresDays = discountEnabled ? parseIntOrNull(form.discount_expires_days) : null;
   const discountCodePrefix = String(form.discount_code_prefix ?? '').trim() || null;
+  const discountUsageLimit = discountEnabled ? parseIntOrNull(form.discount_usage_limit) : null;
 
   const productIdsRaw = form.product_id;
   const selectedIds: string[] = Array.isArray(productIdsRaw)
@@ -904,6 +951,9 @@ adminCampaigns.post('/:id/edit', async (c) => {
     if (discountExpiresDays === null || discountExpiresDays < 1) {
       return c.html(adminShell('Edit campaign', `<div class="err">Discount expiry must be at least 1 day when discount is enabled.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
     }
+    if (discountUsageLimit === null || discountUsageLimit < 1) {
+      return c.html(adminShell('Edit campaign', `<div class="err">Discount uses per code must be at least 1 when discount is enabled.</div><p><a href="javascript:history.back()">Go back</a></p>`, 'campaigns'), 400);
+    }
   }
 
   const productSet: CampaignProduct[] = selectedIds.map((pid) => ({
@@ -920,6 +970,7 @@ adminCampaigns.post('/:id/edit', async (c) => {
     discountPercent,
     discountExpiresDays,
     discountCodePrefix,
+    discountUsageLimit,
   });
 
   log('info', 'campaign settings updated', { campaignId: camp.id });

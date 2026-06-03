@@ -73,6 +73,11 @@ export interface CampaignRow {
   discount_percent: number | null;
   discount_expires_days: number | null;
   discount_code_prefix: string | null;
+  // Per-code redemption limit. 1 = single-use per recipient (the default and
+  // historical behavior); higher allows that recipient's code to be used N
+  // times. Each campaign member always gets a UNIQUE code; this controls how
+  // many redemptions are allowed against that member's code. See migration 021.
+  discount_usage_limit: number;
   created_at: number;
   updated_at: number;
 }
@@ -153,6 +158,10 @@ export const createCampaign = (input: {
   discountPercent: number | null;
   discountExpiresDays: number | null;
   discountCodePrefix: string | null;
+  // Optional; defaults to 1 (single-use per recipient) for back-compat with
+  // callers that don't pass it. UI requires the merchant to set this when
+  // discountEnabled, but the data layer treats it as defaulted to 1.
+  discountUsageLimit?: number;
   termsSummaryText: string;
   termsBodyText: string;
 }): { campaignId: number; termsVersionId: number } => {
@@ -166,8 +175,8 @@ export const createCampaign = (input: {
       INSERT INTO campaigns
         (name, slug, status, target_size, capacity_warning_threshold,
          product_set_json, discount_percent, discount_expires_days,
-         discount_code_prefix, created_at, updated_at)
-      VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
+         discount_code_prefix, discount_usage_limit, created_at, updated_at)
+      VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.name,
       input.slug,
@@ -177,6 +186,7 @@ export const createCampaign = (input: {
       input.discountPercent,
       input.discountExpiresDays,
       input.discountCodePrefix,
+      input.discountUsageLimit ?? 1,
       now,
       now,
     );
@@ -205,29 +215,41 @@ export const updateCampaignSettings = (input: {
   discountPercent: number | null;
   discountExpiresDays: number | null;
   discountCodePrefix: string | null;
+  // Optional; if omitted leaves the existing value untouched.
+  discountUsageLimit?: number | null;
 }): void => {
-  getDb().prepare(`
-    UPDATE campaigns
-       SET name = ?,
-           target_size = ?,
-           capacity_warning_threshold = ?,
-           product_set_json = ?,
-           discount_percent = ?,
-           discount_expires_days = ?,
-           discount_code_prefix = ?,
-           updated_at = ?
-     WHERE id = ?
-  `).run(
-    input.name,
-    input.targetSize,
-    input.capacityWarningThreshold,
-    JSON.stringify(input.productSet),
-    input.discountPercent,
-    input.discountExpiresDays,
-    input.discountCodePrefix,
-    nowSec(),
-    input.id,
-  );
+  const db = getDb();
+  // Two separate updates so an undefined discountUsageLimit doesn't clobber
+  // the stored value. Both run in a single transaction so the row never
+  // observes a half-updated state.
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE campaigns
+         SET name = ?,
+             target_size = ?,
+             capacity_warning_threshold = ?,
+             product_set_json = ?,
+             discount_percent = ?,
+             discount_expires_days = ?,
+             discount_code_prefix = ?,
+             updated_at = ?
+       WHERE id = ?
+    `).run(
+      input.name,
+      input.targetSize,
+      input.capacityWarningThreshold,
+      JSON.stringify(input.productSet),
+      input.discountPercent,
+      input.discountExpiresDays,
+      input.discountCodePrefix,
+      nowSec(),
+      input.id,
+    );
+    if (input.discountUsageLimit !== undefined && input.discountUsageLimit !== null) {
+      db.prepare(`UPDATE campaigns SET discount_usage_limit = ? WHERE id = ?`)
+        .run(input.discountUsageLimit, input.id);
+    }
+  })();
 };
 
 export const updateCampaignStatus = (id: number, status: CampaignStatus): void => {

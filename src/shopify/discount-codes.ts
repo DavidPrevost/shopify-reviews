@@ -26,6 +26,10 @@ export interface CreateDiscountInput {
   percentageOff: number;     // 1-100, will be sent to Shopify as 0.01-1.00
   startsAtIso: string;       // ISO 8601 UTC; usually "right now"
   endsAtIso: string;         // ISO 8601 UTC
+  // How many redemptions the code allows. Per-code (each campaign member gets
+  // a UNIQUE code, so usageLimit is per-recipient). Defaults to 1 to preserve
+  // historical behavior when callers don't pass it.
+  usageLimit?: number;
 }
 
 export interface CreateDiscountResult {
@@ -63,14 +67,22 @@ export const createCampaignDiscountCode = async (
   // Shopify accepts the percentage as a fractional value (0.40 = 40%).
   const fraction = input.percentageOff / 100;
 
+  const usageLimit = input.usageLimit ?? 1;
+  if (usageLimit < 1) {
+    throw new Error(`createCampaignDiscountCode: usageLimit must be >= 1, got ${usageLimit}`);
+  }
+
   const data = await shopifyAdmin<CreateMutationResponse>(CREATE_MUTATION, {
     basicCodeDiscount: {
       title: input.title,
       code: input.code,
       startsAt: input.startsAtIso,
       endsAt: input.endsAtIso,
-      usageLimit: 1,
-      appliesOncePerCustomer: true,
+      usageLimit,
+      // appliesOncePerCustomer: when usageLimit > 1, we want the same customer
+      // to be able to redeem the code repeatedly (the whole point of raising
+      // the limit). When usageLimit = 1, we keep this on as defense-in-depth.
+      appliesOncePerCustomer: usageLimit === 1,
       customerSelection: { all: true },
       customerGets: {
         value: { percentage: fraction },
