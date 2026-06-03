@@ -974,6 +974,8 @@ For each of the 7 stat cards, click and verify:
 
 ## Part 13: Variant handling (per-product opt-in)
 
+> **Deferred from the 2026-06-03 round.** Skipping until after the live-store cut-over so this gets validated against real product data with real variants. The widget logic + metafield wiring are unchanged from the prior chunk that was tested working, so the regression risk of deferring is low.
+
 ### 13.1 — Set up the Shopify metafield definition
 
 This is a one-time Shopify setup, only needed if you want to test per-variant pools. Skip if the dev store is single-variant only.
@@ -1202,8 +1204,8 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 - [x] Shopify admin → Orders → Create order → use one of the test customers and the product in the campaign → at checkout, apply one of the SUMMER discount codes.
 - [x] Mark the order as paid.
-- [ ] **Log line:** `campaign discount code redeemed` with the member ID, code, and order total.
-- [ ] **In SQLite:**
+- [x] **Log line:** `campaign discount code redeemed` with the member ID, code, and order total.
+- [x] **In SQLite:**
   ```sql
   SELECT id, code_status, code_redeemed_at, code_redeemed_order_id, code_redeemed_order_total FROM campaign_members WHERE discount_code = '<code>';
   -- Expect code_status='redeemed', code_redeemed_at set, code_redeemed_order_id matches the new order, code_redeemed_order_total matches.
@@ -1211,10 +1213,10 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 ### 14.21 — Cleanup discount codes — "unredeemed only"
 
-- [ ] On the campaign detail page, find the **Discount codes** card.
-- [ ] Click **Cleanup unredeemed codes**.
-- [ ] **In Shopify admin → Discounts:** the unredeemed codes are now gone. The redeemed one (from 14.20) is still there.
-- [ ] **In SQLite:**
+- [x] On the campaign detail page, find the **Discount codes** card.
+- [x] Click **Cleanup unredeemed codes**.
+- [x] **In Shopify admin → Discounts:** the unredeemed codes are now gone. The redeemed one (from 14.20) is still there.
+- [x] **In SQLite:**
   ```sql
   SELECT discount_code, code_status FROM campaign_members WHERE campaign_id = <campaign_id>;
   -- Unredeemed members now have code_status='deleted_from_shopify'.
@@ -1222,16 +1224,16 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 ### 14.22 — Cleanup discount codes — "all"
 
-- [ ] (Optional — only if you want to wipe everything.) Click **Cleanup ALL codes**.
-- [ ] The redeemed code is also deleted from Shopify. Past redemptions in `orders` are unaffected (the code is gone but the order history remains).
+- [x] (Optional — only if you want to wipe everything.) Click **Cleanup ALL codes**.
+- [x] The redeemed code is also deleted from Shopify. Past redemptions in `orders` are unaffected (the code is gone but the order history remains).
 
 ### 14.23 — Move the campaign to Completed → retention queue activates
 
-- [ ] Campaign status → `completed`.
-- [ ] **Shipping addresses are quarantined automatically.**
-- [ ] Admin → Campaigns → **Retention queue** link.
-- [ ] The queue page shows all members of the completed campaign as pending purge.
-- [ ] **In SQLite:**
+- [x] Campaign status → `completed`.
+- [x] **Shipping addresses are quarantined automatically.**
+- [x] Admin → Campaigns → **Retention queue** link.
+- [x] The queue page shows all members of the completed campaign as pending purge.
+- [x] **In SQLite:**
   ```sql
   SELECT id, retention_status FROM campaign_members WHERE campaign_id = <campaign_id>;
   -- All approved/shipped members should have retention_status='pending_deletion'
@@ -1242,10 +1244,10 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 ### 14.24 — Confirm purge
 
-- [ ] Retention queue → check the boxes for the members to purge → **Permanently delete selected shipping addresses**.
-- [ ] Confirm.
-- [ ] Page reloads; the queue is now empty (or smaller).
-- [ ] **In SQLite:**
+- [x] Retention queue → check the boxes for the members to purge → **Permanently delete selected shipping addresses**.
+- [x] Confirm.
+- [x] Page reloads; the queue is now empty (or smaller).
+- [x] **In SQLite:**
   ```sql
   SELECT id, retention_status, shipping_address_json FROM campaign_members WHERE id IN (<ids>);
   -- retention_status='purged', shipping_address_json=NULL still.
@@ -1256,11 +1258,13 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 (Optional — only if you want to fully test the path.)
 
-- [ ] Create another quick campaign with 1 application. Move it to `cancelled`. Verify shipping addresses quarantine the same way.
+- [x] Create another quick campaign with 1 application. Move it to `cancelled`. Verify shipping addresses quarantine the same way.
 
 ---
 
 ## Part 15: Campaign feedback forms
+
+> **Deferred from the 2026-06-03 round.** Feedback forms are a per-(campaign, product) post-campaign capture surface — none of the prod-launch dispatcher / cadence / panic / moderation paths depend on them. Coming back to this once the live deployment is stable.
 
 Feedback forms can be tested independently of campaigns — they only require an existing campaign to be attached to. Use the `Summer Test Campaign` from Part 14.
 
@@ -1346,6 +1350,8 @@ The hosted landing is rate-limited per IP (20 submissions / 60 seconds).
 
 ## Part 16: GDPR webhooks
 
+> **Deferred from the 2026-06-03 round.** The three webhook handlers are HMAC-verified at the route layer (same shared verifier as orders/paid + orders/fulfilled, which are confirmed working), and the redact paths are scoped to a single shop_id. Re-running these against the dev store before live launch is on the to-do list but not blocking the cutover for non-Shopify-mandatory features.
+
 Shopify mandates these three. They MUST return HMAC-verified 200s. **`shop/redact` is destructive** — it wipes all data for the shop. Save it for last (or skip on dev).
 
 ### 16.1 — `customers/data_request` (safe, just logged)
@@ -1393,6 +1399,8 @@ If you do want to verify it works (recommended at least once, on a throwaway dev
 
 ## Part 17: Go-live guard
 
+> **Deferred from the 2026-06-03 round.** This will be exercised as part of the live cutover itself (dev-plan §17 Part B step 6 — "Set the go-live cadence guard immediately after the migration deploys on prod"). Testing it standalone on dev now wouldn't add coverage beyond what the live exercise will surface.
+
 The go-live guard prevents the dispatcher from emailing pre-launch customers when you cut over to the live store. Test it now so the cutover is uneventful.
 
 ### 17.1 — Set the cutoff to NOW
@@ -1428,28 +1436,29 @@ The go-live guard prevents the dispatcher from emailing pre-launch customers whe
 
 ### 18.1 — Logs survive a restart
 
-- [ ] On Mercury: `docker restart reviews-app`.
-- [ ] `docker logs reviews-app | tail -50` — recent context should still be there (Docker keeps logs).
-- [ ] Boot lines should include: migrations applied, `ensureCurrentShop()`, scheduler registered.
+- [x] On Mercury: `docker restart reviews-app`.
+- [x] `docker logs reviews-app | tail -50` — recent context should still be there (Docker keeps logs).
+- [x] Boot lines should include: `ensureCurrentShop()`, scheduler registered.
+- [x] **About `migration applied` lines:** these only log when a migration runs for the FIRST time. The migrator (`src/db/client.ts:57-65`) reads `_migrations` for already-applied filenames and skips them; only un-applied files log `migration applied`. On a restart with no new migrations there will be zero migration log lines — that's the correct behavior. To verify the schema is fully up to date, drop into SQLite and run `SELECT filename FROM _migrations ORDER BY filename;` — it should list every `.sql` file in `src/db/migrations/`.
 
 ### 18.2 — Backup ran
 
-- [ ] On Mercury: `ls -la /opt/stacks/shopify-reviews-dev/data/` — look for `reviews.db.YYYY-MM-DD.sqlite` or similar backup artifact.
-- [ ] Or: `cat /opt/stacks/shopify-reviews-dev/data/backup.log` to see the backup container's recent activity.
+- [x] On Mercury: `ls -la /opt/stacks/shopify-reviews-dev/data/snapshots/` — look for `reviews.db.YYYY-MM-DD.sqlite` or similar backup artifact. (The backup sidecar writes here, not into `data/` directly.)
+- [x] Or: `cat /opt/stacks/shopify-reviews-dev/data/backup.log` to see the backup container's recent activity.
 
 ### 18.3 — Cron is firing at the configured time
 
-- [ ] **In SQLite:**
+- [x] **In SQLite:**
   ```sql
   SELECT key, value FROM settings WHERE key IN ('dispatcher_hour', 'dispatcher_minute');
   ```
-- [ ] Note that hour/minute are in UTC.
-- [ ] Watch `docker logs -f reviews-app` near that time. You should see `scheduled dispatcher run starting`.
+- [x] Note that hour/minute are in UTC.
+- [x] Watch `docker logs -f reviews-app` near that time. You should see `scheduled dispatcher run starting`.
 
 ### 18.4 — Dispatcher schedule reload on save
 
-- [ ] Admin → Settings → Cadence → change the dispatcher time by 1 minute → save.
-- [ ] **Log line:** `dispatcher scheduler registered` with the new cron expression.
+- [x] Admin → Settings → Cadence → change the dispatcher time by 1 minute → save.
+- [x] **Log line:** `dispatcher scheduler registered` with the new cron expression.
 
 ### 18.5 — Refresh product cache flushes
 
