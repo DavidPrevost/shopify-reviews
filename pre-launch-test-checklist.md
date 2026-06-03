@@ -1462,20 +1462,20 @@ The go-live guard prevents the dispatcher from emailing pre-launch customers whe
 
 ### 18.5 — Refresh product cache flushes
 
-- [ ] **In SQLite:** `SELECT COUNT(*) FROM products_cache;` — note the count.
-- [ ] Admin → Settings → Setup → **Refresh product cache**.
-- [ ] `SELECT COUNT(*) FROM products_cache;` — should be 0 (cache emptied).
-- [ ] Visit a product page on the storefront — cache repopulates as products are re-fetched.
+- [x] **In SQLite:** `SELECT COUNT(*) FROM products_cache;` — note the count.
+- [x] Admin → Settings → Setup → **Refresh product cache**.
+- [x] `SELECT COUNT(*) FROM products_cache;` — should be 0 (cache emptied).
+- [x] Visit a product page on the storefront — cache repopulates as products are re-fetched.
 
 ### 18.6 — Email send failure is recoverable
 
 (Optional, but valuable — confirms that a temporarily-broken SMTP doesn't poison anything permanently.)
 
-- [ ] Temporarily set `SMTP_PASS` in the dev stack's `.env` to a wrong value. Restart the container.
-- [ ] Trigger an email (e.g., place a test order, fulfill).
-- [ ] **Log line:** `dispatch send failed` with the SMTP error. `logEmailFailure` writes a row to `email_events` with `kind='send_failed'`.
-- [ ] **Dashboard "Send failed (30d)" stat** should increment.
-- [ ] Restore the correct `SMTP_PASS`. Restart. The next dispatcher run should succeed for the same purchases (the failed sends didn't mark them as sent).
+- [X] Temporarily set `SMTP_PASS` in the dev stack's `.env` to a wrong value. Restart the container.
+- [X] Trigger an email (e.g., place a test order, fulfill).
+- [x] **Log line:** `dispatch send failed` with the SMTP error. `logEmailFailure` writes a row to `email_events` with `kind='send_failed'`.
+- [x] **Dashboard "Send failed (30d)" stat** should increment.
+- [x] Restore the correct `SMTP_PASS`. Restart. The next dispatcher run should succeed for the same purchases (the failed sends didn't mark them as sent).
 
 ---
 
@@ -1484,12 +1484,12 @@ The go-live guard prevents the dispatcher from emailing pre-launch customers whe
 Quick checklist after all the above passes — the final items per the dev plan §17:
 
 - [ ] All settings are reset to production-appropriate defaults:
-  - [ ] Dispatch immediately on fulfillment: **OFF**
-  - [ ] Cadence values match what you want for prod
-  - [ ] Dispatcher time: 2pm local (or whatever you want)
-  - [ ] New-review notifications: set to your real ops email + the ratings you actually want pinged
-  - [ ] Profanity wordlist: cleaned of test entries
-  - [ ] No active panic pause
+  - [x] Dispatch immediately on fulfillment: **OFF**
+  - [x] Cadence values match what you want for prod
+  - [x] Dispatcher time: 2pm local (or whatever you want)
+  - [x] New-review notifications: set to your real ops email + the ratings you actually want pinged
+  - [x] Profanity wordlist: cleaned of test entries
+  - [x] No active panic pause
   - [ ] No leftover test reviews on the storefront (you'll wipe the DB before prod cutover anyway, but tidy is good)
   - [ ] No leftover test campaigns
 - [ ] All seeded email templates have been reviewed for prod-grade copy.
