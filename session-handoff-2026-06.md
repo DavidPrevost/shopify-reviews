@@ -316,3 +316,71 @@ Expect feedback in the next round about:
 - Application data validation
 
 If the next agent picks this up mid-conversation, the user expects continuity: small commits per round of feedback, push after each commit so they can pull and rebuild on Mercury, test results communicated tersely.
+
+---
+
+## Addendum — 2026-06-03 round
+
+The 2026-06-03 session worked through the rest of Part 14 (campaigns full lifecycle, applicants tab, batch sends, discount redemption, retention) and Part 18 (operational checks). Parts 13, 15, 16, and 17 of the checklist were intentionally deferred from this round per merchant decision (live-launch urgency); they remain tracked in the checklist with deferral notes. **Part 17 in particular is expected to be exercised AS PART of the live cutover itself** (per dev-plan §17 Part B step 6 — "Set the go-live cadence guard immediately after the migration deploys on prod"), not re-tested standalone on dev.
+
+Test suite is still green: `npx tsx tests/run-all.ts` → 10 files, 121 assertions, all passing (a new audit-priority regression test was added — see item 4 below).
+
+The items below are the go-live-relevant delta from this round. UI polish, placeholder/color tweaks, applicants-tab split, ZIP API auto-populate, etc. are not duplicated here — they're in the test checklist and the code.
+
+### 1. New campaign member status: `reminded` (+ hidden status-progression bug fix)
+
+`CAMPAIGN_MEMBER_STATUSES` gained a `reminded` value between `shipped` and `reviewed`. New member lifecycle:
+
+```
+applied → approved → shipped → reminded → reviewed → done    (rejected as a side-arm)
+```
+
+- `campaign_review_reminder` send now advances member status to `reminded` (was status-neutral). Re-firing the reminder batch naturally skips members who already got it.
+- `campaign_launch_thanks` eligibility broadened to `shipped` | `reminded` | `reviewed` (was `shipped` | `reviewed`).
+- The `campaign_members.status` column is plain `TEXT` with no `CHECK` constraint, so the new value needs **no migration** — only the in-memory enum + label + pill style changed.
+
+**Hidden bug fixed in the same commit.** The checklist (14.18) had expected sample-invitation review submission to advance `campaign_members.status` from `shipped`/`reminded` → `reviewed`. It never did — `consumeSampleInvitation` only updated `sample_invitations`. New helper `markCampaignMemberReviewed(campaignId, email)` in `src/db/campaigns.ts` is now called from both consume sites in `src/routes/widget.ts`. Forward-only: pre-existing campaign members on prod (none yet, since prod isn't live) would not be retroactively progressed, but every new sample-invitation review will progress correctly going forward.
+
+### 2. `orders/paid`: discount-code redemption check moved ahead of the no-email gate
+
+Was: handler bailed out on `no_email` BEFORE running the campaign-code redemption block. Effect: admin-created test orders (Bogus Gateway, manual order without an attached customer) silently skipped redemption tracking. Real customer orders worked.
+
+Now: the discount-code redemption block runs first; the no-email gate only short-circuits the `upsertCustomer` / `upsertPurchase` work below it. On prod this is invisible for normal customer orders, but any admin-created test order on the live store that applies a campaign code will now correctly flip the member's `code_status` to `'redeemed'`.
+
+### 3. Hono route order — confirmed second hit of finding #3
+
+`/admin/campaigns/retention-queue` 404'd because `/retention-queue` was registered AFTER `/:id`. Both are single-segment paths; Hono matched the literal request to `/:id` with `id='retention-queue'`, failed `Number.isInteger`, and returned 404. Fix moved both retention-queue handlers ahead of `/:id` with an explicit code comment.
+
+**Rule for `/admin/campaigns` (and any other base with `/:id`):** literal single-segment routes MUST be registered before `/:id`. Current literals to keep ahead: `/new`, `/retention-queue`. Anything new added at this level (e.g., a future `/bulk-import`) needs the same treatment.
+
+### 4. Suppression audit priority order changed — amends finding #11
+
+- **Old order:** globalOptOut → productOptOut → maxRequestsHit → cadenceTooSoon → alreadyReviewed
+- **New order:** globalOptOut → productOptOut → **alreadyReviewed** → maxRequestsHit → cadenceTooSoon
+
+All three non-bypassable respect rules (globalOptOut, productOptOut, alreadyReviewed) now outrank the two bypassable policy rules (maxRequestsHit, cadenceTooSoon). The **eligibility query is unchanged**; only the per-row bucket attribution in `auditSuppressions()` moved.
+
+Reason for the change: during 18.6 testing with `bypass_cadence_min_days=1`, the audit reported `cadenceTooSoon: 1` and `considered: 0`, which looked like the bypass was broken. It wasn't — the row was being excluded by `NOT EXISTS (reviews)`, the non-bypassable already-reviewed clause. The old priority order attributed that row to cadenceTooSoon, hiding the real blocker. Under the new order, when the dev cadence-bypass toggles are on, any non-zero `cadenceTooSoon` value is now **genuinely** "only blocked by cadence" — a respect-rule blocker would have caught it first.
+
+Finding #11 in the main doc still describes the design intent correctly. The "with bypass ON you can see 'cadenceTooSoon: 1, sent: 1'" example is now narrower in scope (a row attributed to cadenceTooSoon is genuinely cadence-blocked, not also reviewed/opted-out) — observability is more useful, not less. A regression test for the new ordering lives at `tests/07-dispatcher-eligibility.ts` under "Audit priority: alreadyReviewed wins over cadenceTooSoon when both apply".
+
+### 5. `.env` changes require `docker compose up -d --force-recreate`, not `docker restart` ⚠
+
+The container reads env vars (SMTP_PASS, EMAIL_TOKEN_SECRET, SHOPIFY_WEBHOOK_SECRET, SHOPIFY_CLIENT_*, PUBLIC_URL, etc.) **at boot only**, and `config.ts` exports a frozen object. nodemailer further builds a singleton transport from those values on the first send and reuses it for the lifetime of the process. `docker restart reviews-app` keeps the existing container's already-injected env vars; Docker only re-reads `env_file:` when **creating** a container.
+
+To pick up an `.env` change:
+
+```bash
+cd /opt/stacks/shopify-reviews-{dev,prod}
+docker compose up -d --force-recreate
+```
+
+(or `docker compose down && docker compose up -d`). This matters specifically at cutover when generating fresh secrets per dev-plan §17 Part B step 8 — issuing a `docker restart` after editing prod `.env` will not pick up the new values.
+
+### 6. Backup snapshot location
+
+The backup sidecar writes snapshots to `/opt/stacks/shopify-reviews-{dev,prod}/data/snapshots/`, not directly to `data/`. The dev-plan and earlier checklist drafts pointed at `data/`. Updated in the checklist (18.2); flagging here so any go-live verification script the coordinator writes that asserts on backup presence checks the correct path.
+
+### Pending follow-up flagged this round (not blocking launch)
+
+- **Branding → Email contenteditable cursor fix.** The shared textarea cursor fix (`src/lib/admin-textarea-fix.ts`) was applied to the campaign template body textarea and the Branding → Email raw-HTML toggle textarea this round. The Branding → Email main body editor is a `contenteditable` div, not a textarea — a different fix shape (Range-based) would be required if the same App-Bridge first-keystroke bug shows up there in real use. Not built yet; flagged as a fast-follow to land alongside the existing "Campaign template editor: full visual-toolbar parity with Branding → Email" item in dev-plan §15.
