@@ -12,13 +12,6 @@
 import crypto from 'node:crypto';
 import { hmacSha256Hex, constantTimeEqual } from '../lib/hmac.js';
 
-// Scopes the app requests. Must match (or be a subset of) what's configured on
-// the app in the Shopify Partner Dashboard — if these change, the merchant
-// gets re-prompted on next install.
-// write_discounts is needed for per-participant campaign discount codes
-// (discountCodeBasicCreate / discountCodeDelete); see campaigns-feature-plan.md.
-export const OAUTH_SCOPES = 'read_orders,read_customers,read_products,write_discounts';
-
 // Accept '<handle>.myshopify.com' only. Anything else is rejected — defense
 // against an attacker passing ?shop=evil.com and getting us to redirect users
 // to a phishing authorize page.

@@ -28,7 +28,6 @@ import { nowSec } from '../lib/time.js';
 import { log } from '../lib/logger.js';
 import { setShopAccessToken } from '../lib/tenant.js';
 import {
-  OAUTH_SCOPES,
   isValidShopDomain,
   shopHandle,
   getAuthorizeUrl,
@@ -36,6 +35,7 @@ import {
   exchangeCodeForToken,
   generateNonce,
 } from '../shopify/oauth.js';
+import { OAUTH_SCOPES } from '../shopify/scopes.js';
 
 const STATE_COOKIE = 'reviews_oauth_state';
 const STATE_TTL_SECONDS = 600; // 10 minutes is generous for a merchant to approve

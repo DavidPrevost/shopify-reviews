@@ -10,14 +10,15 @@
 // in the Reviews app's Settings page at dev.shopify.com; the "client secret" and
 // the "webhook secret" are the same value).
 //
-// This script is deliberately self-contained: it does not import from the rest
-// of the app, so it works even if the app itself isn't yet built or running.
+// This script imports only the shared OAUTH_SCOPES constant (a zero-dependency
+// module) so the scopes it requests can never drift from the embedded install
+// flow in src/routes/auth.ts. It otherwise avoids the app's runtime (no DB, no
+// config side effects), so it stays simple to run.
 
 import crypto from 'node:crypto';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-
-const SCOPES = 'read_orders,read_customers,read_products';
+import { OAUTH_SCOPES } from '../shopify/scopes.js';
 const PORT = 3456;
 const CALLBACK_PATH = '/auth/callback';
 
@@ -89,7 +90,7 @@ const redirectUri = `http://localhost:${PORT}${CALLBACK_PATH}`;
 // directly avoids the redirect and preserves the full parameter set.
 const authUrl = new URL(`https://admin.shopify.com/store/${shopHandle}/oauth/authorize`);
 authUrl.searchParams.set('client_id', clientId);
-authUrl.searchParams.set('scope', SCOPES);
+authUrl.searchParams.set('scope', OAUTH_SCOPES);
 authUrl.searchParams.set('redirect_uri', redirectUri);
 authUrl.searchParams.set('state', state);
 
