@@ -41,7 +41,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 | `BRAND_NAME` | Default sender/brand name in emails. |
 | `HOST_BIND_IP` | Mercury's Tailscale IP — restricts the published port to the tailnet (read by docker-compose, not the app). |
 | `HOST_PORT` | Published host port: `8070` prod, `8071` dev (read by docker-compose). |
-| `REVIEWS_CONTAINER_NAME` / `REVIEWS_BACKUP_CONTAINER_NAME` | Container names (compose interpolation). Default `reviews-app`/`reviews-backup`; prod sets `reviews-app-prod`/`reviews-backup-prod` so the two stacks don't collide on the same host. Substitute the prod names in the `docker exec` recipes when operating prod. |
+| `REVIEWS_CONTAINER_NAME` / `REVIEWS_BACKUP_CONTAINER_NAME` | Container names (compose interpolation). Each stack sets them explicitly — dev uses `reviews-app-dev`/`reviews-backup-dev`, prod uses `reviews-app-prod`/`reviews-backup-prod` — so there's no ambiguous bare name and the stacks can't collide on one host. Use the matching name in `docker exec` commands. |
 | `SHOPIFY_SHOP_DOMAIN` | `<store>.myshopify.com`. |
 | `SHOPIFY_CLIENT_ID` | App client ID / API key (public; also the App Bridge key). |
 | `SHOPIFY_ADMIN_TOKEN` | Offline Admin API token from `install-shopify` (`shpua_…`). Fallback only — the per-shop `shops.access_token` written by OAuth takes precedence once present. |
@@ -66,7 +66,7 @@ Build a stack's `.env` from [`.env.example`](../.env.example). Reference:
 
 - `curl https://reviews.teraclay.com/health` → `{"status":"ok"}` exercises relay → Tailscale → container.
 - Logs: `sudo docker compose logs --tail=100 reviews-app | grep -i 'migration\|error'` (and look for `dispatcher scheduler registered`).
-- Drop into the DB: `docker exec -it reviews-app sqlite3 /app/data/reviews.db`.
+- Drop into the DB: `docker exec -it reviews-app-dev sqlite3 /app/data/reviews.db` — substitute your stack's container name (`reviews-app-dev` / `reviews-app-prod`) in every `docker exec` example here.
 
 ---
 
@@ -98,10 +98,10 @@ These are reproducible traps surfaced during the build/testing rounds. A maintai
 - **Webhooks not firing** (orders paid/fulfilled produce no log lines). They aren't auto-subscribed on install — run `install-webhooks`. Recipe using the per-shop DB token from inside the container:
   ```
   docker exec -e SHOPIFY_SHOP_DOMAIN=<store>.myshopify.com \
-    -e SHOPIFY_ADMIN_TOKEN="$(docker exec reviews-app sqlite3 /app/data/reviews.db \
+    -e SHOPIFY_ADMIN_TOKEN="$(docker exec reviews-app-dev sqlite3 /app/data/reviews.db \
         "SELECT access_token FROM shops WHERE shop_domain='<store>.myshopify.com'")" \
     -e PUBLIC_URL=https://reviews.teraclay.com \
-    reviews-app node dist/scripts/install-webhooks.js
+    reviews-app-dev node dist/scripts/install-webhooks.js
   ```
 - **Curl from Mercury must use the Tailscale IP** (`100.117.6.18:807x`), not `localhost` — the app binds the tailnet interface.
 - **PowerShell `curl` is `Invoke-WebRequest`** (different flags). Use `curl.exe` or run from inside the container.
