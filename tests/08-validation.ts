@@ -164,8 +164,8 @@ await run.test('isCampaignStatus: accepts the 7 known states', () => {
   assertEqual(isCampaignStatus('paused'), false, 'Unknown state');
 });
 
-await run.test('isCampaignMemberStatus: accepts the 6 known states', () => {
-  for (const s of ['applied', 'approved', 'rejected', 'shipped', 'reviewed', 'done']) {
+await run.test('isCampaignMemberStatus: accepts the 7 known states', () => {
+  for (const s of ['applied', 'approved', 'rejected', 'shipped', 'reminded', 'reviewed', 'done']) {
     assertEqual(isCampaignMemberStatus(s), true, `Should accept "${s}"`);
   }
 });

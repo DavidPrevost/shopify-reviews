@@ -14,6 +14,7 @@ import {
   consumeSampleInvitation,
   upsertCustomer,
 } from '../db/queries.js';
+import { markCampaignMemberReviewed } from '../db/campaigns.js';
 import { verifyReviewToken, verifyUnsubscribeToken, verifySampleInviteToken } from '../email/tokens.js';
 import { nowSec } from '../lib/time.js';
 import { escapeHtml } from '../email/render.js';
@@ -477,6 +478,16 @@ widget.post('/r/invite/:token', async (c) => {
   const existingReview = findReviewByCustomerAndProduct(customer.id, invitation.shopify_product_id);
   if (existingReview) {
     consumeSampleInvitation({ invitationId: invitation.id, reviewId: existingReview.id });
+    if (invitation.campaign_id !== null && customer.email) {
+      const advanced = markCampaignMemberReviewed(invitation.campaign_id, customer.email);
+      if (advanced.advanced) {
+        log('info', 'campaign member advanced to reviewed', {
+          campaignId: invitation.campaign_id,
+          memberId: advanced.memberId,
+          from: advanced.fromStatus,
+        });
+      }
+    }
     log('info', 'sample invitation: duplicate review suppressed', {
       invitationId: invitation.id,
       customerId: customer.id,
@@ -509,6 +520,17 @@ widget.post('/r/invite/:token', async (c) => {
   });
 
   consumeSampleInvitation({ invitationId: invitation.id, reviewId });
+
+  if (invitation.campaign_id !== null && customer.email) {
+    const advanced = markCampaignMemberReviewed(invitation.campaign_id, customer.email);
+    if (advanced.advanced) {
+      log('info', 'campaign member advanced to reviewed', {
+        campaignId: invitation.campaign_id,
+        memberId: advanced.memberId,
+        from: advanced.fromStatus,
+      });
+    }
+  }
 
   log('info', 'sample review submitted', {
     reviewId,

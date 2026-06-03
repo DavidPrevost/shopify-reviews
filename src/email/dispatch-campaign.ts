@@ -58,11 +58,17 @@ export interface CampaignBatchResult {
 // to receive this email") matches the dispatcher exactly.
 //
 // shipped_notification: members in `approved` status who have invitations.
-// review_reminder:      members already in `shipped` status (they got the
-//                       first email; reminder follows).
-// launch_thanks:        members in `shipped` OR `reviewed` status. Discount
-//                       codes are generated inline as part of this send (not
-//                       a separate admin step) so we don't pre-filter on
+// review_reminder:      members in `shipped` status (they got the shipped
+//                       email; reminder follows). Members already in
+//                       `reminded` or `reviewed` are excluded so a re-fired
+//                       reminder batch doesn't spam them.
+// launch_thanks:        members in `shipped`, `reminded`, or `reviewed`
+//                       status. `shipped` is included as a fallback for
+//                       merchants who skip the reminder; `reminded` is the
+//                       normal path; `reviewed` is for members who reviewed
+//                       before the reminder went out. Discount codes are
+//                       generated inline as part of this send (not a
+//                       separate admin step) so we don't pre-filter on
 //                       discount_code presence.
 const isEligible = (
   trigger: CampaignBatchTrigger,
@@ -75,7 +81,9 @@ const isEligible = (
     case 'campaign_review_reminder':
       return member.status === 'shipped';
     case 'campaign_launch_thanks':
-      return member.status === 'shipped' || member.status === 'reviewed';
+      return member.status === 'shipped'
+          || member.status === 'reminded'
+          || member.status === 'reviewed';
   }
 };
 
@@ -152,12 +160,13 @@ const generateCodesForLaunch = async (
   return { ok: true, created };
 };
 
-// Successful-send member-status transition. Null = no transition (reminder
-// doesn't move state forward).
+// Successful-send member-status transition. Every email advances state so
+// the merchant can see what's happened from the campaign detail page and so
+// a re-fired batch naturally skips members who already got it.
 const postSendStatus = (trigger: CampaignBatchTrigger): CampaignMemberStatus | null => {
   switch (trigger) {
     case 'campaign_shipped_notification': return 'shipped';
-    case 'campaign_review_reminder':      return null;
+    case 'campaign_review_reminder':      return 'reminded';
     case 'campaign_launch_thanks':        return 'done';
   }
 };

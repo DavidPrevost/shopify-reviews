@@ -1153,29 +1153,29 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 ### 14.16 — Per-campaign template override (clone + edit + revert)
 
-- [ ] Click **Preview / edit template** on the "Samples shipped" row.
-- [ ] This clones the default template for this campaign and opens an editor.
-- [ ] Change the subject (add `[CAMPAIGN OVERRIDE]`) and save.
-- [ ] **In SQLite:**
+- [x] Click **Preview / edit template** on the "Samples shipped" row.
+- [x] This clones the default template for this campaign and opens an editor.
+- [x] Change the subject (add `[CAMPAIGN OVERRIDE]`) and save.
+- [x] **In SQLite:**
   ```sql
   SELECT id, campaign_id, template_key, subject FROM email_templates WHERE campaign_id = <campaign_id>;
   -- Expect a row with the override subject and campaign_id set.
   ```
-- [ ] Resend a single test (or wait for the next test in the lifecycle) — verify the new subject is used.
-- [ ] Click **Revert to default**. The campaign-specific row is deleted; future sends use the default again.
-- [ ] Verify in SQLite that the override row is gone.
+- [x] Resend a single test (or wait for the next test in the lifecycle) — verify the new subject is used.
+- [x] Click **Revert to default**. The campaign-specific row is deleted; future sends use the default again.
+- [x] Verify in SQLite that the override row is gone.
 
 ### 14.17 — Send the "Review reminder" batch
 
-- [ ] Wait briefly (or just proceed). The "Review reminder" row should show `Eligible: 3` (all in shipped state).
-- [ ] Click **Send "Review reminder"**.
-- [ ] 3 reminder emails fire. Bodies should mention "Now that you've had a chance to try the samples..." or whatever the template says.
-- [ ] **Member statuses don't change** — review_reminder is status-neutral.
+- [x] Wait briefly (or just proceed). The "Review reminder" row should show `Eligible: 3` (all in shipped state).
+- [x] Click **Send "Review reminder"**.
+- [x] 3 reminder emails fire. Bodies should mention "Now that you've had a chance to try the samples..." or whatever the template says.
+- [x] **Member statuses advance from `shipped` to `reminded`.** Re-firing the batch should now show `Eligible: 0` — `reminded` members are intentionally excluded so they don't get the reminder twice.
 
 ### 14.18 — Have one of the recipients leave a review
 
-- [ ] Click through one of the campaign review links in your inbox. Submit a 5-star review.
-- [ ] **In SQLite:**
+- [x] Click through one of the campaign review links in your inbox. Submit a 5-star review.
+- [x] **In SQLite:**
   ```sql
   SELECT id, verified_kind FROM reviews ORDER BY id DESC LIMIT 1;
   -- Expect verified_kind='sample'
@@ -1185,23 +1185,23 @@ Approval does not auto-create invitations. Click **Generate N sample invitations
 
 ### 14.19 — Send the "Launch thanks" batch (auto-generates discount codes)
 
-- [ ] Move the campaign status to `active` (one of the transitions).
-- [ ] On the Batch emails card, the "Launch thanks" row should show `Eligible: 3` (members in shipped + reviewed).
-- [ ] Click **Send "Launch thanks"**.
-- [ ] **Phase 1 (codes):** the dispatcher creates a Shopify discount code per member via `discountCodeBasicCreate`. If ANY code fails, the batch aborts before sending — verify via logs that this is an all-or-nothing operation.
-- [ ] **Phase 2 (send):** emails go out with the per-recipient code embedded.
-- [ ] **In Shopify admin → Discounts:** you should see 3 new codes prefixed with `SUMMER`.
-- [ ] **In SQLite:**
+- [x] Move the campaign status to `active` (one of the transitions).
+- [x] On the Batch emails card, the "Launch thanks" row should show `Eligible: 3` (members in shipped + reviewed).
+- [x] Click **Send "Launch thanks"**.
+- [x] **Phase 1 (codes):** the dispatcher creates a Shopify discount code per member via `discountCodeBasicCreate`. If ANY code fails, the batch aborts before sending — verify via logs that this is an all-or-nothing operation.
+- [x] **Phase 2 (send):** emails go out with the per-recipient code embedded.
+- [x] **In Shopify admin → Discounts:** you should see 3 new codes prefixed with `SUMMER`.
+- [x] **In SQLite:**
   ```sql
   SELECT id, discount_code, discount_code_id, code_status FROM campaign_members WHERE campaign_id = <campaign_id>;
   -- Each should have a discount_code, a discount_code_id (Shopify GID), code_status='active'.
   ```
-- [ ] Open one of the "Launch thanks" emails — body shows the unique code (`SUMMER` + 8 chars).
+- [x] Open one of the "Launch thanks" emails — body shows the unique code (`SUMMER` + 8 chars).
 
 ### 14.20 — Use a discount code on an order and verify redemption tracking
 
-- [ ] Shopify admin → Orders → Create order → use one of the test customers and the product in the campaign → at checkout, apply one of the SUMMER discount codes.
-- [ ] Mark the order as paid.
+- [x] Shopify admin → Orders → Create order → use one of the test customers and the product in the campaign → at checkout, apply one of the SUMMER discount codes.
+- [x] Mark the order as paid.
 - [ ] **Log line:** `campaign discount code redeemed` with the member ID, code, and order total.
 - [ ] **In SQLite:**
   ```sql

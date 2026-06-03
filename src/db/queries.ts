@@ -1226,6 +1226,12 @@ export interface SampleInvitationRow {
   consumed_review_id: number | null;
   created_at: number;
   expires_at: number;
+  // Non-null when this invitation was generated for an approved campaign
+  // member. Added in migration 018; standalone (admin-created) invitations
+  // are NULL. The consume path uses this to advance the corresponding
+  // campaign_members row to 'reviewed' so the merchant can see who's
+  // reviewed without poking at the reviews table directly.
+  campaign_id: number | null;
 }
 
 export const createSampleInvitation = (input: {

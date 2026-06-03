@@ -36,11 +36,20 @@ export const CAMPAIGN_STATUS_LABELS: Record<CampaignStatus, string> = {
   cancelled: 'Cancelled',
 };
 
+// Member lifecycle: applied → approved → shipped (after shipped-notification
+// email) → reminded (after review-reminder email) → reviewed (after they
+// submit a review via their sample invitation) → done (after launch-thanks
+// email). `rejected` is a side-arm from `applied`. `reviewed` is also
+// reachable directly from `shipped` if a member reviews before the reminder
+// is sent. `reminded` exists so the merchant can see which members have
+// received the reminder email and so a re-fired reminder batch doesn't hit
+// them twice.
 export const CAMPAIGN_MEMBER_STATUSES = [
   'applied',
   'approved',
   'rejected',
   'shipped',
+  'reminded',
   'reviewed',
   'done',
 ] as const;
@@ -54,6 +63,7 @@ export const CAMPAIGN_MEMBER_STATUS_LABELS: Record<CampaignMemberStatus, string>
   approved: 'Approved',
   rejected: 'Rejected',
   shipped: 'Shipped',
+  reminded: 'Reminded',
   reviewed: 'Reviewed',
   done: 'Done',
 };
@@ -475,11 +485,36 @@ export const findCampaignMemberByEmail = (
     .get(campaignId, email.toLowerCase()) as CampaignMemberRow | undefined) ?? null;
 };
 
+// Called when a sample invitation review is submitted. If the invitation is
+// tied to a campaign member, advance them to 'reviewed' so the merchant can
+// see who's actually reviewed from the campaign detail page. Only fires
+// from `shipped` or `reminded` — `approved` shouldn't have working review
+// links and `done`/`reviewed` are either already reviewed or shouldn't
+// regress to it after the launch-thanks email.
+export const markCampaignMemberReviewed = (
+  campaignId: number,
+  email: string,
+): { advanced: boolean; memberId: number | null; fromStatus: CampaignMemberStatus | null } => {
+  const member = findCampaignMemberByEmail(campaignId, email);
+  if (!member) return { advanced: false, memberId: null, fromStatus: null };
+  if (member.status !== 'shipped' && member.status !== 'reminded') {
+    return { advanced: false, memberId: member.id, fromStatus: member.status };
+  }
+  getDb()
+    .prepare(`
+      UPDATE campaign_members
+         SET status = 'reviewed', decided_at = ?, decided_by = 'sample-review'
+       WHERE id = ? AND (status = 'shipped' OR status = 'reminded')
+    `)
+    .run(nowSec(), member.id);
+  return { advanced: true, memberId: member.id, fromStatus: member.status };
+};
+
 // Per-status member counts for the detail page summary. Returns a complete
 // record with zeros so the UI doesn't have to coalesce.
 export const countMembersByStatus = (campaignId: number): Record<CampaignMemberStatus, number> => {
   const out: Record<CampaignMemberStatus, number> = {
-    applied: 0, approved: 0, rejected: 0, shipped: 0, reviewed: 0, done: 0,
+    applied: 0, approved: 0, rejected: 0, shipped: 0, reminded: 0, reviewed: 0, done: 0,
   };
   const rows = getDb()
     .prepare(`

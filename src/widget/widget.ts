@@ -1053,25 +1053,6 @@ const CAMPAIGN_STYLES = `
 .rv-campaign h2 { margin: 0 0 12px; font-size: 1.4em; font-weight: 600; }
 .rv-campaign h3 { margin: 24px 0 12px; font-size: 1.05em; font-weight: 600; }
 .rv-campaign-intro { margin: 0 0 16px; opacity: 0.85; }
-.rv-campaign-summary {
-  margin: 0 0 28px;
-  padding: 16px 18px;
-  border-left: 4px solid var(--reviews-cta-bg, #444);
-  background: rgba(0,0,0,0.04);
-  border-radius: 0 6px 6px 0;
-  font-size: 14px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-.rv-campaign-summary-label {
-  display: block;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  opacity: 0.6;
-  margin-bottom: 8px;
-}
 .rv-campaign-field { display: block; margin: 14px 0; }
 .rv-campaign-field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .rv-campaign-field input,
@@ -1081,6 +1062,13 @@ const CAMPAIGN_STYLES = `
   font-size: 14px; font-family: inherit; box-sizing: border-box;
   background: #ffffff; color: #111;
   transition: border-color 0.1s, box-shadow 0.1s;
+}
+.rv-campaign-field input::placeholder,
+.rv-campaign-field textarea::placeholder {
+  color: #b8b8b8;
+  font-weight: 400;
+  font-style: italic;
+  opacity: 1;
 }
 .rv-campaign-field input:focus,
 .rv-campaign-field textarea:focus {
@@ -1098,6 +1086,9 @@ const CAMPAIGN_STYLES = `
 }
 .rv-campaign-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .rv-campaign-row .rv-campaign-field { flex: 1; min-width: 180px; }
+.rv-campaign-zip-loading {
+  font-size: 12px; color: #888; margin-top: 4px; font-style: italic;
+}
 .rv-campaign-terms-wrap {
   margin: 24px 0 12px;
   border: 1px solid #ddd;
@@ -1111,7 +1102,6 @@ const CAMPAIGN_STYLES = `
   border-bottom: 1px solid #ddd;
   font-size: 13px;
   line-height: 1.5;
-  white-space: pre-wrap;
 }
 .rv-campaign-terms-header-label {
   display: block;
@@ -1122,10 +1112,11 @@ const CAMPAIGN_STYLES = `
   opacity: 0.6;
   margin-bottom: 6px;
 }
+.rv-campaign-terms-header-text { white-space: pre-wrap; }
 .rv-campaign-terms {
   padding: 12px 14px;
   max-height: 180px; overflow-y: auto;
-  font-size: 13px; white-space: pre-wrap;
+  font-size: 13px;
 }
 .rv-campaign-terms-label {
   display: block;
@@ -1136,6 +1127,7 @@ const CAMPAIGN_STYLES = `
   opacity: 0.6;
   margin-bottom: 6px;
 }
+.rv-campaign-terms-text { white-space: pre-wrap; }
 .rv-campaign-accept { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 24px; font-size: 14px; }
 .rv-campaign-accept input { margin-top: 3px; }
 .rv-campaign-submit {
@@ -1195,62 +1187,43 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
   }
 
   const terms = cfg.terms;
-  // Plain-language summary lands in two places: a prominent intro block at the
-  // top of the form (so applicants see "what they're signing up for" before
-  // they even start typing) AND as a labeled header inside the legal-terms
-  // box (so it travels with the terms wherever they're surfaced). Both fall
-  // back gracefully when the merchant hasn't filled in the summary.
+  // Plain-language summary renders as a labeled header above the legal terms
+  // inside the T&C box. Used to also render at the top of the form as a
+  // separate "What to expect" block — removed (overkill; one display is
+  // enough). Wrapped in a dedicated text div so the label can sit above the
+  // body without `white-space: pre-wrap` causing the body's first line to
+  // pick up the source-file indent.
   const summary = (terms.summary ?? '').trim();
-  const summaryIntroHtml = summary
-    ? `<div class="rv-campaign-summary">
-         <span class="rv-campaign-summary-label">What to expect</span>
-         ${escapeHtmlText(summary)}
-       </div>`
-    : '';
   const summaryHeaderHtml = summary
-    ? `<div class="rv-campaign-terms-header">
-         <span class="rv-campaign-terms-header-label">Plain-language summary</span>
-         ${escapeHtmlText(summary)}
-       </div>`
+    ? `<div class="rv-campaign-terms-header"><span class="rv-campaign-terms-header-label">Plain-language summary</span><div class="rv-campaign-terms-header-text">${escapeHtmlText(summary)}</div></div>`
     : '';
 
   el.innerHTML = `
     <h2>${escapeHtmlText(cfg.campaignName)}</h2>
     <p class="rv-campaign-intro">Apply below to be considered for this sample program.</p>
-    ${summaryIntroHtml}
     <form class="rv-campaign-form" novalidate>
       <div class="rv-campaign-row">
         <div class="rv-campaign-field">
           <label>First name</label>
-          <input type="text" name="firstName" required maxlength="80" placeholder="Jane" />
+          <input type="text" name="firstName" required maxlength="80" placeholder="First name" />
         </div>
         <div class="rv-campaign-field">
           <label>Last name</label>
-          <input type="text" name="lastName" required maxlength="80" placeholder="Smith" />
+          <input type="text" name="lastName" required maxlength="80" placeholder="Last name" />
         </div>
       </div>
       <div class="rv-campaign-field">
         <label>Email</label>
-        <input type="email" name="email" required maxlength="254" placeholder="you@example.com" />
+        <input type="email" name="email" required maxlength="254" placeholder="Email address" />
       </div>
       <h3>Shipping address</h3>
       <div class="rv-campaign-field">
         <label>Street address</label>
-        <input type="text" name="street1" required maxlength="200" placeholder="123 Main St" />
+        <input type="text" name="street1" required maxlength="200" placeholder="Street address" />
       </div>
       <div class="rv-campaign-field">
         <label>Apartment, suite, etc. (optional)</label>
-        <input type="text" name="street2" maxlength="200" placeholder="Apt 4B" />
-      </div>
-      <div class="rv-campaign-row">
-        <div class="rv-campaign-field">
-          <label>City</label>
-          <input type="text" name="city" required maxlength="100" placeholder="Springfield" />
-        </div>
-        <div class="rv-campaign-field">
-          <label>State</label>
-          <input type="text" name="state" required maxlength="100" placeholder="IL" />
-        </div>
+        <input type="text" name="street2" maxlength="200" placeholder="Apartment, suite, etc." />
       </div>
       <div class="rv-campaign-row">
         <div class="rv-campaign-field">
@@ -1258,8 +1231,9 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
           <input type="text" name="postalCode" required maxlength="10"
                  pattern="\\d{5}(-\\d{4})?"
                  inputmode="numeric"
-                 placeholder="12345"
+                 placeholder="ZIP code"
                  title="5 digits, or 5+4 (e.g. 12345 or 12345-6789)" />
+          <div class="rv-campaign-zip-loading" data-zip-status hidden></div>
         </div>
         <div class="rv-campaign-field">
           <label>Country</label>
@@ -1267,16 +1241,23 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
                  value="United States" readonly aria-readonly="true" />
         </div>
       </div>
+      <div class="rv-campaign-row">
+        <div class="rv-campaign-field">
+          <label>City</label>
+          <input type="text" name="city" required maxlength="100" placeholder="City" />
+        </div>
+        <div class="rv-campaign-field">
+          <label>State</label>
+          <input type="text" name="state" required maxlength="100" placeholder="State" />
+        </div>
+      </div>
       <div class="rv-campaign-field">
         <label>Anything you'd like us to know? (optional)</label>
-        <textarea name="message" rows="3" maxlength="2000"></textarea>
+        <textarea name="message" rows="3" maxlength="2000" placeholder="Anything we should know?"></textarea>
       </div>
       <div class="rv-campaign-terms-wrap" aria-label="Program terms">
         ${summaryHeaderHtml}
-        <div class="rv-campaign-terms">
-          <span class="rv-campaign-terms-label">Full terms</span>
-          ${escapeHtmlText(terms.body)}
-        </div>
+        <div class="rv-campaign-terms"><span class="rv-campaign-terms-label">Full terms</span><div class="rv-campaign-terms-text">${escapeHtmlText(terms.body)}</div></div>
       </div>
       <label class="rv-campaign-accept">
         <input type="checkbox" name="termsAccepted" required />
@@ -1291,6 +1272,54 @@ const renderCampaignForm = async (el: HTMLElement, slug: string): Promise<void> 
   const errorEl = el.querySelector<HTMLElement>('[data-error]');
   const submitEl = el.querySelector<HTMLButtonElement>('.rv-campaign-submit');
   if (!formEl || !errorEl || !submitEl) return;
+
+  // ZIP auto-populate via zippopotam.us — a free public US ZIP lookup. Fires
+  // on blur once the 5-digit pattern matches, fills city + state if they're
+  // still blank, and never blocks: if the lookup fails or 404s, the user
+  // just keeps typing as if it didn't exist. We deliberately don't overwrite
+  // a non-empty city/state in case the user has already corrected it.
+  const zipEl = formEl.querySelector<HTMLInputElement>('input[name="postalCode"]');
+  const cityEl = formEl.querySelector<HTMLInputElement>('input[name="city"]');
+  const stateEl = formEl.querySelector<HTMLInputElement>('input[name="state"]');
+  const zipStatusEl = formEl.querySelector<HTMLElement>('[data-zip-status]');
+  let lastLookedUp = '';
+  const lookupZip = async (raw: string): Promise<void> => {
+    const zip = raw.slice(0, 5);
+    if (!/^\d{5}$/.test(zip)) return;
+    if (zip === lastLookedUp) return;
+    lastLookedUp = zip;
+    if (zipStatusEl) {
+      zipStatusEl.hidden = false;
+      zipStatusEl.textContent = 'Looking up city and state…';
+    }
+    try {
+      const res = await fetch(`https://api.zippopotam.us/us/${zip}`);
+      if (!res.ok) {
+        if (zipStatusEl) zipStatusEl.hidden = true;
+        return;
+      }
+      const data = await res.json() as { places?: Array<{ 'place name'?: string; 'state abbreviation'?: string }> };
+      const place = data.places?.[0];
+      if (!place) {
+        if (zipStatusEl) zipStatusEl.hidden = true;
+        return;
+      }
+      if (cityEl && !cityEl.value.trim() && place['place name']) cityEl.value = place['place name'];
+      if (stateEl && !stateEl.value.trim() && place['state abbreviation']) stateEl.value = place['state abbreviation'];
+      if (zipStatusEl) zipStatusEl.hidden = true;
+    } catch {
+      if (zipStatusEl) zipStatusEl.hidden = true;
+    }
+  };
+  if (zipEl) {
+    zipEl.addEventListener('blur', () => { void lookupZip(zipEl.value.trim()); });
+    // Also fire as soon as the 5th digit lands so a typing-fast user doesn't
+    // have to tab out to trigger the lookup.
+    zipEl.addEventListener('input', () => {
+      const v = zipEl.value.trim();
+      if (/^\d{5}/.test(v)) void lookupZip(v);
+    });
+  }
 
   formEl.addEventListener('submit', async (ev) => {
     ev.preventDefault();

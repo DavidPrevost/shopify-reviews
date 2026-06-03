@@ -1194,7 +1194,12 @@ const memberRowHtml = (
   }
 
   const invitationCount = email ? countInvitationsForMember(campaign.id, email) : 0;
-  const invitationCell = member.status === 'approved' || member.status === 'shipped' || member.status === 'reviewed' || member.status === 'done'
+  const invitationCell =
+    member.status === 'approved'
+    || member.status === 'shipped'
+    || member.status === 'reminded'
+    || member.status === 'reviewed'
+    || member.status === 'done'
     ? (invitationCount > 0
         ? `<span class="muted">${invitationCount} of ${productCount}</span>`
         : `<span class="muted">—</span>`)
@@ -1215,6 +1220,7 @@ const renderMemberPillStyles = (): string => `
     .pill-campaign-member-approved { background:#dfe9d9; color:#2d572c; }
     .pill-campaign-member-rejected { background:#f8d7da; color:#721c24; }
     .pill-campaign-member-shipped  { background:#d6e6ff; color:#234c8c; }
+    .pill-campaign-member-reminded { background:#e6dffa; color:#3d2c79; }
     .pill-campaign-member-reviewed { background:#d4f1f9; color:#1c5b75; }
     .pill-campaign-member-done     { background:#cfe9d2; color:#1d4d22; }
   </style>
