@@ -21,7 +21,7 @@ export const config = {
     // use of it was webhook HMAC verification; same value as the dashboard's
     // "client secret" / "API secret key" field.
     webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET ?? '',
-    apiVersion: process.env.SHOPIFY_API_VERSION ?? '2026-01',
+    apiVersion: process.env.SHOPIFY_API_VERSION ?? '2026-04',
   },
   email: {
     tokenSecret: process.env.EMAIL_TOKEN_SECRET ?? '',

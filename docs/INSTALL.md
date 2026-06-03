@@ -61,7 +61,7 @@ At `dev.shopify.com` → **Apps → Create app → "Start from Dev Dashboard"**.
   - `read_orders` covers fulfillment data; `read_customers` is protected data (validates on dev, may need consent on a live store); **`read_discounts` + `write_discounts` are required for campaign discount codes** (see the launch-blocker note below — the install scripts must request these too, not just the Dev Dashboard).
 - **Webhooks API version**: current (matches `SHOPIFY_API_VERSION`).
 - **App Proxy** (configure now, at v1 — not later): subpath prefix `apps`, subpath `reviews`, **Proxy URL `https://reviews.brandname.com/proxy/`** (the trailing slash is required). This powers storefront review submit/edit, the brand relay, and campaign/feedback forms.
-- **Compliance (GDPR) webhooks**: set `customers/data_request`, `customers/redact`, `shop/redact` to `https://reviews.brandname.com/webhooks/...` here at the app-version level — Shopify fires these automatically; they are **not** subscribed via the API.
+- **Compliance (GDPR) webhooks**: **not applicable to a custom, single-store app** — there is no field for them. Shopify only requires/exposes the compliance webhooks (and the linked "protected customer data access" process) for **App-Store-distributed** apps. The handlers in `src/routes/webhooks.ts` for `customers/data_request`, `customers/redact`, `shop/redact` sit dormant as a safety net and would only be wired if the app ever goes public. Skip this step.
 
 **Release the version.** Then from **Settings → Credentials**, copy the **Client ID** and **Client secret** (the secret doubles as the webhook signing secret).
 

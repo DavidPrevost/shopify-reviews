@@ -102,6 +102,7 @@ Deferred **Part B** (no data-migration penalty — build when multi-tenancy is a
 - **GCP relay 1 GB/month egress** — comfortable for small-brand traffic; overage ~$0.12/GB; budget alert is the safety net.
 - **Orphan-row cleanup before any constraint-rebuild migration** — the deferred-FK check at `COMMIT` surfaces orphans that `foreign_keys = ON` tolerated. Run `PRAGMA foreign_key_check` on a copy and clean before migrating prod.
 - **Logo uploads not backed up** — `data/uploads/` isn't in the nightly snapshot (only the DB is). Extend `backup.sh` if needed.
+- **Reliance on Shopify's legacy install flow.** Install uses the legacy OAuth authorization-code grant — the one-shot `install-shopify.ts` CLI plus the redirect flow in `auth.ts` — which requires the "Use legacy install flow" toggle on the app, a feature Shopify may eventually deprecate. We chose it because the background dispatcher needs a permanent **offline** token and the one-shot grant was the simplest way to capture one for a single store. Future: migrate to Shopify **managed installation + Token Exchange** (mint an offline token from the App Bridge session token), which removes the legacy toggle and the redirect/CLI dance and dovetails with zero-touch onboarding (B10) + webhook auto-subscribe. Verify against current Shopify auth docs at implementation time.
 
 ## Explicitly NOT building (considered and declined)
 
