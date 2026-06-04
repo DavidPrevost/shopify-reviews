@@ -14,7 +14,18 @@ Notable changes, newest first. Dates are `YYYY-MM-DD`.
 
 ## [Unreleased]
 
-- _Phase 7 will record the v1 production launch (cutover to the live store) here._
+_Post-launch work resumes on `develop`._
+
+## v1 launch — 2026-06-03
+
+The self-hosted Reviews app went **live on the production store** (`teraclay.myshopify.com`), replacing the vestigial Yotpo / Shopify Product Reviews setup. Reviews is now the brand's live reviews system.
+
+- **Prod stack** on Mercury (`/opt/stacks/shopify-reviews-prod/`, host port 8070, public `reviews.teraclay.com`); app **installed on the live store via OAuth** (embedded admin; offline token persisted to the DB); `orders/paid` + `orders/fulfilled` webhooks subscribed.
+- **Theme integration** (Trademark 1.7.3): widget loader script, the full review widget on product pages (below the buy box, above the tabs), aggregate stars on collection cards, and the Liquid **brand relay** feeding `shop_brand_json`.
+- **Old systems retired:** Yotpo and the (sunset) Shopify Product Reviews app were already uninstalled; leftover theme markup was replaced and the orphaned `spr.*` metafields left for optional cleanup. Prior review content was unrecoverable (only an aggregate shell remained), so products start fresh.
+- **Flood protection:** go-live cutoff guard set and recent orders backfilled un-armed, so the dispatcher won't email pre-launch customers; the few legacy customers are handled by manual outreach.
+- **Launch-time fixes:** per-stack container names + backup target (two stacks coexisting on Mercury), unified OAuth discount scopes (`src/shopify/scopes.ts`), and a comma-separated `STOREFRONT_ORIGIN` CORS allow-list matching the store's real serving domain(s).
+- **Known follow-up:** the widget emits no JSON-LD review schema, so Google rich-snippet stars lapse until added (see `docs/ROADMAP.md`).
 
 ## Pre-launch baseline — 2026-06-03
 
