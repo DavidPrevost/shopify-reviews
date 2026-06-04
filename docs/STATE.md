@@ -45,6 +45,8 @@ The app is a single Node.js (Hono) process backed by SQLite, deployed via Docker
 - **Public ingress** is a Google Cloud always-free `e2-micro` VM running **Caddy + Tailscale**. Caddy terminates HTTPS (Let's Encrypt) for `reviews*.teraclay.com` and reverse-proxies over Tailscale to Mercury's bound port. Squarespace holds DNS (one A record per subdomain → the relay's static IP). Mercury keeps **zero inbound ports** open to the internet.
 - **Backups**: a sidecar container snapshots the SQLite DB nightly to `data/snapshots/` and rsyncs to the second mini-PC (Pebbles) over Tailscale.
 - **Branch model**: `main` = production, `develop` = development; hotfixes on `main` merge back to `develop`. Code is written on Windows (`D:\AI\shopify-reviews\`), pushed to Gitea on Mercury, pulled + `docker compose up -d --build` on the target stack.
+- **Storefront serving domain** (matters for CORS): the live storefront *pages* render on **`teraclay.myshopify.com`** — the custom domain (`teraclay.com` / `www.teraclay.com`) is parked at Squarespace and forwards there. That's why `STOREFRONT_ORIGIN` (the widget's CORS allow-list) targets the myshopify origin, not the custom domain.
+- **Two Dev Dashboard apps — don't cross them**: dev **`Reviews`** (client id `90f4…`) on the dev store, and prod **`teraclay-reviews`** (client id `dabfe…`) on the live store. Each has its *own* Client ID + secret; using the wrong one yields "installation link invalid" (wrong client id) or "callback signature invalid" (wrong/whitespaced secret).
 
 ### Tech stack
 
